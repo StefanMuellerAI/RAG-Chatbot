@@ -1,4 +1,4 @@
-import ChatPanel from "@/components/ChatPanel";
+import ChatBereich from "@/components/ChatBereich";
 import { missingFor } from "@/lib/env";
 
 export const dynamic = "force-dynamic";
@@ -16,7 +16,7 @@ export default function ChatSeite() {
           danach ist ein erneutes Deployment noetig.
         </div>
       )}
-      <ChatPanel />
+      <ChatBereich />
     </>
   );
 }

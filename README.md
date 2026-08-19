@@ -69,6 +69,17 @@ Findet die Suche nichts Passendes, wird das Modell gar nicht erst befragt — di
 sagt dann, dass sie dazu nichts hat. Das ist Absicht: eine erfundene Antwort wäre
 schlimmer als keine.
 
+**Chat-Historie** — links neben dem Chatfenster stehen die bisherigen Gespräche. Die
+erste Frage legt automatisch einen Chat an und benennt ihn nach dieser Frage; umbenennen
+und löschen geht jederzeit. Während eine Antwort läuft, ist die Liste gesperrt, damit die
+Antwort im richtigen Chat landet.
+
+Der Verlauf liegt **ausschließlich im Browser** (`localStorage`, bis zu 50 Chats) — nichts
+davon geht an den Server. Das heißt umgekehrt: auf einem geteilten Rechner sieht die
+nächste Person die gespeicherten Fragen samt Dokumentauszügen. Dafür gibt es unten in der
+Liste „Alle Chats löschen". Auf einem anderen Gerät oder in einem anderen Browser ist der
+Verlauf entsprechend nicht vorhanden.
+
 **Admin** (`/admin`) — passwortgeschützt.
 
 - Dateien per Drag-and-drop oder Dateiauswahl einpflegen (mehrere gleichzeitig möglich)

@@ -241,6 +241,139 @@ textarea::placeholder {
   background: var(--grau-100);
 }
 
+/* --- Chat-Historie -------------------------------------------------------- */
+
+.chat-bereich {
+  display: grid;
+  /* minmax(0, …) statt schlichtem 1fr: ein Grid-Track schrumpft sonst nicht
+     unter die Min-Content-Breite seines Inhalts, und ein einzelner langer
+     Dateiname oder Chattitel wuerde die ganze Spalte aufblaehen. */
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.chat-bereich > * {
+  min-width: 0;
+}
+
+.verlauf {
+  background: var(--weiss);
+  border: 1px solid var(--grau-300);
+  padding: 14px;
+}
+
+/* Der Umschalter ist nur auf schmalen Schirmen sichtbar; auf breiten steht
+   die Liste ohnehin dauerhaft daneben. */
+.verlauf-umschalter {
+  display: none;
+}
+
+.verlauf-neu {
+  width: 100%;
+  margin-bottom: 12px;
+}
+
+.verlauf-leer {
+  color: var(--grau-600);
+  font-size: 13px;
+  margin: 0;
+}
+
+.verlauf-liste {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.verlauf-eintrag {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-left: 3px solid transparent;
+  padding-left: 5px;
+}
+
+.verlauf-eintrag:hover {
+  background: var(--grau-100);
+}
+
+/* Aktiver Eintrag mit rotem Balken — dieselbe Sprache wie die Antwortblasen. */
+.verlauf-eintrag.aktiv {
+  border-left-color: var(--rot);
+  background: var(--rot-hell);
+}
+
+.verlauf-titel {
+  font: inherit;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 8px 4px;
+  font-size: 14px;
+  color: var(--schwarz);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verlauf-eintrag.aktiv .verlauf-titel {
+  font-weight: 700;
+}
+
+.verlauf-aktion {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--grau-600);
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.verlauf-aktion:hover:not(:disabled) {
+  color: var(--rot-dunkel);
+  background: var(--weiss);
+}
+
+.verlauf-titel:disabled,
+.verlauf-aktion:disabled,
+.verlauf-alle-loeschen:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.verlauf-eingabe {
+  font-size: 14px;
+  padding: 6px 8px;
+}
+
+.verlauf-alle-loeschen {
+  font: inherit;
+  width: 100%;
+  margin-top: 12px;
+  padding: 7px 10px;
+  font-size: 13px;
+  background: none;
+  border: 1px solid var(--grau-300);
+  border-radius: 2px;
+  color: var(--grau-600);
+  cursor: pointer;
+}
+
+.verlauf-alle-loeschen:hover:not(:disabled) {
+  border-color: var(--rot);
+  color: var(--rot-dunkel);
+}
+
 /* --- Chat ----------------------------------------------------------------- */
 
 .chat {
@@ -513,6 +646,55 @@ th.zahl {
   max-width: var(--raster);
   margin: 0 auto;
   padding: 18px 20px;
+}
+
+/* --- Mittlere Breite: Historie klappt zusammen ---------------------------- */
+
+/* Unterhalb dieser Breite steht eine dauerhafte Seitenleiste nur im Weg.
+   Sie ruecht ueber den Chat und verbirgt sich hinter einem Knopf. */
+@media (max-width: 900px) {
+  .chat-bereich {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+  }
+
+  .verlauf {
+    padding: 0;
+    border: none;
+    background: none;
+  }
+
+  .verlauf-umschalter {
+    display: block;
+    width: 100%;
+    font: inherit;
+    font-weight: 700;
+    font-size: 14px;
+    text-align: left;
+    padding: 11px 14px;
+    background: var(--weiss);
+    border: 1px solid var(--grau-300);
+    border-radius: 2px;
+    color: var(--schwarz);
+    cursor: pointer;
+  }
+
+  .verlauf-umschalter:hover {
+    border-color: var(--rot);
+    color: var(--rot-dunkel);
+  }
+
+  .verlauf-inhalt {
+    display: none;
+  }
+
+  .verlauf-offen .verlauf-inhalt {
+    display: block;
+    margin-top: 10px;
+    padding: 14px;
+    background: var(--weiss);
+    border: 1px solid var(--grau-300);
+  }
 }
 
 /* --- Reduzierte Bewegung -------------------------------------------------- */
