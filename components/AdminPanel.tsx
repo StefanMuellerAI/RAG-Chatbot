@@ -2,7 +2,7 @@
 
 import { upload } from "@vercel/blob/client";
 import { useRouter } from "next/navigation";
-import { useRef, useState, useTransition } from "react";
+import { useState, useTransition } from "react";
 
 type Dokument = {
   id: string;
@@ -37,7 +37,6 @@ export default function AdminPanel({
   const [ueberAblage, setUeberAblage] = useState(false);
   const [bestaetigung, setBestaetigung] = useState("");
   const [leert, setLeert] = useState(false);
-  const dateiRef = useRef<HTMLInputElement>(null);
 
   /** Laedt die serverseitig gerenderte Liste neu. */
   function aktualisiereListe() {
@@ -185,7 +184,6 @@ export default function AdminPanel({
           }}
         >
           <input
-            ref={dateiRef}
             type="file"
             multiple
             accept={ERLAUBTE_ENDUNGEN.join(",")}

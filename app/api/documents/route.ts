@@ -3,12 +3,12 @@ import { chunkBlocks } from "@/lib/chunk";
 import {
   FILE_PREFIX,
   listDocuments,
+  readFile,
   saveDocument,
   type DocumentRecord,
 } from "@/lib/documents";
 import { MissingConfigError } from "@/lib/env";
 import { UnsupportedFileError, detectKind, extractBlocks } from "@/lib/extract";
-import { readFile } from "@/lib/documents";
 import { upsertChunks } from "@/lib/vector";
 
 export const runtime = "nodejs";
