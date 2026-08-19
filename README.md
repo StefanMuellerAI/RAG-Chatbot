@@ -65,6 +65,11 @@ Antwort stehen die verwendeten Fundstellen mit Datei- und Seitenangabe — zugek
 damit sie den Verlauf nicht zuschieben. Die Kopfzeile nennt bereits Trefferanzahl und
 Herkunftsdokumente; aufgeklappt wird nur, wenn man den Wortlaut nachlesen will.
 
+Antworten werden als Markdown dargestellt: Aufzählungen, Fettung, Tabellen, Code. Rohes
+HTML wird dabei bewusst **nicht** ausgeführt, sondern als Text angezeigt — der
+Antworttext ist über die hochgeladenen Dokumente beeinflussbar, und genau dort wäre sonst
+ein Einfallstor. Was Sie selbst eintippen, bleibt wörtlich stehen.
+
 Findet die Suche nichts Passendes, wird das Modell gar nicht erst befragt — die App
 sagt dann, dass sie dazu nichts hat. Das ist Absicht: eine erfundene Antwort wäre
 schlimmer als keine.

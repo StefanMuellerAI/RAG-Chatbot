@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import MarkdownText from "@/components/MarkdownText";
 import type { Nachricht, Quelle } from "@/lib/chatVerlauf";
 
 type Eigenschaften = {
@@ -57,10 +58,18 @@ export default function ChatPanel({ nachrichten, laeuft, onSenden }: Eigenschaft
                     : "blase blase-assistent"
               }
             >
-              {nachricht.content ||
-                (i === nachrichten.length - 1 && laeuft ? (
-                  <span className="tippt">Recherchiere in den Dokumenten &hellip;</span>
-                ) : null)}
+              {/* Nur Antworten werden als Markdown gerendert. Was jemand selbst
+                  eintippt, bleibt woertlich stehen — wer *Sternchen* schreibt,
+                  will Sternchen sehen. Fehlermeldungen ebenso. */}
+              {nachricht.content ? (
+                nachricht.role === "assistant" && !nachricht.fehler ? (
+                  <MarkdownText text={nachricht.content} />
+                ) : (
+                  nachricht.content
+                )
+              ) : i === nachrichten.length - 1 && laeuft ? (
+                <span className="tippt">Recherchiere in den Dokumenten &hellip;</span>
+              ) : null}
 
               {nachricht.sources && nachricht.sources.length > 0 && nachricht.content && (
                 // <details> statt eigenem State: der Browser uebernimmt das Auf- und

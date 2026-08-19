@@ -405,8 +405,15 @@ textarea::placeholder {
   max-width: 82%;
   padding: 14px 17px;
   border: 1px solid var(--grau-300);
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* `pre-wrap` nur dort, wo woertlicher Text steht. Auf der gemeinsamen Klasse
+   wuerden die Zeilenumbrueche *zwischen* den gerenderten Block-Elementen einer
+   Markdown-Antwort als zusaetzlicher Leerraum sichtbar. */
+.blase-nutzer,
+.blase-fehler {
+  white-space: pre-wrap;
 }
 
 .blase-nutzer {
@@ -430,6 +437,119 @@ textarea::placeholder {
 .tippt {
   color: var(--grau-600);
   font-style: italic;
+}
+
+/* --- Gerenderte Antwort --------------------------------------------------- */
+
+/* Aussen keine Raender: die Blase bringt ihren eigenen Innenabstand mit. */
+.markdown > :first-child {
+  margin-top: 0;
+}
+
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown p {
+  margin: 0 0 12px;
+}
+
+.markdown ul,
+.markdown ol {
+  margin: 0 0 12px;
+  padding-left: 22px;
+}
+
+.markdown li {
+  margin-bottom: 4px;
+}
+
+.markdown li > ul,
+.markdown li > ol {
+  margin: 4px 0 0;
+}
+
+/* Gedaempft — eine h1 in Originalgroesse waere in einer Chatblase absurd. */
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  margin: 18px 0 8px;
+  line-height: 1.3;
+  font-weight: 700;
+}
+
+.markdown h1 {
+  font-size: 18px;
+}
+
+.markdown h2 {
+  font-size: 17px;
+}
+
+.markdown h3,
+.markdown h4 {
+  font-size: 16px;
+}
+
+.markdown a {
+  color: var(--rot-dunkel);
+}
+
+.markdown code {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 0.9em;
+  background: var(--grau-100);
+  border: 1px solid var(--grau-200);
+  border-radius: 2px;
+  padding: 1px 5px;
+}
+
+.markdown pre {
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  background: var(--grau-100);
+  border: 1px solid var(--grau-300);
+  overflow-x: auto;
+}
+
+/* Im Block traegt das <pre> Rahmen und Flaeche — das <code> darin nicht noch einmal. */
+.markdown pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 13px;
+}
+
+.markdown blockquote {
+  margin: 0 0 12px;
+  padding-left: 14px;
+  border-left: 3px solid var(--grau-300);
+  color: var(--grau-600);
+}
+
+.markdown hr {
+  border: none;
+  border-top: 1px solid var(--grau-300);
+  margin: 16px 0;
+}
+
+.markdown .tabelle-huelle {
+  margin-bottom: 12px;
+}
+
+.markdown table {
+  font-size: 13px;
+}
+
+.markdown th,
+.markdown td {
+  border: 1px solid var(--grau-300);
+  padding: 7px 10px;
+  /* Das `overflow-wrap: anywhere` der Blase ist fuer Fliesstext gedacht und
+     wuerde hier "Reisepass" zu "Reisepa/ss" zerlegen. In der Tabelle uebernimmt
+     die scrollbare Huelle diese Aufgabe. */
+  overflow-wrap: normal;
 }
 
 .quellen {
