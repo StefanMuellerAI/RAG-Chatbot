@@ -143,8 +143,17 @@ export default function ChatPanel() {
                 ) : null)}
 
               {nachricht.sources && nachricht.sources.length > 0 && nachricht.content && (
-                <div className="quellen">
-                  <div className="quellen-titel">Fundstellen</div>
+                // <details> statt eigenem State: der Browser uebernimmt das Auf- und
+                // Zuklappen samt Tastaturbedienung. Der Zustand liegt im DOM, ein
+                // aufgeklappter Block bleibt also offen, waehrend weiter unten eine
+                // neue Antwort hereinstreamt.
+                <details className="quellen">
+                  <summary>
+                    <span className="quellen-anzahl">
+                      Fundstellen ({nachricht.sources.length})
+                    </span>
+                    <span className="quellen-dateien">{dateiliste(nachricht.sources)}</span>
+                  </summary>
                   <ol>
                     {nachricht.sources.map((quelle) => (
                       <li key={quelle.n}>
@@ -157,7 +166,7 @@ export default function ChatPanel() {
                       </li>
                     ))}
                   </ol>
-                </div>
+                </details>
               )}
             </div>
           ))}
@@ -194,4 +203,15 @@ export default function ChatPanel() {
       </div>
     </div>
   );
+}
+
+/**
+ * Eindeutige Dateinamen der Fundstellen.
+ *
+ * Steht in der zugeklappten Kopfzeile und beantwortet damit die haeufigste
+ * Frage — woher stammt das? — ohne dass man aufklappen muss. Mehrere Treffer
+ * kommen oft aus derselben Datei, deshalb dedupliziert.
+ */
+function dateiliste(quellen: Quelle[]): string {
+  return [...new Set(quellen.map((quelle) => quelle.filename))].join(", ");
 }

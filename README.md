@@ -61,7 +61,9 @@ npm run dev
 
 **Chat** (`/`) — ohne Anmeldung erreichbar. Die Frage wird in der Vektor-Datenbank
 gesucht, die besten Abschnitte gehen zusammen mit der Frage an Claude. Unter jeder
-Antwort stehen die verwendeten Fundstellen mit Datei- und Seitenangabe.
+Antwort stehen die verwendeten Fundstellen mit Datei- und Seitenangabe — zugeklappt,
+damit sie den Verlauf nicht zuschieben. Die Kopfzeile nennt bereits Trefferanzahl und
+Herkunftsdokumente; aufgeklappt wird nur, wenn man den Wortlaut nachlesen will.
 
 Findet die Suche nichts Passendes, wird das Modell gar nicht erst befragt — die App
 sagt dann, dass sie dazu nichts hat. Das ist Absicht: eine erfundene Antwort wäre

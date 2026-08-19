@@ -306,13 +306,61 @@ textarea::placeholder {
   font-size: 13px;
 }
 
-.quellen-titel {
+/* Zugeklappte Kopfzeile. Das Standard-Dreieck des Browsers weicht einem eigenen,
+   das zum rechtwinkligen, rot akzentuierten Grundton der Oberflaeche passt. */
+.quellen > summary {
+  cursor: pointer;
   font-weight: 700;
-  margin-bottom: 6px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  list-style: none;
+}
+
+.quellen > summary::-webkit-details-marker {
+  display: none;
+}
+
+.quellen > summary::before {
+  content: "";
+  flex: none;
+  align-self: center;
+  width: 0;
+  height: 0;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  border-left: 7px solid var(--rot);
+  transition: transform 120ms ease;
+}
+
+.quellen[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.quellen > summary:hover {
+  color: var(--rot-dunkel);
+}
+
+/* Die Beschriftung darf nie umbrechen. Als nackter Textknoten im Flex-Container
+   wuerde sie sonst zusammengequetscht und mitten im Wort getrennt. */
+.quellen-anzahl {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* Dateinamen als Herkunftshinweis — laufen bei Ueberlaenge einzeilig aus,
+   damit die Kopfzeile nicht selbst zum Absatz wird. */
+.quellen-dateien {
+  font-weight: 400;
+  color: var(--grau-600);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
 .quellen ol {
-  margin: 0;
+  margin: 10px 0 0;
   padding-left: 20px;
   color: var(--grau-600);
 }
@@ -467,11 +515,31 @@ th.zahl {
   padding: 18px 20px;
 }
 
+/* --- Reduzierte Bewegung -------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .quellen > summary::before {
+    transition: none;
+  }
+}
+
 /* --- Schmale Ansicht ------------------------------------------------------ */
 
 @media (max-width: 640px) {
   .blase {
     max-width: 100%;
+  }
+
+  /* Auf schmalen Schirmen ist neben der Beschriftung kein Platz mehr fuer die
+     Dateinamen — sie ruecken auf eine eigene Zeile, statt auf zwei Buchstaben
+     einzudampfen. */
+  .quellen > summary {
+    flex-wrap: wrap;
+  }
+
+  .quellen-dateien {
+    flex-basis: 100%;
+    padding-left: 15px;
   }
 
   .reiter-inner {
