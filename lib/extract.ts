@@ -4,9 +4,29 @@
  * Jede Funktion liefert Bloecke mit optionaler Fundstellenangabe (Seite bzw.
  * Tabellenblatt), damit spaetere Zitate im Chat auf etwas Konkretes zeigen
  * koennen statt nur auf den Dateinamen.
+ *
+ * Neu gegenueber der einfachen Variante sind zwei Angaben, die beide erst hier
+ * zu gewinnen sind:
+ *
+ *   seiten     — Grundlage der Kontingentpruefung. Die Seitenzahl steht vor der
+ *                Extraktion nicht fest: ein 400-seitiges PDF kann als 3-MB-Datei
+ *                ankommen und jede Groessenpruefung vorher bestehen.
+ *   kopfzeile  — die Spaltenueberschriften eines Tabellenblatts. Ohne sie ist
+ *                ein Zahlenblock aus der Mitte einer Tabelle bedeutungslos, und
+ *                genau solche Blocks entstehen beim Zerlegen.
  */
 
-export type ExtractedBlock = { text: string; location?: string };
+export type ExtractedBlock = {
+  text: string;
+  location?: string;
+  /** Spaltenueberschriften; wird beim Tabellen-Preset in jeden Abschnitt wiederholt. */
+  kopfzeile?: string;
+};
+
+export type Extraktion = {
+  bloecke: ExtractedBlock[];
+  seiten: number;
+};
 
 export const SUPPORTED_TYPES = {
   "application/pdf": "pdf",
@@ -46,7 +66,7 @@ export async function extractBlocks(
   buffer: ArrayBuffer,
   filename: string,
   mimeType?: string,
-): Promise<ExtractedBlock[]> {
+): Promise<Extraktion> {
   switch (detectKind(filename, mimeType)) {
     case "pdf":
       return extractPdf(buffer);
@@ -57,52 +77,86 @@ export async function extractBlocks(
   }
 }
 
-async function extractPdf(buffer: ArrayBuffer): Promise<ExtractedBlock[]> {
+async function extractPdf(buffer: ArrayBuffer): Promise<Extraktion> {
   const { extractText } = await import("unpdf");
-  // mergePages: false liefert je Seite einen Eintrag — so bleibt die
-  // Seitenzahl fuer die spaetere Quellenangabe erhalten.
+  // mergePages: false liefert je Seite einen Eintrag — so bleibt die Seitenzahl
+  // fuer die spaetere Quellenangabe erhalten.
   const { text } = await extractText(new Uint8Array(buffer), { mergePages: false });
 
-  return text
-    .map((pageText, i) => ({ text: normalise(pageText), location: `Seite ${i + 1}` }))
+  const bloecke = text
+    .map((seitentext, i) => ({ text: normalise(seitentext), location: `Seite ${i + 1}` }))
     .filter((block) => block.text.length > 0);
+
+  // Die Gesamtzahl der Seiten, nicht die der lesbaren: Ein Scan-PDF mit 300
+  // Seiten soll auch dann an der Seitengrenze scheitern, wenn keine davon Text
+  // enthaelt.
+  return { bloecke, seiten: text.length };
 }
 
-async function extractDocx(buffer: ArrayBuffer): Promise<ExtractedBlock[]> {
+/** Zeichen, die einer Textseite entsprechen — fuer Formate ohne Seitenbegriff. */
+const ZEICHEN_JE_SEITE = 3_000;
+
+async function extractDocx(buffer: ArrayBuffer): Promise<Extraktion> {
   const mammoth = (await import("mammoth")).default;
   const { value } = await mammoth.extractRawText({ buffer: Buffer.from(buffer) });
 
   const text = normalise(value);
-  return text ? [{ text }] : [];
+
+  // DOCX kennt keine Seiten — der Umbruch entsteht erst beim Druck. Fuer die
+  // Kontingentpruefung braucht es dennoch eine vergleichbare Groesse, deshalb
+  // wird gerechnet statt gezaehlt.
+  return {
+    bloecke: text ? [{ text }] : [],
+    seiten: Math.max(Math.ceil(text.length / ZEICHEN_JE_SEITE), text ? 1 : 0),
+  };
 }
 
-async function extractXlsx(buffer: ArrayBuffer): Promise<ExtractedBlock[]> {
+/** Tabellenzeilen, die einer Seite entsprechen. */
+const ZEILEN_JE_SEITE = 50;
+
+async function extractXlsx(buffer: ArrayBuffer): Promise<Extraktion> {
   const ExcelJS = (await import("exceljs")).default;
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(buffer);
 
-  const blocks: ExtractedBlock[] = [];
+  const bloecke: ExtractedBlock[] = [];
+  let zeilenGesamt = 0;
 
   workbook.eachSheet((sheet) => {
-    const rows: string[] = [];
+    const zeilen: string[] = [];
 
     sheet.eachRow((row) => {
-      const cells: string[] = [];
+      const zellen: string[] = [];
       row.eachCell({ includeEmpty: false }, (cell) => {
-        const value = cellToText(cell.value);
-        if (value) cells.push(value);
+        const wert = cellToText(cell.value);
+        if (wert) zellen.push(wert);
       });
-      // Zeilen als Pipe-getrennte Zeile — behaelt die Spaltenzuordnung
+      // Zeilen als pipe-getrennte Zeile — behaelt die Spaltenzuordnung
       // erkennbar, ohne den Text mit Formatierung aufzublaehen.
-      if (cells.length > 0) rows.push(cells.join(" | "));
+      if (zellen.length > 0) zeilen.push(zellen.join(" | "));
     });
 
-    if (rows.length > 0) {
-      blocks.push({ text: rows.join("\n"), location: `Tabellenblatt "${sheet.name}"` });
-    }
+    if (zeilen.length === 0) return;
+
+    zeilenGesamt += zeilen.length;
+
+    // Die erste Zeile gilt als Kopfzeile. Das ist eine Annahme, aber die weit
+    // ueberwiegend richtige — und wenn sie falsch ist, kostet sie nur eine
+    // zusaetzlich wiederholte Datenzeile je Abschnitt.
+    const [kopfzeile, ...rest] = zeilen;
+    const inhalt = rest.length > 0 ? rest : zeilen;
+
+    bloecke.push({
+      text: inhalt.join("\n"),
+      location: `Tabellenblatt "${sheet.name}"`,
+      ...(rest.length > 0 ? { kopfzeile } : {}),
+    });
   });
 
-  return blocks;
+  return {
+    bloecke,
+    seiten: Math.max(Math.ceil(zeilenGesamt / ZEILEN_JE_SEITE), bloecke.length > 0 ? 1 : 0),
+  };
 }
 
 /** ExcelJS-Zellwerte sind eine Union aus Primitiven, Formeln und Rich-Text. */

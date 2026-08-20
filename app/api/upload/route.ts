@@ -1,52 +1,76 @@
 import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
-import { NextResponse } from "next/server";
+import { and, eq } from "drizzle-orm";
+import { errorResponse } from "@/lib/api";
+import { requireKontext } from "@/lib/auth/user";
+import { getDb } from "@/lib/db";
+import { documents } from "@/lib/db/schema";
+import { pfadGehoertNutzer } from "@/lib/documents";
+import { requireEnv } from "@/lib/env";
 import { SUPPORTED_MIME_TYPES } from "@/lib/extract";
-import { MissingConfigError, requireEnv } from "@/lib/env";
 
 export const runtime = "nodejs";
-
-/** 100 MB — grosszuegig genug fuer umfangreiche Handbuecher. */
-const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 
 /**
  * Gibt ein kurzlebiges Token aus, mit dem der Browser die Datei *direkt* zu
  * Vercel Blob hochlaedt. Das umgeht das 4,5-MB-Limit fuer Request-Bodies von
- * Serverless-Funktionen, an dem ein normaler Formular-Upload scheitern wuerde.
+ * Serverless-Funktionen, an dem ein Formular-Upload scheitern wuerde.
  *
- * Der Zugriffsschutz liegt in proxy.ts — diese Route ist bereits gesperrt,
- * wenn sie erreicht wird.
+ * Die eigentliche Arbeit dieser Route ist die Pruefung des Pfades. Der Pfad
+ * kommt vom Browser, und ohne Pruefung koennte ein angemeldeter Nutzer in den
+ * Ablagebereich eines anderen schreiben. Zwei Bedingungen muessen gelten:
+ *
+ *   1. Der Pfad beginnt mit dem Praefix des Aufrufers.
+ *   2. Zu dem Pfad existiert ein angekuendigter Metadatensatz des Aufrufers
+ *      im Zustand "wartet".
+ *
+ * Die zweite Bedingung ist die wichtigere: Sie bindet jeden Upload an eine
+ * vorher erfolgte Kontingentpruefung. Ohne sie koennte man den Ablagebereich
+ * mit beliebig vielen Dateien fuellen, ohne je eine Grenze zu beruehren.
  */
 export async function POST(request: Request) {
   try {
+    const kontext = await requireKontext();
     requireEnv("BLOB_READ_WRITE_TOKEN");
-  } catch (error) {
-    if (error instanceof MissingConfigError) {
-      return NextResponse.json({ error: error.message }, { status: 503 });
-    }
-    throw error;
-  }
 
-  const body = (await request.json()) as HandleUploadBody;
+    const koerper = (await request.json()) as HandleUploadBody;
 
-  try {
-    const result = await handleUpload({
-      body,
+    const ergebnis = await handleUpload({
+      body: koerper,
       request,
-      onBeforeGenerateToken: async () => ({
-        allowedContentTypes: [...SUPPORTED_MIME_TYPES],
-        maximumSizeInBytes: MAX_UPLOAD_BYTES,
-        addRandomSuffix: true,
-      }),
-      // Kein onUploadCompleted: der Callback erreicht nur oeffentlich
-      // aufloesbare URLs und funktioniert lokal nicht. Die Verarbeitung
-      // stoesst stattdessen der Client per POST /api/documents an.
+      onBeforeGenerateToken: async (pathname) => {
+        if (!pfadGehoertNutzer(pathname, kontext.userId)) {
+          throw new Error("Dieser Ablagepfad gehoert nicht zu Ihrem Konto.");
+        }
+
+        const angekuendigt = await getDb().query.documents.findFirst({
+          where: and(
+            eq(documents.blobPath, pathname),
+            eq(documents.userId, kontext.userId),
+            eq(documents.status, "wartet"),
+          ),
+        });
+
+        if (!angekuendigt) {
+          throw new Error(
+            "Zu diesem Pfad liegt keine angekuendigte Datei vor. Bitte den Upload neu starten.",
+          );
+        }
+
+        return {
+          allowedContentTypes: [...SUPPORTED_MIME_TYPES],
+          maximumSizeInBytes: angekuendigt.sizeBytes + 1024,
+          // Der Pfad ist der Schluessel, unter dem der Metadatensatz die Datei
+          // wiederfindet. Ein Zufallssuffix wuerde ihn unauffindbar machen.
+          addRandomSuffix: false,
+        };
+      },
+      // Kein onUploadCompleted: der Rueckruf erreicht nur oeffentlich
+      // aufloesbare URLs und funktioniert lokal nicht. Die Verarbeitung stoesst
+      // stattdessen der Client an.
     });
 
-    return NextResponse.json(result);
+    return Response.json(ergebnis);
   } catch (error) {
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Upload fehlgeschlagen." },
-      { status: 400 },
-    );
+    return errorResponse(error);
   }
 }

@@ -1,20 +1,48 @@
-import { Index } from "@upstash/vector";
+import { Pinecone } from "@pinecone-database/pinecone";
 import { requireEnv } from "./env";
 
 /**
- * Zugriff auf die Upstash-Vector-Datenbank.
+ * Vektorsuche ueber Pinecone Serverless — ein Namespace je Sammlung.
  *
- * Der Index wird mit dem eingebauten Embedding-Modell "bge-m3" betrieben:
- * Upstash erzeugt die Vektoren serverseitig aus dem Rohtext. Dadurch braucht
- * die App keinen eigenen Embedding-Anbieter, und das Modell ist mehrsprachig,
- * was fuer deutschsprachige Dokumente entscheidend ist.
+ * Warum Namespaces und nicht ein Filter auf einem Metadatenfeld: Bei Pinecone
+ * richten sich die Abfragekosten nach der Groesse des angefragten Namespace
+ * (1 RU je GB, mindestens 0,25 RU). Eine Abfrage in einer kleinen Sammlung
+ * kostet damit das Minimum, egal wie viele Sammlungen es insgesamt gibt. Ein
+ * Metadatenfilter ueber einen gemeinsamen Namespace wuerde dagegen bei jeder
+ * Abfrage den gesamten Bestand abrechnen, denn gefiltert wird nach dem
+ * Durchsuchen. Bei 15.000 Nutzern ist das der Unterschied zwischen einer
+ * zweistelligen und einer fuenfstelligen Monatsrechnung.
+ *
+ * Zweiter Grund: Namespaces sind harte Trennwaende. Eine Abfrage erreicht
+ * genau einen Namespace. Ein vergessener Filter koennte fremde Dokumente
+ * offenlegen, ein falscher Namespace liefert schlicht nichts.
+ *
+ * Das Einbetten uebernimmt Pinecone selbst ("Integrated Inference") mit
+ * multilingual-e5-large. Damit bleibt es bei einem Dienst fuer Speichern und
+ * Einbetten, so wie es vorher mit Upstash war, und es braucht keinen zweiten
+ * Anbieter fuer die Vektoren.
  */
+
+/** Name des Feldes, das eingebettet wird. Muss zur fieldMap des Index passen. */
+export const TEXT_FELD = "chunk_text";
+
+export const EMBEDDING_MODELL = "multilingual-e5-large";
+
+/**
+ * Aehnlichkeitsschwelle.
+ *
+ * NEU KALIBRIERT gegenueber dem Vorgaenger: Dort galt 0,35 fuer bge-m3 mit
+ * Dot-Product. multilingual-e5-large arbeitet mit Cosine und legt seine Werte
+ * deutlich hoeher und enger zusammen — auch inhaltlich unpassende Abschnitte
+ * erreichen dort noch etwa 0,75. Der Wert unten trennt bei diesem Modell
+ * zwischen "hat mit der Frage zu tun" und "ist nur auch deutscher Text".
+ */
+export const MIN_SCORE = 0.82;
 
 export type ChunkMetadata = {
   docId: string;
   filename: string;
   chunkIndex: number;
-  /** Der Wortlaut liegt redundant in der Metadata, damit Treffer ihn sicher mitliefern. */
   text: string;
   /** Seitenzahl bzw. Tabellenblatt, sofern das Format so etwas kennt. */
   location?: string;
@@ -25,110 +53,194 @@ export type Hit = {
   metadata: ChunkMetadata;
 };
 
+/**
+ * Der Namespace einer Sammlung.
+ *
+ * Deterministisch aus der Sammlungs-ID. Dadurch braucht es keine zweite
+ * Zuordnungstabelle, und eine geloeschte Sammlung laesst sich restlos
+ * entfernen, ohne dass irgendwo eine Namensliste mitgefuehrt werden muss.
+ */
+export function namespaceFuer(collectionId: string): string {
+  return `col_${collectionId}`;
+}
+
 /** Erst im Request-Handler aufrufen, niemals auf Modulebene. */
-function getIndex(): Index<ChunkMetadata> {
-  const env = requireEnv("UPSTASH_VECTOR_REST_URL", "UPSTASH_VECTOR_REST_TOKEN");
-  return new Index<ChunkMetadata>({
-    url: env.UPSTASH_VECTOR_REST_URL,
-    token: env.UPSTASH_VECTOR_REST_TOKEN,
-  });
+function getIndex() {
+  const env = requireEnv("PINECONE_API_KEY", "PINECONE_INDEX");
+  const pinecone = new Pinecone({ apiKey: env.PINECONE_API_KEY });
+  return pinecone.index(env.PINECONE_INDEX);
 }
 
 /**
  * Chunk-IDs sind bewusst deterministisch praefixiert (`<docId>#<n>`).
- * Dadurch laesst sich ein komplettes Dokument spaeter mit einem einzigen
- * Praefix-Delete entfernen, ohne die IDs mitzufuehren.
+ * Ein komplettes Dokument laesst sich damit ohne mitgefuehrte ID-Liste
+ * entfernen.
  */
 function chunkId(docId: string, index: number): string {
   return `${docId}#${index}`;
 }
 
-const UPSERT_BATCH_SIZE = 50;
+/**
+ * Obergrenze je Schreibvorgang.
+ *
+ * Bei Integrated Inference bettet Pinecone serverseitig ein, und zu grosse
+ * Stapel laufen in Zeitueberschreitungen. 90 hat sich als vertraeglich
+ * erwiesen und laesst Luft zum harten Limit.
+ */
+const UPSERT_BATCH_SIZE = 90;
 
 export type UpsertChunk = { text: string; location?: string };
 
-/** Schreibt die Chunks eines Dokuments in den Index. */
+/** Schreibt die Abschnitte eines Dokuments in den Namespace einer Sammlung. */
 export async function upsertChunks(
+  collectionId: string,
   docId: string,
   filename: string,
   chunks: UpsertChunk[],
+  startIndex = 0,
 ): Promise<void> {
-  const index = getIndex();
+  const namespace = getIndex().namespace(namespaceFuer(collectionId));
 
   for (let offset = 0; offset < chunks.length; offset += UPSERT_BATCH_SIZE) {
-    const batch = chunks.slice(offset, offset + UPSERT_BATCH_SIZE).map((chunk, i) => ({
-      id: chunkId(docId, offset + i),
-      data: chunk.text,
-      metadata: {
+    const stapel = chunks.slice(offset, offset + UPSERT_BATCH_SIZE).map((chunk, i) => {
+      const nummer = startIndex + offset + i;
+      return {
+        _id: chunkId(docId, nummer),
+        [TEXT_FELD]: chunk.text,
         docId,
         filename,
-        chunkIndex: offset + i,
-        text: chunk.text,
+        chunkIndex: nummer,
         ...(chunk.location ? { location: chunk.location } : {}),
-      } satisfies ChunkMetadata,
-    }));
+      };
+    });
 
     try {
-      await index.upsert(batch);
+      await namespace.upsertRecords({ records: stapel });
     } catch (error) {
-      throw new Error(explainUpstashError(error), { cause: error });
+      throw new Error(erklaerePineconeFehler(error), { cause: error });
     }
   }
 }
 
-/** Sucht die relevantesten Abschnitte zu einer Frage. */
-export async function search(question: string, topK = 8): Promise<Hit[]> {
-  const index = getIndex();
+/** Sucht die relevantesten Abschnitte in EINER Sammlung. */
+export async function sucheInSammlung(
+  collectionId: string,
+  frage: string,
+  topK: number,
+): Promise<Hit[]> {
+  const namespace = getIndex().namespace(namespaceFuer(collectionId));
 
-  let results;
+  let antwort;
   try {
-    results = await index.query({ data: question, topK, includeMetadata: true });
+    antwort = await namespace.searchRecords({
+      query: { topK, inputs: { text: frage } },
+      fields: [TEXT_FELD, "docId", "filename", "chunkIndex", "location"],
+    });
   } catch (error) {
-    throw new Error(explainUpstashError(error), { cause: error });
+    // Ein Namespace, in den noch nichts geschrieben wurde, existiert bei
+    // Pinecone nicht. Eine frisch angelegte, leere Sammlung ist ein normaler
+    // Zustand und kein Fehler — sie liefert einfach keine Treffer.
+    if (istUnbekannterNamespace(error)) return [];
+    throw new Error(erklaerePineconeFehler(error), { cause: error });
   }
 
-  return results
-    .filter((result): result is typeof result & { metadata: ChunkMetadata } =>
-      Boolean(result.metadata?.text),
-    )
-    .map((result) => ({ score: result.score, metadata: result.metadata }));
+  const treffer: Hit[] = [];
+
+  for (const eintrag of antwort.result.hits) {
+    const felder = eintrag.fields as Record<string, unknown>;
+    const text = typeof felder[TEXT_FELD] === "string" ? felder[TEXT_FELD] : "";
+
+    // Ein Abschnitt ohne Wortlaut kann keine Antwort stuetzen und wuerde im
+    // Kontextblock nur einen leeren Platz belegen.
+    if (!text) continue;
+
+    treffer.push({
+      score: eintrag._score,
+      metadata: {
+        docId: String(felder.docId ?? ""),
+        filename: String(felder.filename ?? "Unbekannte Datei"),
+        chunkIndex: Number(felder.chunkIndex ?? 0),
+        text,
+        ...(typeof felder.location === "string" ? { location: felder.location } : {}),
+      },
+    });
+  }
+
+  return treffer;
 }
 
-/** Entfernt alle Chunks eines einzelnen Dokuments. */
-export async function deleteDocumentChunks(docId: string): Promise<number> {
-  const index = getIndex();
-  const { deleted } = await index.delete({ prefix: `${docId}#` });
-  return deleted;
+/** Entfernt alle Abschnitte eines einzelnen Dokuments. */
+export async function loescheDokumentChunks(
+  collectionId: string,
+  docId: string,
+  chunkCount: number,
+): Promise<void> {
+  if (chunkCount <= 0) return;
+
+  const namespace = getIndex().namespace(namespaceFuer(collectionId));
+
+  // Pinecone kennt kein Praefix-Delete. Weil die IDs aber deterministisch sind,
+  // lassen sie sich aus docId und Abschnittszahl rekonstruieren, ohne dass eine
+  // ID-Liste mitgefuehrt werden muesste.
+  const ids = Array.from({ length: chunkCount }, (_, i) => chunkId(docId, i));
+
+  // Das Limit fuer deleteMany liegt bei 1000 IDs je Aufruf.
+  for (let offset = 0; offset < ids.length; offset += 1000) {
+    try {
+      await namespace.deleteMany({ ids: ids.slice(offset, offset + 1000) });
+    } catch (error) {
+      if (istUnbekannterNamespace(error)) return;
+      throw new Error(erklaerePineconeFehler(error), { cause: error });
+    }
+  }
 }
 
-/** Leert die gesamte Collection inklusive aller Namespaces. */
-export async function resetCollection(): Promise<void> {
-  const index = getIndex();
-  await index.reset({ all: true });
+/** Entfernt den kompletten Namespace einer Sammlung. */
+export async function loescheSammlung(collectionId: string): Promise<void> {
+  try {
+    await getIndex().deleteNamespace(namespaceFuer(collectionId));
+  } catch (error) {
+    // Nie beschrieben, also nichts zu loeschen.
+    if (istUnbekannterNamespace(error)) return;
+    throw new Error(erklaerePineconeFehler(error), { cause: error });
+  }
 }
 
-/** Anzahl gespeicherter Vektoren — fuer die Anzeige im Admin-Bereich. */
-export async function vectorCount(): Promise<number> {
-  const index = getIndex();
-  const info = await index.info();
-  return info.vectorCount;
+/** Anzahl der Vektoren in einer Sammlung — fuer die Anzeige und Pruefzwecke. */
+export async function zaehleVektoren(collectionId: string): Promise<number> {
+  try {
+    const statistik = await getIndex().describeIndexStats();
+    return statistik.namespaces?.[namespaceFuer(collectionId)]?.recordCount ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+function istUnbekannterNamespace(error: unknown): boolean {
+  const meldung = error instanceof Error ? error.message : String(error);
+  return /namespace not found|not found.*namespace|404/i.test(meldung);
 }
 
 /**
- * Der mit Abstand haeufigste Konfigurationsfehler ist ein Index, der ohne
- * eingebautes Embedding-Modell angelegt wurde. Upstash antwortet darauf mit
- * einer generischen Meldung — hier wird daraus ein verwertbarer Hinweis.
+ * Der haeufigste Einrichtungsfehler ist ein Index, der ohne eingebautes
+ * Embedding-Modell angelegt wurde. Pinecone antwortet darauf mit einer
+ * generischen Meldung — hier wird daraus ein verwertbarer Hinweis.
  */
-function explainUpstashError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
+function erklaerePineconeFehler(error: unknown): string {
+  const meldung = error instanceof Error ? error.message : String(error);
 
-  if (/embedding|data|dimension/i.test(message)) {
+  if (/embed|field_map|fieldMap|integrated|dimension/i.test(meldung)) {
     return (
-      `Der Upstash-Index nimmt keinen Rohtext entgegen (${message}). ` +
+      `Der Pinecone-Index nimmt keinen Rohtext entgegen (${meldung}). ` +
       `Sehr wahrscheinlich wurde er ohne eingebautes Embedding-Modell angelegt. ` +
-      `Bitte in der Upstash-Konsole einen neuen Index mit dem Modell "bge-m3" erstellen ` +
-      `und UPSTASH_VECTOR_REST_URL / UPSTASH_VECTOR_REST_TOKEN entsprechend aktualisieren.`
+      `Bitte einmal "npm run pinecone:init" ausfuehren; das legt einen Index mit ` +
+      `dem Modell "${EMBEDDING_MODELL}" und dem Textfeld "${TEXT_FELD}" an.`
     );
   }
-  return `Zugriff auf die Vektor-Datenbank fehlgeschlagen: ${message}`;
+
+  if (/429|rate limit|too many requests/i.test(meldung)) {
+    return `Die Vektor-Datenbank ist derzeit ueberlastet (${meldung}).`;
+  }
+
+  return `Zugriff auf die Vektor-Datenbank fehlgeschlagen: ${meldung}`;
 }

@@ -7,12 +7,33 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "db:generate": "dotenv -e .env.local -- drizzle-kit generate",
+    "db:push": "dotenv -e .env.local -- drizzle-kit push",
+    "db:studio": "dotenv -e .env.local -- drizzle-kit studio",
+    "db:seed": "dotenv -e .env.local -- tsx scripts/seed.ts",
+    "pinecone:init": "dotenv -e .env.local -- tsx scripts/pinecone-init.ts",
+    "pruefe": "npm run pruefe:chunks && npm run pruefe:kontingente",
+    "pruefe:chunks": "tsx scripts/chunk-pruefung.ts",
+    "pruefe:kontingente": "tsx scripts/kontingent-pruefung.ts",
+    "migriere:altdaten": "dotenv -e .env.local -- tsx scripts/migriere-altdaten.ts",
+    "lasttest": "tsx scripts/lasttest.ts"
+  },
+  "engines": {
+    "node": ">=22"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.117.1",
-    "@upstash/vector": "^1.2.3",
+    "@ai-sdk/react": "^4.0.73",
+    "@clerk/localizations": "^4.15.4",
+    "@clerk/nextjs": "^7.7.9",
+    "@neondatabase/serverless": "^1.1.0",
+    "@pinecone-database/pinecone": "^8.2.0",
+    "@upstash/ratelimit": "^2.0.8",
+    "@upstash/redis": "^1.38.2",
     "@vercel/blob": "^2.8.0",
+    "@workflow/next": "^4.1.8",
+    "ai": "^7.0.70",
+    "drizzle-orm": "^0.45.2",
     "exceljs": "^4.4.0",
     "mammoth": "^1.12.1",
     "next": "^16.3.1",
@@ -21,14 +42,19 @@
     "react-markdown": "^10.1.0",
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
-    "unpdf": "^1.8.1"
+    "unpdf": "^1.8.1",
+    "workflow": "^4.8.4",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
+    "dotenv-cli": "^11.0.0",
+    "drizzle-kit": "^0.31.10",
     "eslint": "^9.20.0",
     "eslint-config-next": "^16.3.1",
+    "tsx": "^4.23.12",
     "typescript": "^5.7.3"
   }
 }

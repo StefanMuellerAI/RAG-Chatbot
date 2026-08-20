@@ -1,37 +1,57 @@
 "use client";
 
-import { useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import ChatPanel from "@/components/ChatPanel";
 import VerlaufListe from "@/components/VerlaufListe";
 import {
-  aktivSetzen,
   getServerSnapshot,
   getSnapshot,
+  initialisiere,
   nachrichtAnhaengen,
+  nachrichtenVon,
   neuerChat,
   subscribe,
+  verwerfeFehler,
+  waehleChat,
   type Nachricht,
   type Quelle,
 } from "@/lib/chatVerlauf";
 
 /**
- * Haelt Seitenleiste und Chatfenster zusammen: liest den Verlauf aus dem
- * Browser-Speicher, kennt den aktiven Chat und fuehrt die laufende Antwort.
+ * Haelt Seitenleiste und Chatfenster zusammen: liest den Verlauf vom Server,
+ * kennt den aktiven Chat und fuehrt die laufende Antwort.
  */
 export default function ChatBereich() {
-  const { chats, aktiveId } = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  const { chats, aktiveId, geladen, fehler } = useSyncExternalStore(
+    subscribe,
+    getSnapshot,
+    getServerSnapshot,
+  );
 
   /**
    * Die entstehende Antwort lebt bewusst nur im Komponenten-State. Jedes
-   * Textstueck sofort nach localStorage zu schreiben waeren hunderte
-   * Schreibvorgaenge pro Antwort — gespeichert wird erst, wenn sie steht.
+   * Textstueck sofort zu speichern waeren hunderte Schreibvorgaenge pro
+   * Antwort — gespeichert wird erst, wenn sie steht.
    */
   const [streamend, setStreamend] = useState<Nachricht | null>(null);
   const [laeuft, setLaeuft] = useState(false);
   const [listeOffen, setListeOffen] = useState(false);
 
-  const aktiverChat = chats.find((chat) => chat.id === aktiveId) ?? null;
-  const gespeichert = aktiverChat?.nachrichten ?? [];
+  /**
+   * Bricht eine laufende Antwort ab.
+   *
+   * Vorher fehlte das: Wer den Chat wechselte oder den Tab schloss, liess die
+   * Erzeugung weiterlaufen — und bezahlte sie zu Ende. Mit dem Signal endet
+   * auch der Modellaufruf auf dem Server.
+   */
+  const abbruch = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    void initialisiere();
+    return () => abbruch.current?.abort();
+  }, []);
+
+  const gespeichert = nachrichtenVon(aktiveId);
   const angezeigt = streamend ? [...gespeichert, streamend] : gespeichert;
 
   async function senden(frage: string) {
@@ -39,18 +59,23 @@ export default function ChatBereich() {
 
     // Beim allerersten Absenden entsteht der Chat. Vorher liegt kein leerer
     // Eintrag herum, nur weil jemand die Seite geoeffnet hat.
-    const chatId = aktiverChat?.id ?? neuerChat();
+    const chatId = aktiveId ?? (await neuerChat());
+    if (!chatId) return;
+
     const frageNachricht: Nachricht = { role: "user", content: frage };
 
-    nachrichtAnhaengen(chatId, frageNachricht);
+    // Der Verlauf fuer die Anfrage enthaelt nur echte Konversation —
+    // Fehlermeldungen aus frueheren Versuchen wuerden das Modell nur verwirren.
+    const verlauf = [...nachrichtenVon(chatId), frageNachricht]
+      .filter((nachricht) => !nachricht.fehler)
+      .map((nachricht) => ({ role: nachricht.role, content: nachricht.content }));
+
+    void nachrichtAnhaengen(chatId, frageNachricht);
     setLaeuft(true);
     setStreamend({ role: "assistant", content: "" });
 
-    // Der Verlauf fuer die API enthaelt nur echte Konversation — Fehlermeldungen
-    // aus frueheren Versuchen wuerden das Modell nur verwirren.
-    const verlauf = [...gespeichert, frageNachricht]
-      .filter((nachricht) => !nachricht.fehler)
-      .map((nachricht) => ({ role: nachricht.role, content: nachricht.content }));
+    const steuerung = new AbortController();
+    abbruch.current = steuerung;
 
     let antwort: Nachricht = { role: "assistant", content: "" };
     const uebernehmen = (naechste: Nachricht) => {
@@ -63,6 +88,7 @@ export default function ChatBereich() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: verlauf }),
+        signal: steuerung.signal,
       });
 
       if (!reaktion.ok || !reaktion.body) {
@@ -73,6 +99,7 @@ export default function ChatBereich() {
       const leser = reaktion.body.getReader();
       const decoder = new TextDecoder();
       let puffer = "";
+      let abgeschlossen = false;
 
       for (;;) {
         const { done, value } = await leser.read();
@@ -91,31 +118,68 @@ export default function ChatBereich() {
             uebernehmen({ ...antwort, sources: ereignis.sources as Quelle[] });
           } else if (ereignis.type === "text") {
             uebernehmen({ ...antwort, content: antwort.content + String(ereignis.delta) });
+          } else if (ereignis.type === "done") {
+            abgeschlossen = true;
           } else if (ereignis.type === "error") {
             uebernehmen({
               ...antwort,
               content: antwort.content || String(ereignis.message),
               fehler: true,
             });
+            abgeschlossen = true;
           }
         }
       }
 
-      if (antwort.content) nachrichtAnhaengen(chatId, antwort);
+      /**
+       * Ohne "done" ist die Antwort abgeschnitten.
+       *
+       * Vorher galt jedes Ende des Stroms als Abschluss. Riss die Verbindung
+       * oder lief die Funktion in ihr Zeitlimit, wurde die halbe Antwort als
+       * vollstaendig in den Verlauf uebernommen — in einem Wissensassistenten
+       * ist eine halbe Auskunft schlimmer als keine.
+       */
+      if (!abgeschlossen) {
+        uebernehmen({
+          ...antwort,
+          content:
+            (antwort.content ? `${antwort.content}\n\n` : "") +
+            "*Die Antwort wurde unterbrochen und ist unvollstaendig. Bitte die Frage erneut stellen.*",
+          fehler: true,
+        });
+      }
+
+      if (antwort.content) await nachrichtAnhaengen(chatId, antwort);
+
+      setStreamend(null);
+      setLaeuft(false);
     } catch (error) {
+      // Ein Abbruch durch den Nutzer ist kein Fehler, der angezeigt werden muss.
+      if (steuerung.signal.aborted) {
+        setStreamend(null);
+        setLaeuft(false);
+        return;
+      }
+
       // Die Frage bleibt gespeichert, die Fehlermeldung nicht: eine
-      // Fehlermeldung von gestern hilft beim Zurueckspringen niemandem.
+      // Fehlermeldung von gestern hilft beim Zuruecksprigen niemandem.
       setStreamend({
         role: "assistant",
         content: error instanceof Error ? error.message : "Unbekannter Fehler.",
         fehler: true,
       });
       setLaeuft(false);
-      return;
+    } finally {
+      abbruch.current = null;
     }
+  }
 
+  function wechsle(id: string | null) {
+    abbruch.current?.abort();
     setStreamend(null);
     setLaeuft(false);
+    void waehleChat(id);
+    setListeOffen(false);
   }
 
   return (
@@ -123,22 +187,28 @@ export default function ChatBereich() {
       <VerlaufListe
         chats={chats}
         aktiveId={aktiveId}
+        geladen={geladen}
         gesperrt={laeuft}
         offen={listeOffen}
         onUmschalten={() => setListeOffen((offen) => !offen)}
-        onWaehlen={(id) => {
-          aktivSetzen(id);
-          setStreamend(null);
-          setListeOffen(false);
-        }}
+        onWaehlen={(id) => wechsle(id)}
         onNeu={() => {
-          neuerChat();
+          abbruch.current?.abort();
           setStreamend(null);
+          setLaeuft(false);
+          void neuerChat();
           setListeOffen(false);
         }}
       />
 
-      <ChatPanel nachrichten={angezeigt} laeuft={laeuft} onSenden={senden} />
+      <div>
+        {fehler && (
+          <div className="meldung" onClick={verwerfeFehler} role="status">
+            {fehler}
+          </div>
+        )}
+        <ChatPanel nachrichten={angezeigt} laeuft={laeuft} onSenden={senden} />
+      </div>
     </div>
   );
 }

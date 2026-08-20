@@ -1,49 +1,35 @@
-import { NextResponse, type NextRequest } from "next/server";
-import { SESSION_COOKIE, verifySessionToken } from "@/lib/auth";
+import { clerkMiddleware } from "@clerk/nextjs/server";
 
 /**
- * Zugriffsschutz fuer den Admin-Bereich und alle schreibenden Routen.
- * Der Chat (`/` und `/api/chat`) bleibt bewusst offen.
+ * Stellt die Clerk-Sitzung fuer Seiten und Routen bereit.
  *
  * Seit Next 16 heisst diese Konvention `proxy` statt `middleware`.
+ *
+ * Hier wird bewusst NICHT geschuetzt. Der naheliegende Weg — ein Muster aller
+ * geschuetzten Pfade und `auth.protect()` an dieser Stelle — ist von Clerk
+ * ausdruecklich verworfen, und der Grund ist einleuchtend: Ein Pfadmuster kann
+ * von dem abweichen, wie Next.js Anfragen tatsaechlich zuordnet, und dann steht
+ * eine geschuetzte Ressource offen, obwohl das Muster sie zu decken scheint. Bei
+ * einer mandantenfaehigen Anwendung wiegt dieser Unterschied schwer.
+ *
+ * Stattdessen prueft jede Ressource selbst, und zwar dort, wo sie auf Daten
+ * zugreift:
+ *
+ *   Seiten      requireKontextFuerSeite() — leitet zur Anmeldung
+ *   API-Routen  requireKontext() / requireUserId() / requireAdmin() — liefern 401 bzw. 403
+ *
+ * Das ist nicht nur die sicherere, sondern auch die genauere Antwort: Eine
+ * API-Route soll 401 mit JSON liefern und keine Weiterleitung auf eine
+ * HTML-Seite, an der ein `fetch` im Browser scheitert.
  */
+export default clerkMiddleware();
+
 export const config = {
   matcher: [
-    "/admin/:path*",
-    "/api/upload",
-    "/api/documents",
-    "/api/documents/:path*",
-    "/api/collection",
+    // Interne Next-Pfade und statische Dateien auslassen, sofern sie nicht
+    // in den Suchparametern auftauchen.
+    "/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)",
+    // Fuer API-Routen immer laufen.
+    "/(api|trpc)(.*)",
   ],
 };
-
-export async function proxy(request: NextRequest) {
-  const secret = process.env.AUTH_SECRET;
-  const isApi = request.nextUrl.pathname.startsWith("/api/");
-
-  // Ohne AUTH_SECRET laesst sich keine Sitzung pruefen. Dann wird zugesperrt
-  // statt durchgewunken — sonst stuende der Admin bei fehlender Konfiguration
-  // versehentlich offen.
-  if (!secret) {
-    return isApi
-      ? NextResponse.json(
-          { error: "AUTH_SECRET ist nicht gesetzt. Der Admin-Bereich bleibt gesperrt." },
-          { status: 503 },
-        )
-      : redirectToLogin(request, "config");
-  }
-
-  const token = request.cookies.get(SESSION_COOKIE)?.value;
-  if (await verifySessionToken(token, secret)) return NextResponse.next();
-
-  return isApi
-    ? NextResponse.json({ error: "Nicht angemeldet." }, { status: 401 })
-    : redirectToLogin(request, "auth");
-}
-
-function redirectToLogin(request: NextRequest, reason: string) {
-  const url = new URL("/login", request.url);
-  url.searchParams.set("grund", reason);
-  url.searchParams.set("weiter", request.nextUrl.pathname);
-  return NextResponse.redirect(url);
-}

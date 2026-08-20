@@ -1,38 +1,37 @@
-import { NextResponse } from "next/server";
-import { getDocument, readFile } from "@/lib/documents";
+import { errorResponse } from "@/lib/api";
+import { requireKontext } from "@/lib/auth/user";
+import { ladeDokument, leseDatei } from "@/lib/documents";
+import { NotFoundError } from "@/lib/errors";
 
 export const runtime = "nodejs";
 
 /**
- * Liefert die Originaldatei aus. Die Blobs liegen privat im Store, deshalb
- * laeuft der Download bewusst ueber diese Route — sie ist von proxy.ts
- * geschuetzt, eine direkte Blob-URL waere es nicht.
+ * Liefert die Originaldatei aus.
+ *
+ * Die Blobs liegen privat im Store, der Download laeuft deshalb ueber diese
+ * Route. Entscheidend ist die Zugehoerigkeitspruefung in `ladeDokument`: Der
+ * Proxy stellt nur fest, dass jemand angemeldet ist. Ohne die Pruefung hier
+ * koennte jeder angemeldete Nutzer mit einer geratenen ID die Dokumente aller
+ * anderen herunterladen.
  */
-export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
-  const { id } = await context.params;
-
+export async function GET(_request: Request, kontextparameter: { params: Promise<{ id: string }> }) {
   try {
-    const record = await getDocument(id);
-    if (!record) {
-      return NextResponse.json({ error: "Dokument nicht gefunden." }, { status: 404 });
-    }
+    const kontext = await requireKontext();
+    const { id } = await kontextparameter.params;
 
-    const stream = await readFile(record.filePath);
-    if (!stream) {
-      return NextResponse.json({ error: "Datei nicht gefunden." }, { status: 404 });
-    }
+    const satz = await ladeDokument(kontext.userId, id);
 
-    return new Response(stream, {
+    const strom = await leseDatei(satz.blobPath);
+    if (!strom) throw new NotFoundError("Die Datei");
+
+    return new Response(strom, {
       headers: {
-        "Content-Type": record.contentType,
-        "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(record.filename)}`,
+        "Content-Type": satz.contentType,
+        "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(satz.filename)}`,
         "Cache-Control": "no-store",
       },
     });
   } catch (error) {
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unbekannter Fehler." },
-      { status: 500 },
-    );
+    return errorResponse(error);
   }
 }
