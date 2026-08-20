@@ -142,6 +142,24 @@ export async function POST(request: Request) {
       },
       messages: nachrichten,
       tools: werkzeuge,
+      /**
+       * Im ersten Schritt MUSS gesucht werden.
+       *
+       * Ohne diesen Zwang koennte das Modell die Frage direkt beantworten, ohne
+       * ein einziges Dokument gesehen zu haben. Es entstuende eine Antwort ohne
+       * Fundstellen — also genau das, was diese Anwendung nicht liefern soll.
+       * Die Systemanweisung sagt es auch, aber eine Anweisung ist eine Bitte
+       * und keine Schranke.
+       *
+       * Nur im ersten Schritt: Danach soll das Modell entscheiden koennen, ob
+       * es mit dem Gefundenen antwortet oder noch einmal anders sucht.
+       */
+      prepareStep: werkzeuge
+        ? ({ stepNumber }) =>
+            stepNumber === 0
+              ? { toolChoice: { type: "tool" as const, toolName: "dokumente_durchsuchen" } }
+              : {}
+        : undefined,
       stopWhen: isStepCount(MAX_SCHRITTE),
       // Schliesst der Nutzer den Tab, wird die Erzeugung abgebrochen statt bis
       // zum Ende bezahlt.
