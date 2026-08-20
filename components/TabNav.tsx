@@ -3,23 +3,33 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-const REITER = [
+const GRUNDREITER = [
   { href: "/", label: "Chat" },
-  { href: "/admin", label: "Admin" },
+  { href: "/sammlungen", label: "Sammlungen" },
 ];
 
-export default function TabNav() {
+export default function TabNav({ istAdmin }: { istAdmin: boolean }) {
   const pathname = usePathname();
+
+  // Der Reiter erscheint nur mit Rolle. Das ist Bequemlichkeit, kein Schutz —
+  // die Berechtigung selbst prueft jede Admin-Route eigenstaendig.
+  const reiter = istAdmin
+    ? [...GRUNDREITER, { href: "/admin", label: "Administration" }]
+    : GRUNDREITER;
 
   return (
     <nav className="reiter" aria-label="Bereiche">
       <div className="reiter-inner">
-        {REITER.map((reiter) => {
+        {reiter.map((eintrag) => {
           const aktiv =
-            reiter.href === "/" ? pathname === "/" : pathname.startsWith(reiter.href);
+            eintrag.href === "/" ? pathname === "/" : pathname.startsWith(eintrag.href);
           return (
-            <Link key={reiter.href} href={reiter.href} aria-current={aktiv ? "page" : undefined}>
-              {reiter.label}
+            <Link
+              key={eintrag.href}
+              href={eintrag.href}
+              aria-current={aktiv ? "page" : undefined}
+            >
+              {eintrag.label}
             </Link>
           );
         })}

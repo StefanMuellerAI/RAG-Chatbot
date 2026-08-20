@@ -19,6 +19,7 @@
   "dependencies": {
     "@ai-sdk/react": "^4.0.73",
     "@anthropic-ai/sdk": "^0.117.1",
+    "@clerk/localizations": "^4.15.4",
     "@clerk/nextjs": "^7.7.9",
     "@neondatabase/serverless": "^1.1.0",
     "@pinecone-database/pinecone": "^8.2.0",
@@ -36,7 +37,6 @@
     "react-markdown": "^10.1.0",
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
-    "svix": "^2.0.0",
     "unpdf": "^1.8.1",
     "zod": "^4.4.3"
   },
