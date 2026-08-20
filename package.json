@@ -13,7 +13,9 @@
     "db:studio": "dotenv -e .env.local -- drizzle-kit studio",
     "db:seed": "dotenv -e .env.local -- tsx scripts/seed.ts",
     "pinecone:init": "dotenv -e .env.local -- tsx scripts/pinecone-init.ts",
+    "pruefe": "npm run pruefe:chunks && npm run pruefe:kontingente",
     "pruefe:chunks": "tsx scripts/chunk-pruefung.ts",
+    "pruefe:kontingente": "tsx scripts/kontingent-pruefung.ts",
     "migriere:altdaten": "dotenv -e .env.local -- tsx scripts/migriere-altdaten.ts",
     "lasttest": "tsx scripts/lasttest.ts"
   },

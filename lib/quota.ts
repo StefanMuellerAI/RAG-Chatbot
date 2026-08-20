@@ -38,7 +38,10 @@ export async function pruefeNeueSammlung(kontext: Kontext): Promise<void> {
 }
 
 /** Darf der Nutzer eine Sammlung dieser Groessenklasse anlegen? */
-export function pruefeGroessenklasse(kontext: Kontext, klasse: SizeClass): void {
+export function pruefeGroessenklasse(
+  kontext: Kontext,
+  klasse: Pick<SizeClass, "id" | "rank">,
+): void {
   if (klasse.rank > kontext.maxSizeClass.rank) {
     throw new QuotaError(
       `Ihr Plan "${kontext.plan.label}" reicht bis zur Groessenklasse ` +

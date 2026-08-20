@@ -181,6 +181,26 @@ machte.
 
 ---
 
+## Prüfungen
+
+```bash
+npm run pruefe            # beide zusammen
+npm run pruefe:chunks     # die drei Zerlegungsstrategien
+npm run pruefe:kontingente # Grenzen der Pläne und Größenklassen
+npm run typecheck
+npm run lint
+```
+
+Kein Testframework, weil es um zwei Sätze reiner Funktionen geht. Beide sind aber die
+Stellen, an denen ein Fehler teuer wird: Die Zerlegung entscheidet, was zitiert wird, die
+Kontingente entscheiden, was ein Nutzer anlegen darf. Ein Fehler dort fällt entweder nie
+auf, weil zu lasch, oder erst beim Nutzer, weil zu streng.
+
+Die Kontingentprüfung testet ausdrücklich die Grenzen selbst — genau am Limit muss es noch
+gehen, einen Schritt darüber nicht mehr.
+
+---
+
 ## Aufbau
 
 ```
