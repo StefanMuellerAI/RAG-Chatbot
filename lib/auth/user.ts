@@ -5,6 +5,7 @@ import { getDb } from "../db";
 import { seedStammdaten } from "../db/seed";
 import { plans, sizeClasses, users } from "../db/schema";
 import type { Plan, SizeClass } from "../db/schema";
+import { ausZwischenspeicher, kontextSchluessel } from "../ratelimit";
 
 /**
  * Bruecke zwischen Clerk und der eigenen Datenbank.
@@ -29,12 +30,20 @@ export class NotAdminError extends Error {
   }
 }
 
-/** Nutzer samt aufgeloestem Plan und dessen hoechster Groessenklasse. */
+/**
+ * Nutzer samt aufgeloestem Plan und dessen hoechster Groessenklasse.
+ *
+ * Ohne `updatedAt`, und das mit Bedacht: Der Kontext wird in Redis
+ * zwischengespeichert, und daraus kommen Datumsangaben als Zeichenketten
+ * zurueck. Ein Feld vom Typ Date zu fuehren, das zur Laufzeit ein String ist,
+ * waere eine Falle fuer den naechsten, der darauf `getFullYear` aufruft.
+ * Gebraucht wird es hier ohnehin nicht.
+ */
 export type Kontext = {
   userId: string;
   isAdmin: boolean;
-  plan: Plan;
-  maxSizeClass: SizeClass;
+  plan: Omit<Plan, "updatedAt">;
+  maxSizeClass: Omit<SizeClass, "updatedAt">;
 };
 
 /**
@@ -94,8 +103,24 @@ async function ladeKontext(clerkUserId: string): Promise<Kontext | null> {
     .select({
       userId: users.clerkUserId,
       isAdmin: users.isAdmin,
-      plan: plans,
-      maxSizeClass: sizeClasses,
+      plan: {
+        id: plans.id,
+        label: plans.label,
+        maxSizeClassId: plans.maxSizeClassId,
+        maxCollections: plans.maxCollections,
+        maxQuestionsPerDay: plans.maxQuestionsPerDay,
+        modelId: plans.modelId,
+        isDefault: plans.isDefault,
+      },
+      maxSizeClass: {
+        id: sizeClasses.id,
+        label: sizeClasses.label,
+        rank: sizeClasses.rank,
+        maxDocuments: sizeClasses.maxDocuments,
+        maxPagesPerDocument: sizeClasses.maxPagesPerDocument,
+        maxTotalPages: sizeClasses.maxTotalPages,
+        maxFileBytes: sizeClasses.maxFileBytes,
+      },
     })
     .from(users)
     .innerJoin(plans, eq(users.planId, plans.id))
@@ -109,16 +134,30 @@ async function ladeKontext(clerkUserId: string): Promise<Kontext | null> {
 /**
  * Der Kontext des angemeldeten Nutzers, oder null.
  *
- * `cache` aus React haelt das Ergebnis fuer die Dauer EINES Requests fest.
- * Ohne das wuerde eine Seite, die Layout, Kontingentanzeige und Datenliste
- * rendert, denselben Nutzer dreimal aus der Datenbank lesen.
+ * Zwei Ebenen von Zwischenspeicherung, die verschiedene Dinge tun:
+ *
+ * `cache` aus React haelt das Ergebnis fuer die Dauer EINES Requests fest. Ohne
+ * das wuerde eine Seite, die Layout, Kontingentanzeige und Datenliste rendert,
+ * denselben Nutzer dreimal aus der Datenbank lesen.
+ *
+ * Redis haelt es darueber hinaus eine Minute lang. Plan, Rolle und
+ * Groessenklasse aendern sich nur durch eine Admin-Entscheidung, werden aber bei
+ * jeder Frage gebraucht — bei 5.000 Fragen pro Minute waeren das 5.000
+ * Datenbankabfragen fuer unveraenderte Werte. Der Preis dafuer ist, dass eine
+ * Planaenderung bis zu eine Minute braucht, bis sie greift.
  */
 export const getKontext = cache(async (): Promise<Kontext | null> => {
   const { userId } = await auth();
   if (!userId) return null;
 
-  return (await ladeKontext(userId)) ?? (await anlegenFallsNoetig(userId));
+  return ausZwischenspeicher(
+    kontextSchluessel(userId),
+    KONTEXT_LEBENSDAUER_SEKUNDEN,
+    async () => (await ladeKontext(userId)) ?? (await anlegenFallsNoetig(userId)),
+  );
 });
+
+const KONTEXT_LEBENSDAUER_SEKUNDEN = 60;
 
 /** Wie `getKontext`, wirft aber statt null zu liefern. */
 export async function requireKontext(): Promise<Kontext> {

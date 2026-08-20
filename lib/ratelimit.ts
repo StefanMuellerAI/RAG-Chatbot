@@ -151,6 +151,63 @@ export async function leseTagesstand(userId: string): Promise<number> {
   }
 }
 
+/**
+ * Kurzlebiger Zwischenspeicher fuer Werte, die sich selten aendern.
+ *
+ * Gedacht fuer den Nutzerkontext auf dem Frageweg: Plan, Rolle und
+ * Groessenklasse werden bei jeder Frage gebraucht, aendern sich aber nur, wenn
+ * ein Admin etwas umstellt. Bei 5.000 Fragen pro Minute waeren das
+ * 5.000 Datenbankabfragen fuer Werte, die eine Minute lang dieselben bleiben.
+ *
+ * Die Lebensdauer ist die Obergrenze dafuer, wie lange eine Planaenderung
+ * braucht, bis sie greift. Eine Minute ist der vertretbare Tausch: kurz genug,
+ * dass es niemandem auffaellt, lang genug, um die Last zu nehmen.
+ */
+export async function ausZwischenspeicher<T>(
+  schluessel: string,
+  lebensdauerSekunden: number,
+  laden: () => Promise<T>,
+): Promise<T> {
+  let redis: Redis;
+  try {
+    redis = getRedis();
+  } catch {
+    // Ohne Redis laeuft die Anwendung weiter, nur ohne Zwischenspeicher. Ein
+    // fehlender Cache darf nie zum Ausfall fuehren.
+    return laden();
+  }
+
+  try {
+    const gespeichert = await redis.get<T>(schluessel);
+    if (gespeichert !== null && gespeichert !== undefined) return gespeichert;
+  } catch {
+    // Lesefehler: einfach frisch laden.
+  }
+
+  const frisch = await laden();
+
+  try {
+    await redis.set(schluessel, frisch, { ex: lebensdauerSekunden });
+  } catch {
+    // Schreibfehler aendern am Ergebnis nichts.
+  }
+
+  return frisch;
+}
+
+/** Verwirft einen zwischengespeicherten Wert, etwa nach einer Planaenderung. */
+export async function verwirfZwischenspeicher(schluessel: string): Promise<void> {
+  try {
+    await getRedis().del(schluessel);
+  } catch {
+    // Der Wert verfaellt ohnehin von selbst.
+  }
+}
+
+export function kontextSchluessel(userId: string): string {
+  return `wa:kontext:${userId}`;
+}
+
 function tagesschluessel(): string {
   return new Date().toISOString().slice(0, 10);
 }

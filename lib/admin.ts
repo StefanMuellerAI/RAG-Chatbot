@@ -11,6 +11,7 @@ import {
 import type { Plan, SizeClass } from "./db/schema";
 import { ValidationError } from "./errors";
 import { isKnownModel } from "./models";
+import { kontextSchluessel, verwirfZwischenspeicher } from "./ratelimit";
 
 /**
  * Datenzugriff des Admin-Bereichs.
@@ -138,6 +139,12 @@ export async function speicherePlan(eingabe: PlanEingabe): Promise<void> {
     .values({ id: eingabe.id, ...werte })
     .onConflictDoUpdate({ target: plans.id, set: werte });
 
+  // Hinweis zur Wirkung: Der Nutzerkontext liegt bis zu eine Minute im
+  // Zwischenspeicher. Eine Aenderung an der Plan-DEFINITION greift daher
+  // fuer die betroffenen Nutzer erst innerhalb der naechsten Minute. Anders als
+  // bei der Zuweisung eines Plans an eine einzelne Person wird hier bewusst
+  // nicht verworfen: Das betraefe alle Nutzer des Plans, und ein Admin, der
+  // Grenzen anpasst, wartet nicht auf die sekundengenaue Wirkung.
   if (!eingabe.isDefault) {
     await speichern;
     return;
@@ -257,6 +264,11 @@ export async function setzeNutzerPlan(clerkUserId: string, planId: string): Prom
     .update(users)
     .set({ planId, updatedAt: new Date() })
     .where(eq(users.clerkUserId, clerkUserId));
+
+  // Der Nutzerkontext liegt eine Minute im Zwischenspeicher. Ohne diesen
+  // Aufruf wuerde der Admin die Umstellung speichern, in der Nutzerliste sofort
+  // sehen — und der Nutzer haette bis zu eine Minute noch die alten Grenzen.
+  await verwirfZwischenspeicher(kontextSchluessel(clerkUserId));
 }
 
 export async function setzeAdminRolle(
@@ -276,6 +288,8 @@ export async function setzeAdminRolle(
     .update(users)
     .set({ isAdmin: istAdmin, updatedAt: new Date() })
     .where(eq(users.clerkUserId, clerkUserId));
+
+  await verwirfZwischenspeicher(kontextSchluessel(clerkUserId));
 }
 
 // --- Verbrauch --------------------------------------------------------------
