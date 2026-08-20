@@ -1,5 +1,6 @@
 import Link from "next/link";
 import ChatBereich from "@/components/ChatBereich";
+import NichtBereit from "@/components/NichtBereit";
 import { requireKontextFuerSeite } from "@/lib/auth/user";
 import { ladeSammlungen } from "@/lib/collections";
 import { missingFor } from "@/lib/env";
@@ -9,16 +10,7 @@ export const dynamic = "force-dynamic";
 
 export default async function ChatSeite() {
   const fehlt = missingFor("chat");
-  if (fehlt.length > 0) {
-    return (
-      <div className="meldung">
-        <b>Der Assistent ist noch nicht einsatzbereit.</b> Es fehlen folgende
-        Environment-Variablen: <code>{fehlt.join(", ")}</code>. Sie werden im Vercel-Projekt
-        unter <i>Settings &rarr; Environment Variables</i> hinterlegt; danach ist ein
-        erneutes Deployment noetig.
-      </div>
-    );
-  }
+  if (fehlt.length > 0) return <NichtBereit bereich="Der Assistent" fehlt={fehlt} />;
 
   const kontext = await requireKontextFuerSeite("/");
   const [sammlungen, verbraucht] = await Promise.all([

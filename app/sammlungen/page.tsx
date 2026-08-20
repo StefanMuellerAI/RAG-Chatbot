@@ -1,3 +1,4 @@
+import NichtBereit from "@/components/NichtBereit";
 import SammlungenBereich from "@/components/SammlungenBereich";
 import { requireKontextFuerSeite } from "@/lib/auth/user";
 import { erlaubteGroessenklassen, ladeSammlungen } from "@/lib/collections";
@@ -9,12 +10,7 @@ export const dynamic = "force-dynamic";
 export default async function SammlungenSeite() {
   const fehlt = missingFor("collections");
   if (fehlt.length > 0) {
-    return (
-      <div className="meldung">
-        <b>Die Dokumentenverwaltung ist noch nicht einsatzbereit.</b> Es fehlen folgende
-        Environment-Variablen: <code>{fehlt.join(", ")}</code>.
-      </div>
-    );
+    return <NichtBereit bereich="Die Dokumentenverwaltung" fehlt={fehlt} />;
   }
 
   const kontext = await requireKontextFuerSeite("/sammlungen");

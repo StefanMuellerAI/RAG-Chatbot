@@ -1,4 +1,5 @@
 import AdminKonsole from "@/components/AdminKonsole";
+import NichtBereit from "@/components/NichtBereit";
 import {
   ladeGroessenklassen,
   ladeNutzer,
@@ -18,14 +19,7 @@ export default async function AdminSeite({
   searchParams: Promise<{ suche?: string; seite?: string }>;
 }) {
   const fehlt = missingFor("admin");
-  if (fehlt.length > 0) {
-    return (
-      <div className="meldung">
-        <b>Die Administration ist noch nicht einsatzbereit.</b> Es fehlen folgende
-        Environment-Variablen: <code>{fehlt.join(", ")}</code>.
-      </div>
-    );
-  }
+  if (fehlt.length > 0) return <NichtBereit bereich="Die Administration" fehlt={fehlt} />;
 
   // Zur Anmeldung, wenn niemand angemeldet ist. Ist jemand angemeldet, hat aber
   // die Rolle nicht, bleibt es bei einer Erklaerung statt einer Weiterleitung -
