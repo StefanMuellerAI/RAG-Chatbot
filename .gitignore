@@ -9,3 +9,8 @@ build
 .vercel
 next-env.d.ts
 *.tsbuildinfo
+/.swc
+
+# Vom Workflow SDK beim Build erzeugte Routen und Artefakte
+app/.well-known
+.well-known

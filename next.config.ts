@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import { withWorkflow } from "workflow/next";
 
 const nextConfig: NextConfig = {
   // Die Dokument-Parser bringen eigene Worker/Binaries mit und vertragen sich
@@ -6,4 +7,6 @@ const nextConfig: NextConfig = {
   serverExternalPackages: ["unpdf", "mammoth", "exceljs"],
 };
 
-export default nextConfig;
+// Schaltet die Direktiven "use workflow" und "use step" frei, auf denen die
+// Dokumentverarbeitung aufsetzt.
+export default withWorkflow(nextConfig);

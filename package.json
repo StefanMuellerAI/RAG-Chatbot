@@ -29,6 +29,7 @@
     "@upstash/redis": "^1.38.2",
     "@upstash/vector": "^1.2.3",
     "@vercel/blob": "^2.8.0",
+    "@workflow/next": "^4.1.8",
     "ai": "^7.0.70",
     "drizzle-orm": "^0.45.2",
     "exceljs": "^4.4.0",
@@ -40,6 +41,7 @@
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
     "unpdf": "^1.8.1",
+    "workflow": "^4.8.4",
     "zod": "^4.4.3"
   },
   "devDependencies": {

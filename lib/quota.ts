@@ -56,8 +56,8 @@ export function pruefeGroessenklasse(kontext: Kontext, klasse: SizeClass): void 
  * Anzahl der Dokumente und Dateigroesse.
  */
 export function pruefeNeuesDokument(
-  sammlung: Collection,
-  klasse: SizeClass,
+  sammlung: Pick<Collection, "name" | "documentCount">,
+  klasse: Pick<SizeClass, "id" | "maxDocuments" | "maxFileBytes">,
   dateiGroesse: number,
 ): void {
   if (sammlung.documentCount >= klasse.maxDocuments) {
@@ -87,9 +87,16 @@ export function pruefeNeuesDokument(
  * 3-MB-Datei ankommen und alle Groessenpruefungen vorher bestehen — die
  * Seitengrenze ist deshalb nicht nachtraeglich, sondern zwingend zweistufig.
  */
+/*
+ * Beide Pruefungen nehmen nur die Felder, die sie wirklich lesen. Das ist keine
+ * Kosmetik: Der Ingestion-Ablauf hat an dieser Stelle keine vollstaendigen
+ * Datensaetze zur Hand, sondern nur die Werte, die er durch seine Schritte
+ * traegt — mit den vollen Typen liesse sich die Pruefung dort nur ueber
+ * vorgetaeuschte Objekte aufrufen.
+ */
 export function pruefeSeitenzahl(
-  sammlung: Collection,
-  klasse: SizeClass,
+  sammlung: Pick<Collection, "name" | "pageCount">,
+  klasse: Pick<SizeClass, "id" | "maxPagesPerDocument" | "maxTotalPages">,
   seiten: number,
 ): void {
   if (seiten > klasse.maxPagesPerDocument) {
