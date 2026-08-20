@@ -1,135 +1,287 @@
-import type Anthropic from "@anthropic-ai/sdk";
-import { MODEL, SYSTEM_PROMPT, buildContext, getClient } from "@/lib/anthropic";
-import { MissingConfigError } from "@/lib/env";
-import { search, type Hit } from "@/lib/vector";
+import { isStepCount, streamText, type ModelMessage } from "ai";
+import { errorResponse, readJson } from "@/lib/api";
+import {
+  Fundstellensammler,
+  SYSTEM_ANWEISUNG,
+  baueKatalog,
+  baueKontextblock,
+  baueSuchwerkzeug,
+  modell,
+  sucheMitSchwelle,
+} from "@/lib/ai";
+import { requireKontext } from "@/lib/auth/user";
+import { ladeSammlungen } from "@/lib/collections";
+import { ValidationError } from "@/lib/errors";
+import { DEFAULT_MODEL_ID, isKnownModel } from "@/lib/models";
+import { gibFrageZurueck, pruefeFragekontingent } from "@/lib/ratelimit";
+import { verbucheFrage } from "@/lib/verbrauch";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+/**
+ * 300 Sekunden statt der bisherigen 60.
+ *
+ * Der Vorgaenger brach bei 60 Sekunden mitten im Stream ab, und der Client
+ * speicherte die halbe Antwort als vollstaendig. Mit Werkzeugaufrufen kommen
+ * jetzt mehrere Modelldurchlaeufe hinzu, und bei Ueberlast wiederholt das
+ * Gateway - 60 Sekunden waeren damit regelmaessig zu knapp.
+ */
+export const maxDuration = 300;
 
-/** Treffer unterhalb dieser Aehnlichkeit sind erfahrungsgemaess Rauschen. */
-const MIN_SCORE = 0.35;
-const TOP_K = 8;
+/** Obergrenzen fuer das, was der Client schicken darf. */
+const MAX_RUNDEN = 8;
+const MAX_ZEICHEN_JE_NACHRICHT = 8_000;
+/** Hoechstens zwei Suchen und eine Antwort. */
+const MAX_SCHRITTE = 3;
 
-type ClientMessage = { role: "user" | "assistant"; content: string };
+type ClientNachricht = { role: "user" | "assistant"; content: string };
 
 export async function POST(request: Request) {
-  const { messages } = (await request.json().catch(() => ({}))) as {
-    messages?: ClientMessage[];
-  };
+  let userId: string | null = null;
+  let kontingentVerbraucht = false;
 
-  const history = (messages ?? []).filter(
-    (message) =>
-      (message.role === "user" || message.role === "assistant") &&
-      typeof message.content === "string" &&
-      message.content.trim().length > 0,
-  );
-
-  const question = [...history].reverse().find((message) => message.role === "user")?.content;
-  if (!question) {
-    return Response.json({ error: "Es wurde keine Frage uebermittelt." }, { status: 400 });
-  }
-
-  let hits: Hit[];
   try {
-    hits = (await search(question, TOP_K)).filter((hit) => hit.score >= MIN_SCORE);
-  } catch (error) {
-    return errorResponse(error);
-  }
+    const kontext = await requireKontext();
+    userId = kontext.userId;
 
-  // Ohne Fundstellen wird das Modell gar nicht erst befragt: es koennte die
-  // Antwort nur erfinden, und genau das soll hier nicht passieren.
-  if (hits.length === 0) {
-    return ndjsonResponse([
-      { type: "sources", sources: [] },
-      {
-        type: "text",
-        delta:
-          "Dazu finde ich nichts in der hinterlegten Dokumentensammlung. " +
-          "Moeglicherweise ist das passende Dokument noch nicht eingepflegt, " +
-          "oder die Frage laesst sich anders formulieren.",
+    const { messages } = await readJson<{ messages?: ClientNachricht[] }>(request);
+    const verlauf = bereinigeVerlauf(messages);
+
+    const frage = [...verlauf].reverse().find((n) => n.role === "user")?.content;
+    if (!frage) throw new ValidationError("Es wurde keine Frage uebermittelt.");
+
+    // Kontingente vor jeder Arbeit. Eine abgewiesene Frage soll nichts kosten,
+    // auch keine Vektorsuche.
+    await pruefeFragekontingent(kontext.userId, kontext.plan.maxQuestionsPerDay);
+    kontingentVerbraucht = true;
+
+    const sammlungen = await ladeSammlungen(kontext.userId);
+
+    if (sammlungen.length === 0) {
+      await gibFrageZurueck(kontext.userId);
+      return ndjsonAntwort([
+        { type: "sources", sources: [] },
+        {
+          type: "text",
+          delta:
+            "Sie haben noch keine Sammlung angelegt. Unter **Sammlungen** koennen Sie eine " +
+            "anlegen und Dokumente einpflegen; danach beantworte ich Fragen dazu.",
+        },
+        { type: "done" },
+      ]);
+    }
+
+    const modelId = isKnownModel(kontext.plan.modelId)
+      ? kontext.plan.modelId
+      : DEFAULT_MODEL_ID;
+
+    const sammler = new Fundstellensammler();
+
+    /**
+     * Bei genau einer Sammlung gibt es nichts auszuwaehlen: direkt suchen und
+     * den Kontext der Frage voranstellen, ohne Werkzeug. Das spart einen
+     * vollstaendigen Modelldurchlauf, und weil die meisten Nutzer mit einer
+     * Sammlung arbeiten, ist es der wirksamste einzelne Einspareffekt im
+     * ganzen Frageweg.
+     */
+    const einzeln = sammlungen.length === 1;
+    let anweisung = SYSTEM_ANWEISUNG;
+    let werkzeuge: Record<string, ReturnType<typeof baueSuchwerkzeug>> | undefined;
+    let nachrichten: ModelMessage[];
+
+    if (einzeln) {
+      const eintraege = sammler.fuegeHinzu(
+        await sucheMitSchwelle(sammlungen[0], frage),
+        sammlungen[0].name,
+      );
+
+      // Ohne Fundstellen wird das Modell gar nicht erst befragt: es koennte die
+      // Antwort nur erfinden, und genau das soll hier nicht passieren.
+      if (eintraege.length === 0) {
+        await gibFrageZurueck(kontext.userId);
+        return ndjsonAntwort([
+          { type: "sources", sources: [] },
+          {
+            type: "text",
+            delta:
+              `Dazu finde ich nichts in "${sammlungen[0].name}". Moeglicherweise ist das ` +
+              `passende Dokument noch nicht eingepflegt, oder die Frage laesst sich anders ` +
+              `formulieren.`,
+          },
+          { type: "done" },
+        ]);
+      }
+
+      nachrichten = verlauf.map((nachricht, i) =>
+        i === verlauf.length - 1 && nachricht.role === "user"
+          ? {
+              role: "user" as const,
+              content: `${baueKontextblock(eintraege)}\n\nFrage: ${nachricht.content}`,
+            }
+          : { role: nachricht.role, content: nachricht.content },
+      );
+    } else {
+      anweisung = `${SYSTEM_ANWEISUNG}\n\n${baueKatalog(sammlungen)}`;
+      werkzeuge = { dokumente_durchsuchen: baueSuchwerkzeug(kontext.userId, sammler) };
+      nachrichten = verlauf.map((nachricht) => ({
+        role: nachricht.role,
+        content: nachricht.content,
+      }));
+    }
+
+    const ergebnis = streamText({
+      model: modell(modelId),
+      // Systemanweisung und Sammlungskatalog aendern sich zwischen den Fragen
+      // eines Nutzers nicht. Als Cache-Marke gekennzeichnet zaehlen sie nicht
+      // gegen das Minutenlimit des Anbieters und kosten ein Zehntel - bei
+      // mehrstufigen Werkzeugaufrufen, die den Prompt jedes Mal erneut senden,
+      // ist das der Unterschied zwischen tragbar und nicht tragbar.
+      instructions: {
+        role: "system",
+        content: anweisung,
+        providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } },
       },
-      { type: "done" },
-    ]);
-  }
+      messages: nachrichten,
+      tools: werkzeuge,
+      stopWhen: isStepCount(MAX_SCHRITTE),
+      // Schliesst der Nutzer den Tab, wird die Erzeugung abgebrochen statt bis
+      // zum Ende bezahlt.
+      abortSignal: request.signal,
+    });
 
-  let client;
-  try {
-    client = getClient();
-  } catch (error) {
-    return errorResponse(error);
-  }
+    const encoder = new TextEncoder();
 
-  const apiMessages: Anthropic.MessageParam[] = history.map((message, i) =>
-    i === history.length - 1 && message.role === "user"
-      ? { role: "user", content: `${buildContext(hits)}\n\nFrage: ${message.content}` }
-      : { role: message.role, content: message.content },
-  );
+    /**
+     * Eigenes NDJSON-Protokoll statt des UI-Message-Formats des SDK, weil die
+     * Oberflaeche die Fundstellen als eigenes Ereignis braucht: Sie stehen
+     * unter der Antwort in einer einklappbaren Liste und sind kein Teil des
+     * Antworttextes.
+     *
+     * Die Uebersetzung steht hier und nicht in einer Hilfsfunktion, weil der
+     * Teiltyp des Modellstroms von der Werkzeugmenge abhaengt und vom SDK nicht
+     * als benennbarer Typ exportiert wird. An dieser Stelle kennt TypeScript
+     * ihn genau und verengt in den Zweigen korrekt.
+     */
+    const strom = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        let offen = true;
+        let bereitsGesendet = 0;
 
-  const encoder = new TextEncoder();
-  const sources = hits.map((hit, i) => ({
-    n: i + 1,
-    filename: hit.metadata.filename,
-    location: hit.metadata.location ?? null,
-    score: Math.round(hit.score * 1000) / 1000,
-    snippet: hit.metadata.text.slice(0, 240),
-  }));
+        const sende = (ereignis: unknown) => {
+          if (!offen) return;
+          try {
+            controller.enqueue(encoder.encode(`${JSON.stringify(ereignis)}\n`));
+          } catch {
+            // Der Empfaenger ist weg. Weiterschreiben wuerde nur werfen.
+            offen = false;
+          }
+        };
 
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const send = (event: unknown) =>
-        controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+        try {
+          for await (const teil of ergebnis.stream) {
+            if (teil.type === "text-delta") {
+              sende({ type: "text", delta: teil.text });
+              continue;
+            }
 
-      send({ type: "sources", sources });
+            // Nach jedem Werkzeugergebnis stehen neue Fundstellen bereit. Sie
+            // gehen sofort raus, damit die Oberflaeche schon waehrend der
+            // laufenden Antwort zeigen kann, worauf diese sich stuetzt.
+            if (teil.type === "tool-result" && sammler.alle.length > bereitsGesendet) {
+              bereitsGesendet = sammler.alle.length;
+              sende({ type: "sources", sources: sammler.alle });
+              continue;
+            }
 
-      try {
-        const messageStream = client.messages.stream({
-          model: MODEL,
-          max_tokens: 4096,
-          system: SYSTEM_PROMPT,
-          messages: apiMessages,
-          // Denken bleibt aktiv (auf Opus 5 der Standard), wird aber gedrosselt:
-          // Der Chat soll zuegig antworten, nicht maximal gruebeln.
-          output_config: { effort: "medium" },
-        });
+            if (teil.type === "error") {
+              sende({ type: "error", message: lesbarerFehler(teil.error) });
+            }
+          }
 
-        for await (const event of messageStream) {
-          if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-            send({ type: "text", delta: event.delta.text });
+          // Auf dem Weg ohne Werkzeug gibt es kein tool-result; die Fundstellen
+          // stehen dort von Anfang an fest.
+          if (bereitsGesendet === 0 && sammler.alle.length > 0) {
+            sende({ type: "sources", sources: sammler.alle });
+          }
+
+          sende({ type: "done" });
+
+          // Erst nach dem Ende verbuchen: vorher steht die Tokenzahl nicht fest.
+          await verbucheFrage(kontext.userId, modelId, await ergebnis.usage);
+        } catch (error) {
+          sende({ type: "error", message: lesbarerFehler(error) });
+        } finally {
+          offen = false;
+          try {
+            controller.close();
+          } catch {
+            // Bereits geschlossen, weil der Empfaenger abgebrochen hat.
           }
         }
+      },
+    });
 
-        send({ type: "done" });
-      } catch (error) {
-        send({
-          type: "error",
-          message: error instanceof Error ? error.message : "Unbekannter Fehler.",
-        });
-      } finally {
-        controller.close();
-      }
-    },
-  });
-
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "application/x-ndjson; charset=utf-8",
-      "Cache-Control": "no-store",
-      "X-Accel-Buffering": "no",
-    },
-  });
+    return new Response(strom, {
+      headers: {
+        "Content-Type": "application/x-ndjson; charset=utf-8",
+        "Cache-Control": "no-store",
+        "X-Accel-Buffering": "no",
+      },
+    });
+  } catch (error) {
+    // Kam keine Antwort zustande, wandert die Frage ins Kontingent zurueck.
+    if (userId && kontingentVerbraucht) await gibFrageZurueck(userId);
+    return errorResponse(error);
+  }
 }
 
-function ndjsonResponse(events: unknown[]): Response {
-  return new Response(events.map((event) => `${JSON.stringify(event)}\n`).join(""), {
-    headers: {
-      "Content-Type": "application/x-ndjson; charset=utf-8",
-      "Cache-Control": "no-store",
-    },
-  });
+/**
+ * Verlauf bereinigen und begrenzen.
+ *
+ * Der Vorgaenger nahm den Verlauf ungeprueft an; die einzige Grenze war das
+ * 4,5-MB-Limit fuer Request-Bodies. Ein einzelner Aufrufer konnte damit
+ * Anfragen mit sechsstelliger Tokenzahl stellen und in Minuten das Monatsbudget
+ * des Modellanbieters aufbrauchen. Beides wird hier gekappt.
+ */
+function bereinigeVerlauf(messages: ClientNachricht[] | undefined): ClientNachricht[] {
+  const gueltig = (messages ?? [])
+    .filter(
+      (nachricht) =>
+        (nachricht?.role === "user" || nachricht?.role === "assistant") &&
+        typeof nachricht.content === "string" &&
+        nachricht.content.trim().length > 0,
+    )
+    .map((nachricht) => ({
+      role: nachricht.role,
+      content: nachricht.content.slice(0, MAX_ZEICHEN_JE_NACHRICHT),
+    }));
+
+  // Die letzten Runden sind die, auf die sich Rueckfragen beziehen. Aeltere
+  // tragen zur Antwort kaum bei, kosten aber in jedem Schritt erneut Token.
+  return gueltig.slice(-MAX_RUNDEN * 2);
 }
 
-function errorResponse(error: unknown): Response {
-  const status = error instanceof MissingConfigError ? 503 : 500;
-  const message = error instanceof Error ? error.message : "Unbekannter Fehler.";
-  return Response.json({ error: message }, { status });
+function ndjsonAntwort(ereignisse: unknown[]): Response {
+  return new Response(
+    ereignisse.map((ereignis) => `${JSON.stringify(ereignis)}\n`).join(""),
+    {
+      headers: {
+        "Content-Type": "application/x-ndjson; charset=utf-8",
+        "Cache-Control": "no-store",
+      },
+    },
+  );
+}
+
+function lesbarerFehler(error: unknown): string {
+  const meldung = error instanceof Error ? error.message : String(error);
+
+  if (/429|rate.?limit|too many requests/i.test(meldung)) {
+    return "Der Modellanbieter ist derzeit ausgelastet. Bitte in einem Moment erneut versuchen.";
+  }
+
+  if (/abort/i.test(meldung)) {
+    return "Die Antwort wurde abgebrochen.";
+  }
+
+  return meldung;
 }

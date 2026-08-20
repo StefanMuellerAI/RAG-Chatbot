@@ -1,33 +1,44 @@
-import { NextResponse } from "next/server";
-import { deleteDocument, getDocument } from "@/lib/documents";
-import { MissingConfigError } from "@/lib/env";
-import { deleteDocumentChunks } from "@/lib/vector";
+import { errorResponse } from "@/lib/api";
+import { requireKontext } from "@/lib/auth/user";
+import {
+  entferneDokumentSatz,
+  ladeDokument,
+  loescheDatei,
+} from "@/lib/documents";
+import { loescheDokumentChunks } from "@/lib/vector";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 120;
 
-/** Entfernt ein einzelnes Dokument samt aller zugehoerigen Abschnitte. */
-export async function DELETE(_request: Request, context: { params: Promise<{ id: string }> }) {
-  const { id } = await context.params;
+type Kontextparameter = { params: Promise<{ id: string }> };
 
+/**
+ * Entfernt ein einzelnes Dokument samt Abschnitten und Originaldatei.
+ *
+ * `ladeDokument` fuehrt die Nutzer-ID in der Abfrage mit — eine fremde
+ * Dokument-ID fuehrt damit zu 404 und nicht zu einer Loeschung. Beim
+ * Vorgaenger genuegte hier die Sitzung, weil es nur einen Nutzer gab.
+ */
+export async function DELETE(_request: Request, kontextparameter: Kontextparameter) {
   try {
-    const record = await getDocument(id);
-    if (!record) {
-      return NextResponse.json({ error: "Dokument nicht gefunden." }, { status: 404 });
-    }
+    const kontext = await requireKontext();
+    const { id } = await kontextparameter.params;
 
-    // Erst die Abschnitte: bliebe der Metadatensatz als einziger stehen,
-    // waere das Dokument im Admin sichtbar und im Chat unauffindbar. Andersherum
-    // waeren die Abschnitte verwaist und ueber die Oberflaeche nicht mehr loeschbar.
-    const deleted = await deleteDocumentChunks(id);
-    await deleteDocument(record);
+    const satz = await ladeDokument(kontext.userId, id);
 
-    return NextResponse.json({ ok: true, deletedChunks: deleted });
+    // Erst die Abschnitte: bliebe der Metadatensatz als einziger stehen, waere
+    // das Dokument in der Uebersicht sichtbar und im Chat unauffindbar.
+    // Andersherum waeren die Abschnitte verwaist und ueber die Oberflaeche nicht
+    // mehr loeschbar — sie wuerden weiter in Antworten zitiert.
+    await loescheDokumentChunks(satz.collectionId, satz.id, satz.chunkCount);
+    await loescheDatei(satz.blobPath).catch(() => {
+      // Eine fehlende Datei ist kein Grund, den Vorgang abzubrechen: das Ziel
+      // ist erreicht, wenn sie am Ende nicht mehr da ist.
+    });
+    await entferneDokumentSatz(satz);
+
+    return Response.json({ ok: true });
   } catch (error) {
-    const status = error instanceof MissingConfigError ? 503 : 500;
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unbekannter Fehler." },
-      { status },
-    );
+    return errorResponse(error);
   }
 }
