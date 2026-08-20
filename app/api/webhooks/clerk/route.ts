@@ -1,9 +1,11 @@
 import { verifyWebhook } from "@clerk/nextjs/webhooks";
 import { eq } from "drizzle-orm";
 import type { NextRequest } from "next/server";
+import { start } from "workflow/api";
 import { getDb } from "@/lib/db";
 import { seedStammdaten } from "@/lib/db/seed";
-import { plans, users, webhookDeliveries } from "@/lib/db/schema";
+import { collections, plans, users, webhookDeliveries } from "@/lib/db/schema";
+import { raeumeNutzerAb } from "@/workflows/aufraeumen";
 
 export const runtime = "nodejs";
 
@@ -42,10 +44,6 @@ export async function POST(request: NextRequest) {
         break;
 
       case "user.deleted":
-        // Collections, Dokumente, Chats und Nachrichten haengen per
-        // ON DELETE CASCADE an der Nutzerzeile und verschwinden mit ihr.
-        // Was NICHT mitgeht, sind Blobs und Pinecone-Namespaces; die raeumt
-        // der Aufraeumlauf ab (siehe lib/aufraeumen.ts).
         if (ereignis.data.id) await nutzerLoeschen(ereignis.data.id);
         break;
 
@@ -106,8 +104,29 @@ async function nutzerSpeichern(daten: ClerkNutzer): Promise<void> {
     });
 }
 
+/**
+ * Loescht einen Nutzer samt allem, was an ihm haengt.
+ *
+ * Reihenfolge ist hier entscheidend: Die Sammlungs-IDs muessen VOR dem Loeschen
+ * gelesen werden. Danach sind sie durch ON DELETE CASCADE verschwunden, und
+ * damit auch die einzige Spur, die zu den Namespaces in Pinecone fuehrt — die
+ * Vektoren blieben unauffindbar liegen.
+ *
+ * Das Abraeumen selbst laeuft als Ablauf und nicht hier: Ein Nutzer mit hundert
+ * Sammlungen zieht hundert Loeschvorgaenge nach sich, und der Webhook muss
+ * zuegig antworten, sonst stellt Svix erneut zu.
+ */
 async function nutzerLoeschen(clerkUserId: string): Promise<void> {
-  await getDb().delete(users).where(eq(users.clerkUserId, clerkUserId));
+  const db = getDb();
+
+  const eigene = await db
+    .select({ id: collections.id })
+    .from(collections)
+    .where(eq(collections.userId, clerkUserId));
+
+  await db.delete(users).where(eq(users.clerkUserId, clerkUserId));
+
+  await start(raeumeNutzerAb, [clerkUserId, eigene.map((zeile) => zeile.id)]);
 }
 
 async function standardplan(): Promise<string> {
