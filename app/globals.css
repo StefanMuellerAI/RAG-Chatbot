@@ -171,6 +171,72 @@ a {
   margin: 0 0 16px;
 }
 
+.karte-zusatz {
+  font-weight: 400;
+  color: var(--grau-600);
+  font-size: 15px;
+}
+
+.zeile-zusatz {
+  color: var(--grau-600);
+  font-size: 13px;
+}
+
+/* --- Kennzahlen ----------------------------------------------------------- */
+
+.kennzahlen {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1px;
+  background: var(--grau-300);
+  border: 1px solid var(--grau-300);
+}
+
+.kennzahl {
+  background: var(--weiss);
+  padding: 16px 18px;
+}
+
+.kennzahl-wert {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+
+.kennzahl-beschriftung {
+  color: var(--grau-600);
+  font-size: 13px;
+  margin-top: 2px;
+}
+
+/* --- Suche und Blaettern -------------------------------------------------- */
+
+.suchzeile {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 16px;
+  max-width: 520px;
+}
+
+.suchzeile input {
+  padding: 8px 11px;
+  font-size: 14px;
+}
+
+.suchzeile .knopf-schlicht {
+  flex: none;
+}
+
+.blaetterleiste {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 16px;
+  font-size: 14px;
+  color: var(--grau-600);
+}
+
 /* --- Bedienelemente ------------------------------------------------------- */
 
 .knopf {
@@ -222,7 +288,9 @@ a {
 
 input[type="text"],
 input[type="password"],
-textarea {
+input[type="number"],
+textarea,
+select {
   font: inherit;
   width: 100%;
   padding: 11px 13px;
@@ -235,6 +303,32 @@ textarea {
 input::placeholder,
 textarea::placeholder {
   color: var(--grau-600);
+}
+
+/* Kompakte Varianten fuer Eingaben, die in Tabellenzellen stehen. Ohne die
+   engere Polsterung wuerde eine Zeile mit sieben Zahlenfeldern doppelt so hoch,
+   und der Vergleich zwischen den Groessenklassen - der eigentliche Zweck der
+   Tabelle - verliert seine Uebersichtlichkeit. */
+.feld-schmal,
+.feld-zahl {
+  padding: 6px 8px;
+  font-size: 14px;
+}
+
+.feld-zahl {
+  width: 92px;
+  text-align: right;
+}
+
+td .feld-schmal {
+  min-width: 130px;
+}
+
+td select {
+  padding: 6px 8px;
+  font-size: 14px;
+  width: auto;
+  min-width: 90px;
 }
 
 /* --- Meldungen ------------------------------------------------------------ */
