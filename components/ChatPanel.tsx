@@ -72,30 +72,7 @@ export default function ChatPanel({ nachrichten, laeuft, onSenden }: Eigenschaft
               ) : null}
 
               {nachricht.sources && nachricht.sources.length > 0 && nachricht.content && (
-                // <details> statt eigenem State: der Browser uebernimmt das Auf- und
-                // Zuklappen samt Tastaturbedienung. Der Zustand liegt im DOM, ein
-                // aufgeklappter Block bleibt also offen, waehrend weiter unten eine
-                // neue Antwort hereinstreamt.
-                <details className="quellen">
-                  <summary>
-                    <span className="quellen-anzahl">
-                      Fundstellen ({nachricht.sources.length})
-                    </span>
-                    <span className="quellen-dateien">{dateiliste(nachricht.sources)}</span>
-                  </summary>
-                  <ol>
-                    {nachricht.sources.map((quelle) => (
-                      <li key={quelle.n}>
-                        <b>
-                          {quelle.filename}
-                          {quelle.location ? `, ${quelle.location}` : ""}
-                        </b>{" "}
-                        &mdash; {quelle.snippet}
-                        {quelle.snippet.length >= 240 ? "…" : ""}
-                      </li>
-                    ))}
-                  </ol>
-                </details>
+                <Fundstellen quellen={nachricht.sources} />
               )}
             </div>
           ))}
@@ -135,12 +112,65 @@ export default function ChatPanel({ nachrichten, laeuft, onSenden }: Eigenschaft
 }
 
 /**
- * Eindeutige Dateinamen der Fundstellen.
+ * Die Fundstellen unter einer Antwort.
  *
- * Steht in der zugeklappten Kopfzeile und beantwortet damit die haeufigste
- * Frage — woher stammt das? — ohne dass man aufklappen muss. Mehrere Treffer
- * kommen oft aus derselben Datei, deshalb dedupliziert.
+ * `<details>` statt eigenem State: der Browser uebernimmt das Auf- und
+ * Zuklappen samt Tastaturbedienung. Der Zustand liegt im DOM, ein aufgeklappter
+ * Block bleibt also offen, waehrend weiter unten eine neue Antwort hereinstreamt.
  */
-function dateiliste(quellen: Quelle[]): string {
-  return [...new Set(quellen.map((quelle) => quelle.filename))].join(", ");
+function Fundstellen({ quellen }: { quellen: Quelle[] }) {
+  // Einmal berechnet statt je Zeile: Bei zwoelf Fundstellen waere es sonst
+  // zwoelfmal dieselbe Auswertung derselben Liste.
+  const mehrere = mehrereSammlungen(quellen);
+
+  return (
+    <details className="quellen">
+      <summary>
+        <span className="quellen-anzahl">Fundstellen ({quellen.length})</span>
+        <span className="quellen-dateien">{herkunft(quellen)}</span>
+      </summary>
+      <ol>
+        {quellen.map((quelle) => (
+          <li key={quelle.n}>
+            <b>
+              {quelle.filename}
+              {quelle.location ? `, ${quelle.location}` : ""}
+            </b>
+            {/* Die Sammlung nur nennen, wenn die Antwort aus mehreren stammt.
+                Bei einer einzigen waere sie in jeder Zeile dieselbe Angabe und
+                damit nur Rauschen. */}
+            {mehrere && quelle.collectionName && (
+              <span className="quellen-sammlung">{quelle.collectionName}</span>
+            )}{" "}
+            &mdash; {quelle.snippet}
+            {quelle.snippet.length >= 240 ? "…" : ""}
+          </li>
+        ))}
+      </ol>
+    </details>
+  );
+}
+
+function eindeutig(werte: (string | undefined)[]): string[] {
+  return [...new Set(werte.filter((wert): wert is string => Boolean(wert)))];
+}
+
+function mehrereSammlungen(quellen: Quelle[]): boolean {
+  return eindeutig(quellen.map((quelle) => quelle.collectionName)).length > 1;
+}
+
+/**
+ * Herkunft der Fundstellen fuer die zugeklappte Kopfzeile.
+ *
+ * Sie beantwortet die haeufigste Frage — woher stammt das? — ohne dass man
+ * aufklappen muss. Bei mehreren Sammlungen sind deren Namen die Antwort darauf:
+ * Der Assistent hat sich selbst fuer sie entschieden, und das soll nachvollziehbar
+ * sein, ohne die Liste zu oeffnen. Bei einer einzigen Sammlung ist ihr Name
+ * bekannt, und die Dateinamen sind das Interessantere.
+ */
+function herkunft(quellen: Quelle[]): string {
+  const sammlungen = eindeutig(quellen.map((quelle) => quelle.collectionName));
+  if (sammlungen.length > 1) return sammlungen.join(" · ");
+
+  return eindeutig(quellen.map((quelle) => quelle.filename)).join(", ");
 }

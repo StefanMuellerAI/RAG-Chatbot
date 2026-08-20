@@ -754,6 +754,19 @@ td select {
   font-weight: 400;
 }
 
+/* Die Sammlung, aus der eine Fundstelle stammt. Als Marke abgesetzt, damit sie
+   nicht mit dem Dateinamen davor zu einer Zeile verschwimmt. */
+.quellen-sammlung {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  font-size: 11px;
+  border: 1px solid var(--grau-300);
+  background: var(--grau-100);
+  color: var(--grau-600);
+  vertical-align: 1px;
+}
+
 .chat-eingabe {
   display: flex;
   gap: 10px;
