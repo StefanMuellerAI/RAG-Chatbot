@@ -1,4 +1,4 @@
-import { SignedIn, SignedOut, SignInButton, UserButton } from "@clerk/nextjs";
+import { Show, SignInButton, UserButton } from "@clerk/nextjs";
 import Link from "next/link";
 import TabNav from "@/components/TabNav";
 import { getKontext } from "@/lib/auth/user";
@@ -31,23 +31,24 @@ export default async function Kopfzeile() {
           <div className="kopf-zusatz">Auskunft aus den eigenen Dokumenten</div>
 
           <div className="kopf-konto">
-            <SignedIn>
+            {/* `Show` ist der Nachfolger von SignedIn/SignedOut ab Clerk Core 3. */}
+            <Show when="signed-in">
               <UserButton />
-            </SignedIn>
-            <SignedOut>
+            </Show>
+            <Show when="signed-out">
               <SignInButton mode="modal">
                 <button type="button" className="knopf knopf-sekundaer">
                   Anmelden
                 </button>
               </SignInButton>
-            </SignedOut>
+            </Show>
           </div>
         </div>
       </header>
 
-      <SignedIn>
+      <Show when="signed-in">
         <TabNav istAdmin={istAdmin} />
-      </SignedIn>
+      </Show>
     </>
   );
 }

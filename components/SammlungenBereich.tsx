@@ -1,0 +1,276 @@
+"use client";
+
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useState, useTransition } from "react";
+import type { SammlungMitKlasse } from "@/lib/collections";
+import type { SizeClass } from "@/lib/db/schema";
+import type { Preset } from "@/lib/presets";
+
+type Eigenschaften = {
+  sammlungen: SammlungMitKlasse[];
+  klassen: SizeClass[];
+  presets: Preset[];
+  plan: { label: string; maxCollections: number; maxSizeClassId: string };
+};
+
+export default function SammlungenBereich({
+  sammlungen,
+  klassen,
+  presets,
+  plan,
+}: Eigenschaften) {
+  const router = useRouter();
+  const [laueft, starte] = useTransition();
+  const [formularOffen, setFormularOffen] = useState(false);
+  const [fehler, setFehler] = useState<string | null>(null);
+
+  const voll = sammlungen.length >= plan.maxCollections;
+
+  async function anlegen(eingabe: {
+    name: string;
+    beschreibung: string;
+    preset: string;
+    sizeClassId: string;
+  }) {
+    setFehler(null);
+
+    try {
+      const antwort = await fetch("/api/collections", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(eingabe),
+      });
+
+      const daten = await antwort.json().catch(() => ({}));
+      if (!antwort.ok) throw new Error(daten.error ?? `Status ${antwort.status}`);
+
+      setFormularOffen(false);
+      starte(() => router.refresh());
+    } catch (error) {
+      setFehler(error instanceof Error ? error.message : "Unbekannter Fehler.");
+    }
+  }
+
+  return (
+    <>
+      {fehler && <div className="meldung">{fehler}</div>}
+
+      <div className="karte">
+        <h1 className="karte-titel">
+          Sammlungen{" "}
+          <span className="karte-zusatz">
+            · Plan {plan.label} · {sammlungen.length} von {plan.maxCollections} · bis
+            Groessenklasse {plan.maxSizeClassId}
+          </span>
+        </h1>
+        <p className="hinweis-text">
+          Eine Sammlung ist ein abgegrenzter Bestand an Unterlagen. Trennen Sie, was
+          inhaltlich nicht zusammengehoert — im Chat waehlt der Assistent anhand von Name
+          und Beschreibung selbst aus, wo er sucht, und das gelingt umso besser, je klarer
+          die Sammlungen voneinander abgegrenzt sind.
+        </p>
+
+        {!formularOffen && (
+          <button
+            className="knopf"
+            disabled={voll || klassen.length === 0}
+            onClick={() => setFormularOffen(true)}
+          >
+            Neue Sammlung
+          </button>
+        )}
+
+        {voll && !formularOffen && (
+          <p className="hinweis-text" style={{ marginTop: 12, marginBottom: 0 }}>
+            Ihr Plan erlaubt {plan.maxCollections}{" "}
+            {plan.maxCollections === 1 ? "Sammlung" : "Sammlungen"}. Fuer weitere muesste
+            der Plan angehoben werden.
+          </p>
+        )}
+
+        {formularOffen && (
+          <Anlegeformular
+            klassen={klassen}
+            presets={presets}
+            gesperrt={laueft}
+            onAbbrechen={() => setFormularOffen(false)}
+            onAnlegen={anlegen}
+          />
+        )}
+      </div>
+
+      {sammlungen.length === 0 ? (
+        <div className="karte">
+          <p className="hinweis-text" style={{ margin: 0 }}>
+            Noch keine Sammlung angelegt. Der Chat kann derzeit keine Fragen beantworten.
+          </p>
+        </div>
+      ) : (
+        <div className="sammlungen-raster">
+          {sammlungen.map((sammlung) => {
+            const preset = presets.find((eintrag) => eintrag.id === sammlung.preset);
+            return (
+              <Link key={sammlung.id} href={`/sammlungen/${sammlung.id}`} className="sammlung-karte">
+                <div className="sammlung-kopf">
+                  <span className="sammlung-name">{sammlung.name}</span>
+                  <span className="marke">{sammlung.sizeClass.id}</span>
+                </div>
+
+                <p className="sammlung-beschreibung">
+                  {sammlung.description || "Keine Beschreibung hinterlegt."}
+                </p>
+
+                <div className="sammlung-fuss">
+                  {preset?.label ?? sammlung.preset} · {sammlung.documentCount}{" "}
+                  {sammlung.documentCount === 1 ? "Dokument" : "Dokumente"} ·{" "}
+                  {sammlung.pageCount} Seiten
+                </div>
+              </Link>
+            );
+          })}
+        </div>
+      )}
+    </>
+  );
+}
+
+// --- Anlegeformular ---------------------------------------------------------
+
+function Anlegeformular({
+  klassen,
+  presets,
+  gesperrt,
+  onAbbrechen,
+  onAnlegen,
+}: {
+  klassen: SizeClass[];
+  presets: Preset[];
+  gesperrt: boolean;
+  onAbbrechen: () => void;
+  onAnlegen: (eingabe: {
+    name: string;
+    beschreibung: string;
+    preset: string;
+    sizeClassId: string;
+  }) => Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  const [beschreibung, setBeschreibung] = useState("");
+  const [preset, setPreset] = useState(presets[0]?.id ?? "fliesstext");
+  // Die kleinste erlaubte Klasse als Vorauswahl: Sie ist bei allen Plaenen
+  // verfuegbar, und heraufsetzen ist einfacher zu verstehen als herabsetzen.
+  const [sizeClassId, setSizeClassId] = useState(klassen[0]?.id ?? "");
+
+  const bereit = name.trim().length >= 2 && sizeClassId && !gesperrt;
+
+  return (
+    <div className="anlegen">
+      <div className="feld">
+        <label htmlFor="sammlung-name">Name</label>
+        <input
+          id="sammlung-name"
+          type="text"
+          value={name}
+          maxLength={80}
+          placeholder="z. B. Buergerservice — Gebuehren"
+          onChange={(e) => setName(e.target.value)}
+        />
+      </div>
+
+      <div className="feld">
+        <label htmlFor="sammlung-beschreibung">
+          Was ist darin enthalten?{" "}
+          <span className="feld-zusatz">
+            Optional, aber hilfreich: Der Assistent entscheidet daran, wann er hier sucht.
+          </span>
+        </label>
+        <textarea
+          id="sammlung-beschreibung"
+          value={beschreibung}
+          rows={2}
+          maxLength={400}
+          placeholder="z. B. Gebuehrenordnungen und Preislisten des Buergeramts, Stand 2026"
+          onChange={(e) => setBeschreibung(e.target.value)}
+        />
+      </div>
+
+      <fieldset className="feld auswahl">
+        <legend>Um welche Art von Unterlagen handelt es sich?</legend>
+        <p className="feld-zusatz">
+          Danach richtet sich, wie die Dokumente in durchsuchbare Abschnitte zerlegt
+          werden. Die Wahl gilt fuer die ganze Sammlung und laesst sich spaeter nicht
+          aendern.
+        </p>
+
+        <div className="karten-auswahl">
+          {presets.map((eintrag) => (
+            <label
+              key={eintrag.id}
+              className={eintrag.id === preset ? "wahlkarte aktiv" : "wahlkarte"}
+            >
+              <input
+                type="radio"
+                name="preset"
+                value={eintrag.id}
+                checked={eintrag.id === preset}
+                onChange={() => setPreset(eintrag.id)}
+              />
+              <span className="wahlkarte-titel">{eintrag.label}</span>
+              <span className="wahlkarte-kurz">{eintrag.kurz}</span>
+              <span className="wahlkarte-beispiele">{eintrag.beispiele}</span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
+
+      <fieldset className="feld auswahl">
+        <legend>Groesse</legend>
+        <p className="feld-zusatz">
+          Ihr Plan schaltet die folgenden Klassen frei. Die Grenzen gelten je Sammlung.
+        </p>
+
+        <div className="karten-auswahl">
+          {klassen.map((klasse) => (
+            <label
+              key={klasse.id}
+              className={klasse.id === sizeClassId ? "wahlkarte aktiv" : "wahlkarte"}
+            >
+              <input
+                type="radio"
+                name="groessenklasse"
+                value={klasse.id}
+                checked={klasse.id === sizeClassId}
+                onChange={() => setSizeClassId(klasse.id)}
+              />
+              <span className="wahlkarte-titel">{klasse.label}</span>
+              <span className="wahlkarte-kurz">
+                {klasse.maxDocuments} Dokumente · {klasse.maxPagesPerDocument} Seiten je
+                Dokument
+              </span>
+              <span className="wahlkarte-beispiele">
+                Insgesamt {klasse.maxTotalPages.toLocaleString("de-DE")} Seiten ·{" "}
+                {Math.round(klasse.maxFileBytes / (1024 * 1024))} MB je Datei
+              </span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
+
+      <div className="knopfzeile">
+        <button
+          className="knopf"
+          disabled={!bereit}
+          onClick={() =>
+            void onAnlegen({ name, beschreibung, preset, sizeClassId })
+          }
+        >
+          Sammlung anlegen
+        </button>
+        <button className="knopf knopf-sekundaer" onClick={onAbbrechen}>
+          Abbrechen
+        </button>
+      </div>
+    </div>
+  );
+}

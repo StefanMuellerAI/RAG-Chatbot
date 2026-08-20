@@ -210,6 +210,20 @@ a {
   margin-top: 2px;
 }
 
+/* Der Bezugswert einer Kennzahl — gedaempft, damit der erreichte Stand vorn
+   bleibt und die Grenze nur daneben steht. */
+.kennzahl-von {
+  font-size: 16px;
+  font-weight: 400;
+  color: var(--grau-600);
+}
+
+.brotkrume {
+  font-size: 14px;
+  color: var(--grau-600);
+  margin: 0 0 16px;
+}
+
 /* --- Suche und Blaettern -------------------------------------------------- */
 
 .suchzeile {
@@ -828,6 +842,169 @@ th.zahl {
 
 .status-fehler {
   color: var(--rot-dunkel);
+}
+
+/* --- Sammlungen ----------------------------------------------------------- */
+
+.sammlungen-raster {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+  margin-top: 20px;
+}
+
+.sammlung-karte {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--weiss);
+  border: 1px solid var(--grau-300);
+  border-left: 4px solid var(--rot);
+  padding: 16px 18px;
+  text-decoration: none;
+  color: var(--schwarz);
+}
+
+.sammlung-karte:hover {
+  border-color: var(--rot);
+  background: var(--rot-hell);
+}
+
+.sammlung-kopf {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.sammlung-name {
+  font-weight: 700;
+  font-size: 17px;
+  overflow-wrap: anywhere;
+}
+
+/* Kennung der Groessenklasse — klein, aber eindeutig zuordenbar. */
+.marke {
+  flex: none;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border: 1px solid var(--grau-300);
+  background: var(--grau-100);
+  color: var(--grau-600);
+}
+
+.sammlung-beschreibung {
+  margin: 0;
+  font-size: 14px;
+  color: var(--grau-600);
+  /* Hoechstens drei Zeilen: die Karten sollen in einer Reihe gleich hoch
+     bleiben, auch wenn eine Beschreibung deutlich laenger ist als die anderen. */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.sammlung-fuss {
+  font-size: 13px;
+  color: var(--grau-600);
+  margin-top: auto;
+  padding-top: 6px;
+  border-top: 1px solid var(--grau-200);
+}
+
+/* --- Anlegen und Auswahlkarten -------------------------------------------- */
+
+.anlegen {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid var(--grau-200);
+}
+
+.feld-zusatz {
+  font-weight: 400;
+  color: var(--grau-600);
+  font-size: 13px;
+}
+
+fieldset.auswahl {
+  border: none;
+  padding: 0;
+  margin: 0 0 20px;
+}
+
+fieldset.auswahl legend {
+  font-weight: 700;
+  font-size: 14px;
+  padding: 0;
+  margin-bottom: 6px;
+}
+
+fieldset.auswahl .feld-zusatz {
+  display: block;
+  margin: 0 0 10px;
+}
+
+.karten-auswahl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+.wahlkarte {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--grau-300);
+  background: var(--weiss);
+  padding: 13px 15px;
+  cursor: pointer;
+}
+
+.wahlkarte:hover {
+  border-color: var(--rot);
+}
+
+.wahlkarte.aktiv {
+  border-color: var(--rot);
+  border-left-width: 4px;
+  background: var(--rot-hell);
+}
+
+/* Der Radioknopf selbst ist unsichtbar, aber vorhanden: Die Karte ist das
+   Bedienelement, die Tastaturbedienung und Vorlesbarkeit haengen aber am
+   echten Eingabefeld. */
+.wahlkarte input[type="radio"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.wahlkarte:has(input:focus-visible) {
+  outline: 3px solid var(--rot);
+  outline-offset: 2px;
+}
+
+.wahlkarte-titel {
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.wahlkarte-kurz {
+  font-size: 13px;
+}
+
+.wahlkarte-beispiele {
+  font-size: 12px;
+  color: var(--grau-600);
+}
+
+.knopfzeile {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 /* --- Gefahrenzone --------------------------------------------------------- */
