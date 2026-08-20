@@ -1,5 +1,6 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { eq } from "drizzle-orm";
+import { redirect } from "next/navigation";
 import { cache } from "react";
 import { getDb } from "../db";
 import { seedStammdaten } from "../db/seed";
@@ -159,11 +160,34 @@ export const getKontext = cache(async (): Promise<Kontext | null> => {
 
 const KONTEXT_LEBENSDAUER_SEKUNDEN = 60;
 
-/** Wie `getKontext`, wirft aber statt null zu liefern. */
+/**
+ * Wie `getKontext`, wirft aber statt null zu liefern.
+ *
+ * Fuer API-Routen. Der Fehler wird in lib/api.ts zu einem 401 mit JSON — das
+ * ist, was ein `fetch` im Browser verarbeiten kann.
+ */
 export async function requireKontext(): Promise<Kontext> {
   const kontext = await getKontext();
   if (!kontext) throw new NotSignedInError();
   return kontext;
+}
+
+/**
+ * Fuer Seiten: leitet zur Anmeldung, statt zu werfen.
+ *
+ * Eine Seite, die mit einem Fehler antwortet, weil niemand angemeldet ist,
+ * waere fuer den Nutzer eine Sackgasse. Nach der Anmeldung kommt er ueber
+ * `redirect_url` dorthin zurueck, wo er hinwollte.
+ */
+export async function requireKontextFuerSeite(zielpfad?: string): Promise<Kontext> {
+  const kontext = await getKontext();
+  if (kontext) return kontext;
+
+  const ziel = zielpfad
+    ? `/sign-in?redirect_url=${encodeURIComponent(zielpfad)}`
+    : "/sign-in";
+
+  redirect(ziel);
 }
 
 /** Nur die Nutzer-ID — der haeufigste Fall in schreibenden Routen. */

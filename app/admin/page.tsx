@@ -5,7 +5,7 @@ import {
   ladePlaene,
   ladeVerbrauch,
 } from "@/lib/admin";
-import { requireAdmin } from "@/lib/auth/user";
+import { requireKontextFuerSeite } from "@/lib/auth/user";
 import { seedStammdaten } from "@/lib/db/seed";
 import { missingFor } from "@/lib/env";
 import { MODELS } from "@/lib/models";
@@ -27,14 +27,17 @@ export default async function AdminSeite({
     );
   }
 
-  try {
-    await requireAdmin();
-  } catch {
+  // Zur Anmeldung, wenn niemand angemeldet ist. Ist jemand angemeldet, hat aber
+  // die Rolle nicht, bleibt es bei einer Erklaerung statt einer Weiterleitung -
+  // sonst laufe er im Kreis, denn erneutes Anmelden aendert daran nichts.
+  const kontext = await requireKontextFuerSeite("/admin");
+
+  if (!kontext.isAdmin) {
     return (
       <div className="meldung">
         <b>Kein Zugriff.</b> Dieser Bereich ist der Administration vorbehalten. Wenn Sie
-        Administrationsrechte brauchen, muss eine Person, die sie bereits hat, sie Ihnen
-        in der Nutzerliste erteilen.
+        Administrationsrechte brauchen, muss eine Person, die sie bereits hat, sie Ihnen in
+        der Nutzerliste erteilen.
       </div>
     );
   }

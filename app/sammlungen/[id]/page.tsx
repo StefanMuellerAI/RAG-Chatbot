@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import SammlungDetail from "@/components/SammlungDetail";
-import { requireKontext } from "@/lib/auth/user";
+import { requireKontextFuerSeite } from "@/lib/auth/user";
 import { ladeSammlung } from "@/lib/collections";
 import { ladeDokumenteDerSammlung } from "@/lib/documents";
 import { NotFoundError } from "@/lib/errors";
@@ -13,8 +13,8 @@ export default async function SammlungSeite({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  const kontext = await requireKontext();
   const { id } = await params;
+  const kontext = await requireKontextFuerSeite(`/sammlungen/${id}`);
 
   const daten = await lade(kontext.userId, id);
   // Eine fremde oder erfundene ID fuehrt zur gleichen Seite: Wer raet, soll

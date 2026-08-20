@@ -1,6 +1,6 @@
 import Link from "next/link";
 import ChatBereich from "@/components/ChatBereich";
-import { requireKontext } from "@/lib/auth/user";
+import { requireKontextFuerSeite } from "@/lib/auth/user";
 import { ladeSammlungen } from "@/lib/collections";
 import { missingFor } from "@/lib/env";
 import { leseTagesstand } from "@/lib/ratelimit";
@@ -20,7 +20,7 @@ export default async function ChatSeite() {
     );
   }
 
-  const kontext = await requireKontext();
+  const kontext = await requireKontextFuerSeite("/");
   const [sammlungen, verbraucht] = await Promise.all([
     ladeSammlungen(kontext.userId),
     leseTagesstand(kontext.userId),

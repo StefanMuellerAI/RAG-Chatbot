@@ -1,38 +1,28 @@
-import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
+import { clerkMiddleware } from "@clerk/nextjs/server";
 
 /**
- * Zugriffsschutz der gesamten Anwendung.
+ * Stellt die Clerk-Sitzung fuer Seiten und Routen bereit.
  *
  * Seit Next 16 heisst diese Konvention `proxy` statt `middleware`.
  *
- * Umgekehrte Logik gegenueber dem Vorgaenger: Frueher war alles offen und
- * einzelne Pfade wurden gesperrt. Jetzt ist alles gesperrt und einzelne Pfade
- * sind offen. Bei einer mandantenfaehigen Anwendung ist das der einzig
- * vertretbare Zuschnitt — eine vergessene Route darf nicht bedeuten, dass
- * fremde Dokumente erreichbar sind.
+ * Hier wird bewusst NICHT geschuetzt. Der naheliegende Weg — ein Muster aller
+ * geschuetzten Pfade und `auth.protect()` an dieser Stelle — ist von Clerk
+ * ausdruecklich verworfen, und der Grund ist einleuchtend: Ein Pfadmuster kann
+ * von dem abweichen, wie Next.js Anfragen tatsaechlich zuordnet, und dann steht
+ * eine geschuetzte Ressource offen, obwohl das Muster sie zu decken scheint. Bei
+ * einer mandantenfaehigen Anwendung wiegt dieser Unterschied schwer.
  *
- * Auch der Chat liegt jetzt hinter der Anmeldung, denn er durchsucht die
- * Collections des angemeldeten Nutzers. Ohne Identitaet gibt es nichts zu
- * durchsuchen.
+ * Stattdessen prueft jede Ressource selbst, und zwar dort, wo sie auf Daten
+ * zugreift:
  *
- * Die Rollenpruefung fuer den Admin-Bereich passiert NICHT hier, sondern in
- * den Routen und Seiten selbst: sie liest users.is_admin aus Postgres, und ein
- * Datenbankzugriff je Request waere hier bei 15.000 Nutzern verschwendet.
+ *   Seiten      requireKontextFuerSeite() — leitet zur Anmeldung
+ *   API-Routen  requireKontext() / requireUserId() / requireAdmin() — liefern 401 bzw. 403
+ *
+ * Das ist nicht nur die sicherere, sondern auch die genauere Antwort: Eine
+ * API-Route soll 401 mit JSON liefern und keine Weiterleitung auf eine
+ * HTML-Seite, an der ein `fetch` im Browser scheitert.
  */
-
-const oeffentlich = createRouteMatcher([
-  "/sign-in(.*)",
-  "/sign-up(.*)",
-  // Clerk stellt Webhooks ohne Sitzung zu; die Echtheit wird in der Route
-  // selbst ueber die Svix-Signatur geprueft.
-  "/api/webhooks(.*)",
-]);
-
-export default clerkMiddleware(async (auth, request) => {
-  if (!oeffentlich(request)) {
-    await auth.protect();
-  }
-});
+export default clerkMiddleware();
 
 export const config = {
   matcher: [

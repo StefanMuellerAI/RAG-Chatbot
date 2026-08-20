@@ -197,7 +197,7 @@ app/
   api/upload/                     Token für den Direkt-Upload zu Vercel Blob
   api/webhooks/clerk/             Nutzerdaten spiegeln
   api/cron/aufraeumen/            stündlicher Aufräumlauf
-proxy.ts                          alles gesperrt außer Anmeldung und Webhook
+proxy.ts                          stellt die Clerk-Sitzung bereit
 workflows/
   ingest.ts                       Dokumentverarbeitung in wiederholbaren Schritten
   aufraeumen.ts                   Abräumen nach dem Löschen eines Kontos
@@ -217,9 +217,17 @@ lib/
 
 ### Entwurfsentscheidungen
 
-**Alles ist gesperrt, einzelne Pfade sind offen.** Der Vorgänger hielt es umgekehrt. Bei
-einer mandantenfähigen Anwendung ist das der einzig vertretbare Zuschnitt: Eine vergessene
-Route darf nicht bedeuten, dass fremde Dokumente erreichbar sind.
+**Jede Ressource prüft selbst, und zwar dort, wo sie auf Daten zugreift.** Der
+naheliegende Weg — ein Muster aller geschützten Pfade und eine Prüfung im Proxy — ist von
+Clerk ausdrücklich verworfen, und der Grund ist einleuchtend: Ein Pfadmuster kann von dem
+abweichen, wie Next.js Anfragen tatsächlich zuordnet, und dann steht eine geschützte
+Ressource offen, obwohl das Muster sie zu decken scheint. Bei einer mandantenfähigen
+Anwendung wiegt dieser Unterschied schwer.
+
+Seiten leiten über `requireKontextFuerSeite()` zur Anmeldung, API-Routen antworten mit
+401 und JSON. Das ist auch die genauere Antwort: Eine Weiterleitung auf eine HTML-Seite
+lässt jedes `fetch` im Browser mit einem Folgefehler scheitern, dessen Ursache man nicht
+mehr erkennt.
 
 **Die Nutzer-ID steht in der `WHERE`-Klausel, nicht in einer Prüfung danach.** Eine fremde
 ID liefert damit dasselbe wie eine erfundene — nichts. Es gibt bewusst keine Funktion, die

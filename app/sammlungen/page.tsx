@@ -1,5 +1,5 @@
 import SammlungenBereich from "@/components/SammlungenBereich";
-import { requireKontext } from "@/lib/auth/user";
+import { requireKontextFuerSeite } from "@/lib/auth/user";
 import { erlaubteGroessenklassen, ladeSammlungen } from "@/lib/collections";
 import { missingFor } from "@/lib/env";
 import { PRESETS } from "@/lib/presets";
@@ -17,7 +17,7 @@ export default async function SammlungenSeite() {
     );
   }
 
-  const kontext = await requireKontext();
+  const kontext = await requireKontextFuerSeite("/sammlungen");
   const [sammlungen, klassen] = await Promise.all([
     ladeSammlungen(kontext.userId),
     erlaubteGroessenklassen(kontext),
