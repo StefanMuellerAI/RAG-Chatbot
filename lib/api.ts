@@ -8,12 +8,30 @@ import { NotFoundError, QuotaError, RateLimitError, ValidationError } from "./er
  * An einer Stelle, weil sonst jede Route ihre eigene Zuordnung erfindet und
  * der Client am Ende Statuscodes vorfindet, auf die er nicht vorbereitet ist.
  */
-export function errorResponse(error: unknown): Response {
+export function errorResponse(error: unknown, userId?: string): Response {
   const { status, body, headers } = zuordnen(error);
 
-  // Unerwartete Fehler gehoeren ins Log, damit sie in der Vercel-Observability
-  // auftauchen. Erwartete nicht — sonst ist das Log voll mit Kontingentmeldungen.
-  if (status >= 500) console.error("Unerwarteter Fehler in einer API-Route:", error);
+  if (status >= 500) {
+    console.error("Unerwarteter Fehler in einer API-Route:", error);
+  } else if (status === 429 || status === 409) {
+    /**
+     * Abweisungen strukturiert loggen.
+     *
+     * Nicht als Fehler — sie sind der bestimmungsgemaesse Betrieb. Aber ihre
+     * Haeufigkeit ist die wichtigste Kennzahl im laufenden Betrieb: Steigt sie,
+     * sind entweder die Kontingente zu knapp bemessen oder ein Konto verhaelt
+     * sich auffaellig. In der Vercel-Observability laesst sich nach dem Praefix
+     * filtern und nach Konto gruppieren.
+     */
+    console.log(
+      JSON.stringify({
+        ereignis: "abweisung",
+        status,
+        code: body.code,
+        userId: userId ?? null,
+      }),
+    );
+  }
 
   return Response.json(body, { status, headers });
 }

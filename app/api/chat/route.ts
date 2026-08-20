@@ -230,7 +230,8 @@ export async function POST(request: Request) {
   } catch (error) {
     // Kam keine Antwort zustande, wandert die Frage ins Kontingent zurueck.
     if (userId && kontingentVerbraucht) await gibFrageZurueck(userId);
-    return errorResponse(error);
+    // Die Nutzer-ID mitgeben: Abweisungen sollen einem Konto zuzuordnen sein.
+    return errorResponse(error, userId ?? undefined);
   }
 }
 

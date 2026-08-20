@@ -1,57 +1,90 @@
-# Wissensassistent — RAG-Chatbot mit Dokumentenverwaltung
+# Wissensassistent — mandantenfähiger RAG-Chatbot
 
-Ein schlanker Retrieval-Augmented-Generation-Chatbot: Dokumente im Admin-Bereich
-einpflegen, im Chat Fragen dazu stellen. Jede Antwort stützt sich ausschließlich auf
-die eingepflegten Dokumente und nennt ihre Fundstellen.
+Jeder Nutzer legt eigene Dokumentensammlungen an und stellt Fragen dazu. Die Antwort
+stützt sich ausschließlich auf seine Unterlagen und nennt ihre Fundstellen. Bei mehreren
+Sammlungen entscheidet das Modell selbst, wo es sucht.
 
-- **Antworten**: Claude Opus über die Anthropic-API
-- **Vektor-Datenbank**: Upstash Vector mit eingebautem, mehrsprachigem Embedding-Modell
-- **Dateiablage**: Vercel Blob (privat)
+- **Anmeldung**: Clerk mit Registrierung, Nutzerkonten und Rollen
+- **Antworten**: Claude über das Vercel AI Gateway, Modell je Plan
+- **Vektorsuche**: Pinecone Serverless, ein Namespace je Sammlung, Embedding im Dienst
+- **Datenbank**: Neon Postgres mit Drizzle
+- **Dateiablage**: Vercel Blob (privat, mandantenpräfigiert)
+- **Drosselung und Kontingente**: Upstash Redis
+- **Verarbeitung**: Vercel Workflow SDK
 - **Formate**: PDF, DOCX, XLSX
 - **Design**: in Anlehnung an stadt-koeln.de
+
+Ausgelegt auf rund 15.000 gleichzeitig aktive Nutzer. Was das konkret bedeutet und wo die
+Grenzen liegen, steht unter [Betrieb](#betrieb).
 
 ---
 
 ## Einrichtung
 
-### 1. Upstash-Vector-Index anlegen
+### 1. Dienste anbinden
 
-**Dieser Schritt entscheidet, ob die App funktioniert.** Der Index muss mit einem
-*eingebauten Embedding-Modell* erzeugt werden — sonst nimmt er keinen Rohtext entgegen.
+```bash
+vercel integration add clerk     # setzt die Clerk-Schlüssel
+vercel integration add neon      # setzt DATABASE_URL
+vercel integration add upstash   # setzt die Redis-Werte
+```
 
-1. In der [Upstash-Konsole](https://console.upstash.com/vector) → **Create Index**
-2. Als **Embedding Model** `bge-m3` wählen (mehrsprachig, 1024 Dimensionen, Dot Product).
-   Ein rein englisches Modell liefert bei deutschen Dokumenten spürbar schlechtere Treffer.
-3. `UPSTASH_VECTOR_REST_URL` und `UPSTASH_VECTOR_REST_TOKEN` kopieren
+Blob-Store im Vercel-Projekt unter **Storage → Create Database → Blob**; das setzt
+`BLOB_READ_WRITE_TOKEN`. Pinecone-Schlüssel aus der [Pinecone-Konsole](https://app.pinecone.io),
+Gateway-Schlüssel aus dem [AI-Gateway-Bereich](https://vercel.com/dashboard/ai-gateway).
 
-Alternativ lässt sich Upstash über den Vercel-Marketplace verbinden; die beiden
-Variablen landen dann automatisch im Projekt. Auch dann gilt: beim Anlegen des Index
-das Embedding-Modell setzen.
-
-### 2. Blob-Store anlegen
-
-Im Vercel-Projekt unter **Storage → Create Database → Blob**. `BLOB_READ_WRITE_TOKEN`
-wird dabei automatisch gesetzt.
-
-### 3. Environment-Variablen
-
-| Variable | Bedeutung |
-|---|---|
-| `ANTHROPIC_API_KEY` | Schlüssel von console.anthropic.com |
-| `UPSTASH_VECTOR_REST_URL` | aus Schritt 1 |
-| `UPSTASH_VECTOR_REST_TOKEN` | aus Schritt 1 |
-| `BLOB_READ_WRITE_TOKEN` | aus Schritt 2 |
-| `ADMIN_PASSWORD` | frei wählbar, schützt den Admin-Bereich |
-| `AUTH_SECRET` | Zufallswert: `openssl rand -base64 32` |
-
-Nach dem Eintragen ein neues Deployment auslösen — Environment-Variablen greifen
-erst beim nächsten Build.
-
-### 4. Lokal starten
+Alle Variablen samt Zweck stehen in `.env.example`. Lokal:
 
 ```bash
 cp .env.example .env.local   # und ausfüllen
 npm install
+```
+
+### 2. Datenbank anlegen
+
+```bash
+npm run db:push    # Tabellen erzeugen
+npm run db:seed    # Größenklassen S/M/L/XL und Pläne anlegen
+```
+
+Der Seed ist beliebig oft aufrufbar; bestehende Zeilen bleiben unberührt, damit
+Admin-Anpassungen erhalten bleiben.
+
+### 3. Pinecone-Index anlegen
+
+```bash
+npm run pinecone:init
+```
+
+**Dieser Schritt entscheidet, ob die Suche funktioniert.** Der Index muss mit eingebautem
+Embedding-Modell entstehen, sonst nimmt er keinen Rohtext an — und das lässt sich
+nachträglich nicht ändern. Ein von Hand in der Konsole angelegter Index ist der häufigste
+Grund, warum am Ende nichts funktioniert. Das Skript legt einen Serverless-Index mit
+`multilingual-e5-large` an (mehrsprachig, 1024 Dimensionen, Cosine); ein rein englisches
+Modell liefert bei deutschen Dokumenten deutlich schlechtere Treffer.
+
+### 4. Clerk-Webhook einrichten
+
+Im Clerk-Dashboard unter **Webhooks** einen Endpunkt auf `https://<domain>/api/webhooks/clerk`
+anlegen, Ereignisse `user.created`, `user.updated` und `user.deleted` abonnieren und das
+Signaturgeheimnis als `CLERK_WEBHOOK_SIGNING_SECRET` hinterlegen.
+
+Ohne Webhook läuft die Anwendung trotzdem: Fehlt die Nutzerzeile, wird sie beim ersten
+Zugriff nachgezogen. Was dann fehlt, ist das Abräumen beim Löschen eines Kontos —
+Namespaces und Dateien blieben liegen.
+
+### 5. Ersten Admin bestimmen
+
+Nach der ersten Registrierung in der Tabelle `users` einmalig `is_admin` auf `true`
+setzen. Danach läuft die Rollenvergabe über die Nutzerliste im Admin-Bereich.
+
+```sql
+update users set is_admin = true where email = 'ihre@adresse.de';
+```
+
+### 6. Lokal starten
+
+```bash
 npm run dev
 ```
 
@@ -59,39 +92,92 @@ npm run dev
 
 ## Bedienung
 
-**Chat** (`/`) — ohne Anmeldung erreichbar. Die Frage wird in der Vektor-Datenbank
-gesucht, die besten Abschnitte gehen zusammen mit der Frage an Claude. Unter jeder
-Antwort stehen die verwendeten Fundstellen mit Datei- und Seitenangabe — zugeklappt,
-damit sie den Verlauf nicht zuschieben. Die Kopfzeile nennt bereits Trefferanzahl und
-Herkunftsdokumente; aufgeklappt wird nur, wenn man den Wortlaut nachlesen will.
+**Chat** (`/`) — nur angemeldet. Die Frage geht an die Sammlungen des Nutzers; unter jeder
+Antwort stehen die verwendeten Fundstellen mit Sammlung, Datei- und Seitenangabe,
+zugeklappt, damit sie den Verlauf nicht zuschieben.
 
-Antworten werden als Markdown dargestellt: Aufzählungen, Fettung, Tabellen, Code. Rohes
-HTML wird dabei bewusst **nicht** ausgeführt, sondern als Text angezeigt — der
-Antworttext ist über die hochgeladenen Dokumente beeinflussbar, und genau dort wäre sonst
-ein Einfallstor. Was Sie selbst eintippen, bleibt wörtlich stehen.
+Bei mehreren Sammlungen wählt das Modell anhand von Name und Beschreibung selbst aus, wo
+es sucht, und darf mehrere auf einmal nehmen. Bei nur einer Sammlung entfällt dieser
+Schritt.
 
-Findet die Suche nichts Passendes, wird das Modell gar nicht erst befragt — die App
-sagt dann, dass sie dazu nichts hat. Das ist Absicht: eine erfundene Antwort wäre
-schlimmer als keine.
+Findet die Suche nichts Passendes, wird das Modell gar nicht erst befragt — die App sagt
+dann, dass sie dazu nichts hat. Das ist Absicht: eine erfundene Antwort wäre schlimmer als
+keine.
 
-**Chat-Historie** — links neben dem Chatfenster stehen die bisherigen Gespräche. Die
-erste Frage legt automatisch einen Chat an und benennt ihn nach dieser Frage; umbenennen
-und löschen geht jederzeit. Während eine Antwort läuft, ist die Liste gesperrt, damit die
-Antwort im richtigen Chat landet.
+Antworten werden als Markdown dargestellt. Rohes HTML wird dabei bewusst **nicht**
+ausgeführt, sondern als Text angezeigt — der Antworttext ist über die hochgeladenen
+Dokumente beeinflussbar, und genau dort wäre sonst ein Einfallstor.
 
-Der Verlauf liegt **ausschließlich im Browser** (`localStorage`, bis zu 50 Chats) — nichts
-davon geht an den Server. Das heißt umgekehrt: auf einem geteilten Rechner sieht die
-nächste Person die gespeicherten Fragen samt Dokumentauszügen. Dafür gibt es unten in der
-Liste „Alle Chats löschen". Auf einem anderen Gerät oder in einem anderen Browser ist der
-Verlauf entsprechend nicht vorhanden.
+**Sammlungen** (`/sammlungen`) — Anlegen, Dokumente einpflegen, entfernen. Beim Anlegen
+sind drei Angaben zu machen: Name, eine Beschreibung des Inhalts, und die Art der
+Unterlagen.
 
-**Admin** (`/admin`) — passwortgeschützt.
+Die Beschreibung ist kein Zierfeld. Sie ist die Grundlage, auf der das Modell entscheidet,
+ob eine Sammlung zur Frage passt — eine Sammlung ohne Beschreibung ist dort praktisch
+unsichtbar. Wer keine hinterlegt, bekommt nach dem ersten Dokument einen Vorschlag.
 
-- Dateien per Drag-and-drop oder Dateiauswahl einpflegen (mehrere gleichzeitig möglich)
-- Übersicht aller Dokumente mit Größe, Abschnittszahl und Datum; Originaldatei herunterladbar
-- Einzelne Dokumente entfernen
-- **Collection löschen** leert die gesamte Wissensbasis. Zur Bestätigung muss `LÖSCHEN`
-  eingetippt werden.
+**Administration** (`/admin`) — nur mit Rolle. Größenklassen und Pläne bearbeiten, Nutzern
+Pläne zuweisen, Verbrauch einsehen.
+
+---
+
+## Größenklassen und Pläne
+
+Zwei Begriffe, die sich leicht verwechseln lassen:
+
+Eine **Größenklasse** sagt, wie viel in *eine* Sammlung passt: Dokumente, Seiten je
+Dokument, Seiten insgesamt, Megabyte je Datei.
+
+Ein **Plan** wird einem Nutzer zugewiesen und sagt, bis zu welcher Größenklasse er
+Sammlungen anlegen darf, wie viele, wie viele Fragen pro Tag, und mit welchem Modell.
+
+Ein Nutzer auf Plan `L` darf also S-, M- und L-Sammlungen anlegen. Neue Registrierungen
+erhalten `S`.
+
+Die Startwerte:
+
+| Klasse | Dokumente | Seiten/Dok. | Seiten gesamt | MB/Datei |
+|---|---|---|---|---|
+| S | 20 | 100 | 2.000 | 25 |
+| M | 100 | 300 | 20.000 | 50 |
+| L | 500 | 1.000 | 150.000 | 100 |
+| XL | 2.000 | 2.000 | 600.000 | 200 |
+
+| Plan | bis Klasse | Sammlungen | Fragen/Tag | Modell |
+|---|---|---|---|---|
+| S | S | 3 | 200 | Haiku 4.5 |
+| M | M | 10 | 1.000 | Haiku 4.5 |
+| L | L | 25 | 5.000 | Sonnet 5 |
+| XL | XL | 100 | 25.000 | Opus 5 |
+
+Alle Werte sind im Admin-Bereich zur Laufzeit änderbar; sie stehen deshalb in Tabellen und
+nicht im Code. Eine Zuweisung greift sofort, eine Änderung an der Plan-Definition
+innerhalb einer Minute — der Nutzerkontext liegt so lange im Zwischenspeicher.
+
+---
+
+## Verarbeitungspresets
+
+Beim Anlegen einer Sammlung wird eine von drei Arten gewählt. Sie gilt für die ganze
+Sammlung, damit die Abschnitte darin vergleichbar lang bleiben — sonst hinge die Rangfolge
+der Treffer von der Abschnittslänge ab statt vom Inhalt.
+
+**Fließtext** — Berichte, Handbücher, Protokolle. Große Abschnitte, Schnitt an Absatz- und
+Satzgrenzen, überlappend gegen Aussagen, die genau auf einer Kante liegen.
+
+**Tabellen und Zahlen** — Preislisten, Öffnungszeiten, Gebührentabellen. Zeilenblöcke, und
+die Kopfzeile wird in *jeden* Abschnitt wiederholt: Ein Zahlenblock aus der Mitte einer
+Tabelle ist ohne seine Spaltenüberschriften bedeutungslos. Keine Überlappung — eine doppelt
+geführte Tabellenzeile ist kein gewonnener Zusammenhang, sondern ein zweiter Treffer mit
+gleichem Inhalt.
+
+**Regelwerke** — Satzungen, Verträge, AGB. Kleine, präzise Abschnitte, Schnitt an
+Paragraphengrenzen, die zugehörige Überschrift bleibt am Abschnitt.
+
+Die Logik ist durch `npm run pruefe:chunks` abgedeckt. Das ist kein Selbstzweck: Zwei
+Fehler darin hätten falsche Antworten erzeugt — eine Bestimmung mit der Überschrift einer
+anderen, und eine Schnittkante, die aus drei Abschnitten vierundfünfzig fast gleiche
+machte.
 
 ---
 
@@ -99,67 +185,177 @@ Verlauf entsprechend nicht vorhanden.
 
 ```
 app/
-  page.tsx                      Chat
-  admin/page.tsx                Dokumentenverwaltung (lädt die Liste serverseitig)
-  login/page.tsx                Anmeldung
-  api/chat/                     Retrieval + Antwort-Streaming (NDJSON)
-  api/upload/                   Token für den Direkt-Upload zu Vercel Blob
-  api/documents/                Liste · Verarbeitung · Löschen · Download
-  api/collection/               Wissensbasis leeren
-  api/auth/                     An- und Abmeldung
-proxy.ts                        Zugriffsschutz für /admin und alle schreibenden Routen
+  page.tsx                        Chat
+  sammlungen/                     eigene Sammlungen, Detailansicht mit Upload
+  admin/                          Größenklassen, Pläne, Nutzer, Verbrauch
+  sign-in/ · sign-up/             Clerk
+  api/chat/                       Retrieval, Tool-Aufruf, Antwort-Streaming (NDJSON)
+  api/chats/                      Verlauf
+  api/collections/                Sammlungen, Upload-Anmeldung
+  api/documents/                  Verarbeitung, Löschen, Download
+  api/admin/                      Stammdaten und Rollen
+  api/upload/                     Token für den Direkt-Upload zu Vercel Blob
+  api/webhooks/clerk/             Nutzerdaten spiegeln
+  api/cron/aufraeumen/            stündlicher Aufräumlauf
+proxy.ts                          alles gesperrt außer Anmeldung und Webhook
+workflows/
+  ingest.ts                       Dokumentverarbeitung in wiederholbaren Schritten
+  aufraeumen.ts                   Abräumen nach dem Löschen eines Kontos
 lib/
-  vector.ts                     Upstash: schreiben, suchen, löschen, zurücksetzen
-  extract.ts                    PDF · DOCX · XLSX → Text
-  chunk.ts                      Text → überlappende Abschnitte
-  documents.ts                  Dateien und Metadaten in Vercel Blob
-  anthropic.ts                  Claude-Client und System-Prompt
-  auth.ts                       HMAC-signiertes Sitzungs-Cookie
-  env.ts                        später, geprüfter Zugriff auf die Konfiguration
+  db/                             Drizzle-Schema, Verbindung, Seed
+  auth/user.ts                    Clerk-Identität zu Plan, Rolle, Größenklasse
+  collections.ts · documents.ts   Sammlungen und Dokumente, Nutzer-ID stets in der Abfrage
+  vector.ts                       Pinecone: schreiben, suchen, löschen
+  ai.ts                           Modell, Systemanweisung, Suchwerkzeug
+  presets.ts · chunk.ts           die drei Verarbeitungsarten
+  extract.ts                      PDF · DOCX · XLSX → Text und Seitenzahl
+  quota.ts · ratelimit.ts         Grenzen und Drosselung
+  chats.ts · chatVerlauf.ts       Verlauf, Server und Client-Fassade
+  admin.ts · models.ts            Stammdaten und Modellpreise
+  aufraeumen.ts                   Überreste des laufenden Betriebs
 ```
 
 ### Entwurfsentscheidungen
 
-**Uploads laufen am Server vorbei.** Der Browser lädt die Datei mit einem kurzlebigen
-Token direkt in den Blob-Store und meldet danach nur den Pfad. Ein Upload über eine
-Serverless-Funktion wäre bei 4,5 MB Request-Body am Ende — für PDFs zu wenig.
+**Alles ist gesperrt, einzelne Pfade sind offen.** Der Vorgänger hielt es umgekehrt. Bei
+einer mandantenfähigen Anwendung ist das der einzig vertretbare Zuschnitt: Eine vergessene
+Route darf nicht bedeuten, dass fremde Dokumente erreichbar sind.
 
-**Chunk-IDs sind deterministisch** (`<docId>#<n>`). Ein Dokument lässt sich dadurch mit
-einem einzigen Präfix-Delete restlos entfernen, ohne die IDs mitzuführen.
+**Die Nutzer-ID steht in der `WHERE`-Klausel, nicht in einer Prüfung danach.** Eine fremde
+ID liefert damit dasselbe wie eine erfundene — nichts. Es gibt bewusst keine Funktion, die
+eine Sammlung nur anhand ihrer ID liefert; genau die würde irgendwann ohne Prüfung
+aufgerufen.
+
+**Den Collection-IDs aus dem Tool-Aufruf wird nicht geglaubt.** Sie stammen aus einem Text,
+den hochgeladene Dokumente mitbeeinflussen, und werden gegen die Sammlungen des Aufrufers
+gefiltert, bevor Pinecone angefragt wird. Halluziniert das Modell eine fremde ID oder wird
+es per Prompt-Injection dazu verleitet, kommt sie nicht durch.
+
+**Ein Namespace je Sammlung statt eines Metadatenfilters.** Pinecone rechnet nach der Größe
+des *angefragten* Namespace ab — eine kleine Sammlung kostet das Minimum, egal wie viele
+Sammlungen es insgesamt gibt. Ein Filter über einen gemeinsamen Namespace würde bei jeder
+Abfrage den gesamten Bestand abrechnen, denn gefiltert wird nach dem Durchsuchen.
+Zusätzlich sind Namespaces harte Trennwände: Ein vergessener Filter könnte fremde
+Dokumente offenlegen, ein falscher Namespace liefert schlicht nichts.
+
+**Uploads laufen am Server vorbei, aber nicht an der Prüfung.** Der Browser meldet die
+Datei erst an — dabei wird das Kontingent geprüft und der Ablagepfad auf dem Server
+gebildet —, lädt sie dann mit einem kurzlebigen Token direkt in den Blob-Store. Die
+Token-Ausgabe verlangt, dass zu dem Pfad eine Anmeldung vorliegt. Damit hängt jeder Upload
+an einer erfolgten Kontingentprüfung.
+
+**Die Seitengrenze wird zweistufig geprüft.** Dateigröße und Dokumentzahl vorher, die
+Seitenzahl erst nach der Textextraktion: Ein 400-seitiges PDF kann als 3-MB-Datei ankommen
+und jede Größenprüfung vorher bestehen.
+
+**Abschnitts-IDs sind deterministisch** (`<docId>#<n>`). Deshalb ist die Wiederholung eines
+Verarbeitungsschrittes gefahrlos — sie überschreibt dieselben Einträge statt Duplikate
+anzulegen — und ein Dokument lässt sich ohne mitgeführte ID-Liste entfernen.
 
 **Die Konfiguration wird erst im Request gelesen.** Dadurch läuft der allererste Build
-auf Vercel durch, obwohl noch kein einziger Schlüssel hinterlegt ist. Fehlende
-Variablen führen zu einer benannten Meldung in der Oberfläche statt zu einem
-abgebrochenen Build.
+durch, obwohl noch kein Schlüssel hinterlegt ist. Fehlende Variablen führen zu einer
+benannten Meldung in der Oberfläche statt zu einem abgebrochenen Build.
 
-**Ohne `AUTH_SECRET` bleibt der Admin gesperrt** statt offen zu stehen. Eine fehlende
-Konfiguration darf nie in einen ungeschützten Zustand führen.
+**Modell-Routing ist nicht nur ein Kostenhebel.** Anthropic zählt seine Minutenlimits
+getrennt pro Modell. Last über Haiku, Sonnet und Opus zu verteilen verdreifacht damit den
+verfügbaren Durchsatz.
 
-**Kurze Abschnitte werden nicht verworfen.** Ein Tabellenblatt mit drei Zeilen
-Öffnungszeiten ist genau die Art Information, nach der gefragt wird.
+---
 
-### Zum Design
+## Betrieb
 
-Orientiert an stadt-koeln.de: das Rot `#E1141C` stammt aus dem offiziellen Logo-SVG,
-dazu weißer Kopfbereich mit roter Trennlinie, rechtwinklige Flächen, viel Weißraum und
-eine ruhige serifenlose Schrift.
+### Vor dem Produktivgang
 
-Bewusst **nicht** übernommen sind Wappen, Logo und Wortmarke der Stadt Köln — die sind
-geschützt und gehören nicht in eine fremde Anwendung. Rot wird nur für Flächen, Linien
-und Akzente eingesetzt, Fließtext bleibt bei `#1A1A1A`; damit hält die Oberfläche den
-WCAG-AA-Kontrast.
+**Fluid Compute mit In-Function-Concurrency einschalten** (Pro oder Enterprise, im
+Projekt unter Settings → Functions). Die Antwortströme sind I/O-gebunden und warten fast
+nur. Ohne geteilte Instanzen wird jede gleichzeitige Antwort als eigene Instanz nach
+Wall-Clock abgerechnet — bei über tausend gleichzeitigen Antworten ist das der größte
+vermeidbare Kostenposten.
+
+**Höhere Anthropic-Limits beantragen.** Bei 15.000 gleichzeitig aktiven Nutzern mit einer
+Frage alle zwei bis drei Minuten fallen etwa 5.000 bis 7.500 Fragen pro Minute an, also
+grob 4,5 Mio. Output-Token pro Minute. Das Scale-Tier gibt 2 Mio. pro Modell. Mit der
+Verteilung über drei Modelle wird es knapp erreichbar; darüber braucht es eine verhandelte
+Zusage.
+
+**Ein eigenes Spend-Limit setzen**, unterhalb des Tier-Caps. Es ist die letzte Notbremse,
+wenn Kontingente und Drosselung nicht greifen.
+
+**`GLOBAL_QUESTIONS_PER_MINUTE` festlegen.** Die Tageskontingente der einzelnen Pläne
+summieren sich bei 15.000 Nutzern zu einem Vielfachen dessen, was der Modellanbieter pro
+Minute liefert. Ohne diese Obergrenze bringt schon ein normaler Montagmorgen die Anwendung
+in die 429er-Zone des Anbieters — und dort trifft es alle gleichzeitig.
+
+### Lasttest
+
+```bash
+npm run lasttest -- --url https://... --cookie "__session=..." \
+  --gleichzeitig 50 --dauer 60
+```
+
+Der Chat liegt hinter der Anmeldung, der Test braucht daher ein echtes Sitzungs-Cookie.
+Er fährt eine konstante Zahl offener Anfragen statt einer konstanten Rate: Bei fester Rate
+stauen sich die Anfragen, sobald es langsamer wird, und man misst am Ende die eigene
+Warteschlange.
+
+Jede Frage kostet echtes Geld und verbraucht das Tageskontingent des Kontos. Klein
+anfangen.
+
+Zielgrößen zur Einordnung: rund 5.000 Fragen pro Minute, etwa 1.250 gleichzeitig offene
+Antworten. Vercel selbst ist dabei nicht der Engpass — 30.000 gleichzeitige Funktionen auf
+Hobby und Pro lassen zwei Größenordnungen Luft. Der Engpass ist der Modellanbieter.
+
+### Beobachtbarkeit
+
+Die Tabelle `usage_events` verbucht je Frage Modell, Token und Kosten in Mikro-Dollar. Der
+Admin-Bereich zeigt daraus Tages- und Monatssummen sowie die zwanzig größten Verbraucher —
+wenn die Rechnung ungewöhnlich aussieht, steht die Ursache dort oben.
+
+Abweisungen (429 und 409) landen strukturiert im Log:
+
+```json
+{"ereignis":"abweisung","status":429,"code":"zu_viele_anfragen","userId":"user_..."}
+```
+
+Ihre Häufigkeit ist die wichtigste laufende Kennzahl: Steigt sie, sind entweder die
+Kontingente zu knapp bemessen oder ein Konto verhält sich auffällig.
+
+### Aufräumlauf
+
+Stündlich per Cron (`vercel.json`), geschützt über `CRON_SECRET`. Er verwirft angemeldete
+Uploads, die nie ankamen — sie verkleinern sonst das Kontingent, ohne dass etwas dafür da
+wäre —, setzt hängende Verarbeitungen auf Fehler und entfernt alte Webhook-Kennungen.
+
+### Übernahme aus der Einzelnutzer-Fassung
+
+```bash
+npm run migriere:altdaten -- <clerk-user-id> L
+```
+
+Legt eine Sammlung an und übernimmt die Dokumente aus der alten Blob-Struktur. Die
+Vektoren werden neu erzeugt und nicht kopiert: Der alte Bestand lag in einem
+Upstash-Index mit `bge-m3`, jetzt ist es Pinecone mit `multilingual-e5-large`. Vektoren
+aus verschiedenen Modellen sind nicht vergleichbar — sie zu kopieren ergäbe eine Suche,
+die zufällige Treffer liefert.
+
+Die alten Blobs bleiben unberührt und können nach einer Sichtprobe entfernt werden.
 
 ---
 
 ## Grenzen
 
-- **Gescannte PDFs ohne Texterkennung** liefern keinen Text. Der Upload meldet das
-  ausdrücklich, statt ein leeres Dokument anzulegen. Abhilfe: die Datei vorher durch OCR schicken.
+- **Gescannte PDFs ohne Texterkennung** liefern keinen Text. Die Verarbeitung meldet das
+  ausdrücklich, statt ein leeres Dokument anzulegen. Abhilfe: die Datei vorher durch OCR
+  schicken.
 - **Alte Binärformate `.doc` und `.xls`** werden nicht unterstützt. Einmal als `.docx`
   bzw. `.xlsx` speichern genügt.
-- **Sehr große Dateien** können die Zeitgrenze der Verarbeitungsfunktion (60 s) reißen.
-  Erfahrungsgemäß unkritisch bis in den Bereich einiger hundert Seiten.
-- **Der Chat ist öffentlich.** Wer die URL kennt, kann Fragen stellen und damit indirekt
-  Inhalte aus den Dokumenten erfahren. Bei vertraulichen Unterlagen sollte auch der
-  Chat hinter die Anmeldung — dazu in `proxy.ts` `/` und `/api/chat` in den `matcher`
-  aufnehmen.
+- **Seitenzahlen bei DOCX und XLSX sind Schätzungen.** DOCX kennt keine Seiten — der
+  Umbruch entsteht erst beim Druck. Für die Kontingentprüfung wird gerechnet: 3.000
+  Zeichen bzw. 50 Tabellenzeilen je Seite.
+- **Sammlungen sind nicht teilbar.** Jede gehört genau einem Nutzer. Team-Freigaben wären
+  über Clerk-Organisationen möglich, brauchen aber das B2B-Add-on.
+- **Das Verarbeitungspreset lässt sich nachträglich nicht ändern.** Es müssten alle
+  Dokumente der Sammlung neu zerlegt werden; einfacher ist eine neue Sammlung.
+- **Contextual Retrieval ist nicht eingebaut.** Eine LLM-generierte Kontextzeile pro
+  Abschnitt verbessert die Trefferqualität deutlich, kostet bei diesem Mengenzuschnitt
+  aber einen Modellaufruf pro Abschnitt.
