@@ -6,6 +6,8 @@ import { alleLoeschen, loeschen, umbenennen, type Chat } from "@/lib/chatVerlauf
 type Eigenschaften = {
   chats: Chat[];
   aktiveId: string | null;
+  /** Erst nach dem ersten Abruf steht fest, ob es Chats gibt. */
+  geladen: boolean;
   /** Waehrend eine Antwort laeuft, bleibt die Liste unangetastet. */
   gesperrt: boolean;
   /** Nur auf schmalen Schirmen relevant, wo die Liste zusammenklappt. */
@@ -18,6 +20,7 @@ type Eigenschaften = {
 export default function VerlaufListe({
   chats,
   aktiveId,
+  geladen,
   gesperrt,
   offen,
   onUmschalten,
@@ -33,7 +36,7 @@ export default function VerlaufListe({
   }
 
   function speichereUmbenennen() {
-    if (bearbeitet) umbenennen(bearbeitet, entwurf);
+    if (bearbeitet) void umbenennen(bearbeitet, entwurf);
     setBearbeitet(null);
   }
 
@@ -50,7 +53,9 @@ export default function VerlaufListe({
 
         {chats.length === 0 ? (
           <p className="verlauf-leer">
-            Noch keine Chats. Ihre erste Frage legt automatisch einen an.
+            {geladen
+              ? "Noch keine Chats. Ihre erste Frage legt automatisch einen an."
+              : "Verlauf wird geladen …"}
           </p>
         ) : (
           <ul className="verlauf-liste">
@@ -103,7 +108,9 @@ export default function VerlaufListe({
                     <button
                       className="verlauf-aktion"
                       onClick={() => {
-                        if (window.confirm(`"${chat.titel}" wirklich löschen?`)) loeschen(chat.id);
+                        if (window.confirm(`"${chat.titel}" wirklich löschen?`)) {
+                          void loeschen(chat.id);
+                        }
                       }}
                       disabled={gesperrt}
                       aria-label={`"${chat.titel}" löschen`}
@@ -121,8 +128,8 @@ export default function VerlaufListe({
           <button
             className="verlauf-alle-loeschen"
             onClick={() => {
-              if (window.confirm(`Alle ${chats.length} Chats aus diesem Browser löschen?`)) {
-                alleLoeschen();
+              if (window.confirm(`Alle ${chats.length} Chats endgültig löschen?`)) {
+                void alleLoeschen();
               }
             }}
             disabled={gesperrt}

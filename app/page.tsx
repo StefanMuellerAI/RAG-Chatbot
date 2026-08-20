@@ -1,21 +1,48 @@
+import Link from "next/link";
 import ChatBereich from "@/components/ChatBereich";
+import { requireKontext } from "@/lib/auth/user";
+import { ladeSammlungen } from "@/lib/collections";
 import { missingFor } from "@/lib/env";
+import { leseTagesstand } from "@/lib/ratelimit";
 
 export const dynamic = "force-dynamic";
 
-export default function ChatSeite() {
+export default async function ChatSeite() {
   const fehlt = missingFor("chat");
+  if (fehlt.length > 0) {
+    return (
+      <div className="meldung">
+        <b>Der Assistent ist noch nicht einsatzbereit.</b> Es fehlen folgende
+        Environment-Variablen: <code>{fehlt.join(", ")}</code>. Sie werden im Vercel-Projekt
+        unter <i>Settings &rarr; Environment Variables</i> hinterlegt; danach ist ein
+        erneutes Deployment noetig.
+      </div>
+    );
+  }
+
+  const kontext = await requireKontext();
+  const [sammlungen, verbraucht] = await Promise.all([
+    ladeSammlungen(kontext.userId),
+    leseTagesstand(kontext.userId),
+  ]);
 
   return (
     <>
-      {fehlt.length > 0 && (
-        <div className="meldung">
-          <b>Der Assistent ist noch nicht einsatzbereit.</b> Es fehlen folgende
-          Environment-Variablen: <code>{fehlt.join(", ")}</code>. Sie werden im
-          Vercel-Projekt unter <i>Settings &rarr; Environment Variables</i> hinterlegt;
-          danach ist ein erneutes Deployment noetig.
+      {sammlungen.length === 0 ? (
+        <div className="meldung meldung-neutral">
+          <b>Noch keine Sammlung angelegt.</b> Der Assistent antwortet ausschliesslich aus
+          Ihren eigenen Unterlagen. Legen Sie unter{" "}
+          <Link href="/sammlungen">Sammlungen</Link> eine an und pflegen Sie Dokumente ein.
         </div>
+      ) : (
+        <p className="kontingentzeile">
+          {sammlungen.length}{" "}
+          {sammlungen.length === 1 ? "Sammlung" : "Sammlungen"} durchsuchbar ·{" "}
+          {verbraucht} von {kontext.plan.maxQuestionsPerDay} Fragen heute genutzt
+          {sammlungen.length > 1 && " · der Assistent waehlt selbst, wo er sucht"}
+        </p>
       )}
+
       <ChatBereich />
     </>
   );

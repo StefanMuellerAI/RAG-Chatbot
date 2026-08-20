@@ -224,6 +224,14 @@ a {
   margin: 0 0 16px;
 }
 
+/* Steht ueber dem Chat und beantwortet zwei Fragen, ohne zu draengen: Wo wird
+   gesucht, und wie viel Kontingent ist noch da? */
+.kontingentzeile {
+  font-size: 13px;
+  color: var(--grau-600);
+  margin: 0 0 14px;
+}
+
 /* --- Suche und Blaettern -------------------------------------------------- */
 
 .suchzeile {

@@ -1,13 +1,21 @@
 /**
- * Chat-Historie im Browser.
+ * Chat-Verlauf im Browser — als Fassade vor der Serverschicht.
  *
- * Der Verlauf liegt in `localStorage` und wird ueber `useSyncExternalStore`
- * gelesen. Das ist hier nicht Geschmackssache: `localStorage` existiert beim
- * Server-Rendern nicht, und der naheliegende Weg — im Effekt lesen und per
- * setState nachziehen — wuerde einerseits eine Hydration-Abweichung erzeugen
- * und andererseits gegen die Regel `react-hooks/set-state-in-effect` verstossen,
- * die in diesem Projekt ein Fehler ist. `useSyncExternalStore` ist der dafuer
- * vorgesehene Weg; die Synchronisierung ueber mehrere Tabs faellt als Zugabe ab.
+ * Vorher lag der Verlauf im localStorage. Mit echten Konten ist das nicht mehr
+ * vertretbar: Wer sich anmeldet, erwartet seine Gespraeche auf jedem Geraet, und
+ * auf einem geteilten Rechner sah die naechste Person die gespeicherten Fragen
+ * samt Dokumentauszuegen. Die Daten liegen jetzt in Postgres.
+ *
+ * Der Zugriff laeuft weiter ueber `useSyncExternalStore`, und das ist hier nicht
+ * Geschmackssache: Ein Speicher, den mehrere Komponenten lesen und den
+ * Netzantworten von aussen veraendern, ist genau der Fall, fuer den es gedacht
+ * ist. `getSnapshot` MUSS bei unveraenderten Daten dieselbe Referenz liefern —
+ * ein bei jedem Aufruf neu gebautes Objekt saehe React als Aenderung, rendert,
+ * baut erneut, und die Schleife steht.
+ *
+ * Die Nachrichten werden je Chat erst beim Oeffnen geholt. Bei 200 Chats mit
+ * hunderten Nachrichten waere ein vollstaendiger Verlauf beim Seitenaufbau
+ * mehrere Megabyte fuer etwas, das niemand liest.
  */
 
 export type Quelle = {
@@ -16,6 +24,7 @@ export type Quelle = {
   location: string | null;
   score: number;
   snippet: string;
+  collectionName?: string;
 };
 
 export type Nachricht = {
@@ -28,76 +37,38 @@ export type Nachricht = {
 export type Chat = {
   id: string;
   titel: string;
-  /** Nach einer Umbenennung darf der Auto-Titel nicht mehr eingreifen. */
   titelManuell: boolean;
-  nachrichten: Nachricht[];
-  erstelltAm: string;
   geaendertAm: string;
 };
 
 type Stand = {
   chats: Chat[];
   aktiveId: string | null;
+  /** Nachrichten je Chat, sobald geladen. */
+  nachrichten: Record<string, Nachricht[]>;
+  /** Erst nach dem ersten Laden steht fest, ob es Chats gibt. */
+  geladen: boolean;
+  fehler: string | null;
 };
 
-/** Das `v1` erlaubt spaeter eine Migration, ohne alte Staende falsch zu deuten. */
-const SCHLUESSEL = "rag-chat-verlauf-v1";
+const LEER: Stand = Object.freeze({
+  chats: [],
+  aktiveId: null,
+  nachrichten: {},
+  geladen: false,
+  fehler: null,
+}) as Stand;
 
-/** localStorage fasst rund 5 MB, und Fundstellen-Auszuege summieren sich. */
-const MAX_CHATS = 50;
-const MAX_TITEL_LAENGE = 60;
-
-const LEER: Stand = Object.freeze({ chats: [], aktiveId: null }) as Stand;
-
-/**
- * Der zuletzt gelesene Stand. `getSnapshot` MUSS bei unveraenderten Daten
- * dieselbe Referenz liefern — bei jedem Aufruf frisch zu parsen ergaebe jedes
- * Mal ein neues Objekt, React saehe eine Aenderung, rendert, parst erneut, und
- * die Schleife steht.
- */
-let zwischenspeicher: Stand | null = null;
-
+let stand: Stand = LEER;
 const abonnenten = new Set<() => void>();
 
-// --- Lesen -----------------------------------------------------------------
-
-function lies(): Stand {
-  if (typeof window === "undefined") return LEER;
-
-  try {
-    const roh = window.localStorage.getItem(SCHLUESSEL);
-    if (!roh) return LEER;
-
-    const geparst = JSON.parse(roh) as Partial<Stand>;
-    if (!Array.isArray(geparst.chats)) return LEER;
-
-    // Ein einzelner beschaedigter Eintrag darf nicht den ganzen Verlauf kippen.
-    const chats = geparst.chats.filter(istChat);
-    const aktiveId =
-      typeof geparst.aktiveId === "string" && chats.some((chat) => chat.id === geparst.aktiveId)
-        ? geparst.aktiveId
-        : null;
-
-    return { chats, aktiveId };
-  } catch {
-    return LEER;
-  }
-}
-
-function istChat(wert: unknown): wert is Chat {
-  if (!wert || typeof wert !== "object") return false;
-  const chat = wert as Partial<Chat>;
-  return (
-    typeof chat.id === "string" &&
-    typeof chat.titel === "string" &&
-    Array.isArray(chat.nachrichten) &&
-    typeof chat.geaendertAm === "string"
-  );
+function setze(teil: Partial<Stand>): void {
+  stand = { ...stand, ...teil };
+  abonnenten.forEach((abonnent) => abonnent());
 }
 
 export function getSnapshot(): Stand {
-  zwischenspeicher ??= lies();
-  return zwischenspeicher;
+  return stand;
 }
 
 export function getServerSnapshot(): Stand {
@@ -106,156 +77,260 @@ export function getServerSnapshot(): Stand {
 
 export function subscribe(beiAenderung: () => void): () => void {
   abonnenten.add(beiAenderung);
-
-  // Ein anderer Tab hat geschrieben — Zwischenspeicher verwerfen und neu lesen.
-  const beiSpeicher = (ereignis: StorageEvent) => {
-    if (ereignis.key !== null && ereignis.key !== SCHLUESSEL) return;
-    zwischenspeicher = null;
-    abonnenten.forEach((abonnent) => abonnent());
-  };
-
-  window.addEventListener("storage", beiSpeicher);
-
-  return () => {
-    abonnenten.delete(beiAenderung);
-    window.removeEventListener("storage", beiSpeicher);
-  };
+  return () => abonnenten.delete(beiAenderung);
 }
 
-// --- Schreiben -------------------------------------------------------------
+// --- Laden ------------------------------------------------------------------
 
-function schreib(stand: Stand): void {
-  // Aelteste Chats fallen hinten raus. `chats` ist stets nach letzter Aenderung
-  // sortiert, der Schnitt trifft also die am laengsten unberuehrten.
-  const gekuerzt: Stand = {
-    chats: stand.chats.slice(0, MAX_CHATS),
-    aktiveId: stand.aktiveId,
-  };
+/** Der alte Browser-Speicher. Wird beim ersten Laden uebernommen und entfernt. */
+const ALTER_SCHLUESSEL = "rag-chat-verlauf-v1";
 
-  zwischenspeicher = gekuerzt;
+let initialisierungLaeuft = false;
 
-  if (typeof window !== "undefined") {
-    try {
-      window.localStorage.setItem(SCHLUESSEL, JSON.stringify(gekuerzt));
-    } catch {
-      // Speicher voll: den aeltesten Chat opfern und einmal erneut versuchen.
-      // Lieber ein Chat weniger als eine Ausnahme, die die Oberflaeche anhaelt.
-      try {
-        const knapper: Stand = { ...gekuerzt, chats: gekuerzt.chats.slice(0, -1) };
-        window.localStorage.setItem(SCHLUESSEL, JSON.stringify(knapper));
-        zwischenspeicher = knapper;
-      } catch {
-        // Auch das schlaegt fehl — der Verlauf bleibt dann eben nur im Speicher
-        // dieser Sitzung. Die laufende Unterhaltung soll deswegen nicht abbrechen.
+/**
+ * Holt die Chatliste. Mehrfachaufrufe sind unschaedlich — die Ansicht ruft
+ * beim Aufbau, und React ruft Effekte in der Entwicklung doppelt.
+ */
+export async function initialisiere(): Promise<void> {
+  if (initialisierungLaeuft || stand.geladen) return;
+  initialisierungLaeuft = true;
+
+  try {
+    const mitgebracht = lieseAltenVerlauf();
+
+    if (mitgebracht.length > 0) {
+      // Uebernahme und Liste in einem Aufruf: Die Antwort enthaelt die
+      // vollstaendige Liste, ein zweiter Abruf waere ueberfluessig.
+      const antwort = await fetch("/api/chats", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uebernahme: mitgebracht }),
+      });
+
+      if (antwort.ok) {
+        const daten = (await antwort.json()) as { chats: Chat[] };
+        // Erst nach bestaetigter Uebernahme entfernen. Anders herum waere der
+        // Verlauf bei einem Netzfehler weg.
+        window.localStorage.removeItem(ALTER_SCHLUESSEL);
+        setze({ chats: daten.chats, geladen: true, fehler: null });
+        return;
       }
     }
+
+    const antwort = await fetch("/api/chats");
+    if (!antwort.ok) throw new Error(`Status ${antwort.status}`);
+
+    const daten = (await antwort.json()) as { chats: Chat[] };
+    setze({ chats: daten.chats, geladen: true, fehler: null });
+  } catch (error) {
+    setze({
+      geladen: true,
+      fehler:
+        error instanceof Error
+          ? `Der Verlauf konnte nicht geladen werden: ${error.message}`
+          : "Der Verlauf konnte nicht geladen werden.",
+    });
+  } finally {
+    initialisierungLaeuft = false;
   }
-
-  abonnenten.forEach((abonnent) => abonnent());
 }
 
-/** Sortiert absteigend nach letzter Aenderung. */
-function sortiert(chats: Chat[]): Chat[] {
-  return [...chats].sort((a, b) => b.geaendertAm.localeCompare(a.geaendertAm));
+function lieseAltenVerlauf(): { titel: string; nachrichten: Nachricht[] }[] {
+  if (typeof window === "undefined") return [];
+
+  try {
+    const roh = window.localStorage.getItem(ALTER_SCHLUESSEL);
+    if (!roh) return [];
+
+    const geparst = JSON.parse(roh) as {
+      chats?: { titel?: string; nachrichten?: Nachricht[] }[];
+    };
+
+    if (!Array.isArray(geparst.chats)) return [];
+
+    return geparst.chats
+      .filter((chat) => Array.isArray(chat?.nachrichten) && chat.nachrichten.length > 0)
+      .map((chat) => ({
+        titel: String(chat.titel ?? "Uebernommener Chat"),
+        nachrichten: chat.nachrichten as Nachricht[],
+      }));
+  } catch {
+    // Ein beschaedigter Altbestand ist kein Grund, die Anwendung anzuhalten.
+    return [];
+  }
 }
 
-function jetzt(): string {
-  return new Date().toISOString();
+// --- Auswahl ----------------------------------------------------------------
+
+export async function waehleChat(chatId: string | null): Promise<void> {
+  if (stand.aktiveId === chatId) return;
+
+  setze({ aktiveId: chatId });
+  if (chatId) await ladeNachrichten(chatId);
 }
 
-// --- Mutationen ------------------------------------------------------------
+async function ladeNachrichten(chatId: string): Promise<void> {
+  if (stand.nachrichten[chatId]) return;
 
-/** Legt einen leeren Chat an und macht ihn aktiv. Gibt dessen ID zurueck. */
-export function neuerChat(): string {
-  const stand = getSnapshot();
+  try {
+    const antwort = await fetch(`/api/chats/${chatId}`);
+    if (!antwort.ok) return;
 
+    const daten = (await antwort.json()) as { nachrichten: Nachricht[] };
+    setze({ nachrichten: { ...stand.nachrichten, [chatId]: daten.nachrichten } });
+  } catch {
+    // Beim naechsten Wechsel wird es erneut versucht.
+  }
+}
+
+/** Nachrichten des aktiven Chats, oder eine leere Liste. */
+export function nachrichtenVon(chatId: string | null): Nachricht[] {
+  return chatId ? (stand.nachrichten[chatId] ?? []) : [];
+}
+
+// --- Mutationen -------------------------------------------------------------
+
+/** Legt einen Chat an und macht ihn aktiv. Gibt dessen ID zurueck. */
+export async function neuerChat(): Promise<string | null> {
   // Ist der aktive Chat noch unbenutzt, bleibt es bei ihm. Sonst saeht
   // wiederholtes Klicken eine Reihe gleichnamiger leerer Eintraege.
   const aktiv = stand.chats.find((chat) => chat.id === stand.aktiveId);
-  if (aktiv && aktiv.nachrichten.length === 0) return aktiv.id;
+  if (aktiv && (stand.nachrichten[aktiv.id]?.length ?? 0) === 0) return aktiv.id;
 
-  const zeitpunkt = jetzt();
+  try {
+    const antwort = await fetch("/api/chats", { method: "POST" });
+    if (!antwort.ok) throw new Error(`Status ${antwort.status}`);
 
-  const chat: Chat = {
-    id: crypto.randomUUID(),
-    titel: "Neuer Chat",
-    titelManuell: false,
-    nachrichten: [],
-    erstelltAm: zeitpunkt,
-    geaendertAm: zeitpunkt,
-  };
+    const { chat } = (await antwort.json()) as { chat: Chat };
 
-  schreib({ chats: [chat, ...stand.chats], aktiveId: chat.id });
-  return chat.id;
+    setze({
+      chats: [chat, ...stand.chats],
+      aktiveId: chat.id,
+      nachrichten: { ...stand.nachrichten, [chat.id]: [] },
+    });
+
+    return chat.id;
+  } catch (error) {
+    setze({
+      fehler:
+        error instanceof Error
+          ? `Der Chat konnte nicht angelegt werden: ${error.message}`
+          : "Der Chat konnte nicht angelegt werden.",
+    });
+    return null;
+  }
 }
 
 /**
- * Haengt eine Nachricht an. Legt den Chat an, falls noch keiner aktiv ist —
- * dadurch entsteht beim ersten Absenden automatisch ein Eintrag, ohne dass
- * leere Chats herumliegen, nur weil jemand die Seite geoeffnet hat.
+ * Haengt eine Nachricht an — zuerst in der Ansicht, dann auf dem Server.
+ *
+ * Die Reihenfolge ist Absicht: Die eigene Frage soll ohne Verzoegerung
+ * erscheinen. Scheitert das Speichern, bleibt sie sichtbar und es erscheint ein
+ * Hinweis — sie aus der laufenden Unterhaltung zu entfernen waere
+ * verwirrender als ein nicht gesicherter Verlauf.
  */
-export function nachrichtAnhaengen(chatId: string, nachricht: Nachricht): void {
-  const stand = getSnapshot();
-  const chat = stand.chats.find((eintrag) => eintrag.id === chatId);
-  if (!chat) return;
+export async function nachrichtAnhaengen(
+  chatId: string,
+  nachricht: Nachricht,
+): Promise<void> {
+  const bisher = stand.nachrichten[chatId] ?? [];
+  const jetzt = new Date().toISOString();
 
-  const nachrichten = [...chat.nachrichten, nachricht];
-  const aktualisiert: Chat = {
-    ...chat,
-    nachrichten,
-    geaendertAm: jetzt(),
-    titel: chat.titelManuell ? chat.titel : autoTitel(nachrichten, chat.titel),
-  };
-
-  schreib({
-    chats: sortiert([aktualisiert, ...stand.chats.filter((eintrag) => eintrag.id !== chatId)]),
-    aktiveId: stand.aktiveId,
+  setze({
+    nachrichten: { ...stand.nachrichten, [chatId]: [...bisher, nachricht] },
+    chats: sortiert(
+      stand.chats.map((chat) =>
+        chat.id === chatId
+          ? {
+              ...chat,
+              geaendertAm: jetzt,
+              titel:
+                !chat.titelManuell && chat.titel === "Neuer Chat" && nachricht.role === "user"
+                  ? autoTitel(nachricht.content)
+                  : chat.titel,
+            }
+          : chat,
+      ),
+    ),
   });
+
+  try {
+    const antwort = await fetch(`/api/chats/${chatId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ nachricht }),
+    });
+
+    if (!antwort.ok) throw new Error(`Status ${antwort.status}`);
+  } catch {
+    setze({
+      fehler:
+        "Diese Nachricht konnte nicht im Verlauf gespeichert werden. Die Unterhaltung laeuft weiter.",
+    });
+  }
 }
 
-/** Der Titel entsteht aus der ersten Frage — knapp und wiedererkennbar. */
-function autoTitel(nachrichten: Nachricht[], bisher: string): string {
-  const erste = nachrichten.find((nachricht) => nachricht.role === "user");
-  if (!erste) return bisher;
-
-  const text = erste.content.replace(/\s+/g, " ").trim();
-  if (!text) return bisher;
-
-  return text.length <= MAX_TITEL_LAENGE ? text : `${text.slice(0, MAX_TITEL_LAENGE).trimEnd()}…`;
-}
-
-export function umbenennen(chatId: string, titel: string): void {
-  const stand = getSnapshot();
+export async function umbenennen(chatId: string, titel: string): Promise<void> {
   const sauber = titel.replace(/\s+/g, " ").trim();
   if (!sauber) return;
 
-  schreib({
+  setze({
     chats: stand.chats.map((chat) =>
       chat.id === chatId
         ? { ...chat, titel: sauber.slice(0, 120), titelManuell: true }
         : chat,
     ),
-    aktiveId: stand.aktiveId,
   });
+
+  await fetch(`/api/chats/${chatId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ titel: sauber }),
+  }).catch(() => setze({ fehler: "Der Chat konnte nicht umbenannt werden." }));
 }
 
-export function loeschen(chatId: string): void {
-  const stand = getSnapshot();
+export async function loeschen(chatId: string): Promise<void> {
   const uebrig = stand.chats.filter((chat) => chat.id !== chatId);
+  const { [chatId]: entfernt, ...restNachrichten } = stand.nachrichten;
+  void entfernt;
 
-  // War der geloeschte Chat aktiv, rueckt der zuletzt geaenderte nach.
+  // War der geloeschte Chat aktiv, ruckt der zuletzt geaenderte nach.
   const aktiveId = stand.aktiveId === chatId ? (uebrig[0]?.id ?? null) : stand.aktiveId;
 
-  schreib({ chats: uebrig, aktiveId });
+  setze({ chats: uebrig, aktiveId, nachrichten: restNachrichten });
+
+  await fetch(`/api/chats/${chatId}`, { method: "DELETE" }).catch(() =>
+    setze({ fehler: "Der Chat konnte nicht geloescht werden." }),
+  );
+
+  if (aktiveId) await ladeNachrichten(aktiveId);
 }
 
-export function alleLoeschen(): void {
-  schreib({ chats: [], aktiveId: null });
+export async function alleLoeschen(): Promise<void> {
+  setze({ chats: [], aktiveId: null, nachrichten: {} });
+
+  await fetch("/api/chats", { method: "DELETE" }).catch(() =>
+    setze({ fehler: "Die Chats konnten nicht geloescht werden." }),
+  );
 }
 
-export function aktivSetzen(chatId: string | null): void {
-  const stand = getSnapshot();
-  if (stand.aktiveId === chatId) return;
+export function verwerfeFehler(): void {
+  if (stand.fehler) setze({ fehler: null });
+}
 
-  schreib({ chats: stand.chats, aktiveId: chatId });
+// --- Hilfen -----------------------------------------------------------------
+
+function sortiert(chats: Chat[]): Chat[] {
+  return [...chats].sort((a, b) => b.geaendertAm.localeCompare(a.geaendertAm));
+}
+
+const MAX_TITEL_LAENGE = 60;
+
+/** Der Titel entsteht aus der ersten Frage — knapp und wiedererkennbar. */
+function autoTitel(inhalt: string): string {
+  const text = inhalt.replace(/\s+/g, " ").trim();
+  if (!text) return "Neuer Chat";
+  return text.length <= MAX_TITEL_LAENGE
+    ? text
+    : `${text.slice(0, MAX_TITEL_LAENGE).trimEnd()}…`;
 }
