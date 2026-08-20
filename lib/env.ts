@@ -46,17 +46,40 @@ export function requireEnv<const T extends readonly string[]>(
   return result as Record<T[number], string>;
 }
 
+/** Liest eine optionale Variable, ohne zu werfen. */
+export function optionalEnv(name: string): string | undefined {
+  return read(name);
+}
+
+/**
+ * Welche Variablen fuer welchen Bereich noetig sind.
+ *
+ * "chat" deckt den Frageweg ab, "collections" die Dokumentenverwaltung eines
+ * Nutzers, "admin" zusaetzlich nichts weiter — der Admin-Bereich braucht nur
+ * die Datenbank, weil Plaene und Groessenklassen dort liegen.
+ */
+const BEREICHE = {
+  chat: [
+    "DATABASE_URL",
+    "AI_GATEWAY_API_KEY",
+    "PINECONE_API_KEY",
+    "PINECONE_INDEX",
+    "UPSTASH_REDIS_REST_URL",
+    "UPSTASH_REDIS_REST_TOKEN",
+  ],
+  collections: [
+    "DATABASE_URL",
+    "PINECONE_API_KEY",
+    "PINECONE_INDEX",
+    "BLOB_READ_WRITE_TOKEN",
+  ],
+  admin: ["DATABASE_URL"],
+  auth: ["CLERK_SECRET_KEY", "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY"],
+} as const;
+
+export type Bereich = keyof typeof BEREICHE;
+
 /** Namen aller Variablen, die fuer den jeweiligen Bereich fehlen. */
-export function missingFor(area: "chat" | "admin"): string[] {
-  const needed =
-    area === "chat"
-      ? ["ANTHROPIC_API_KEY", "UPSTASH_VECTOR_REST_URL", "UPSTASH_VECTOR_REST_TOKEN"]
-      : [
-          "UPSTASH_VECTOR_REST_URL",
-          "UPSTASH_VECTOR_REST_TOKEN",
-          "BLOB_READ_WRITE_TOKEN",
-          "ADMIN_PASSWORD",
-          "AUTH_SECRET",
-        ];
-  return needed.filter((name) => read(name) === undefined);
+export function missingFor(area: Bereich): string[] {
+  return BEREICHE[area].filter((name) => read(name) === undefined);
 }
