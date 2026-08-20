@@ -40,6 +40,18 @@ cp .env.example .env.local   # und ausfüllen
 npm install
 ```
 
+**Zwei Fallen auf Vercel**, die zusammen die häufigste Ursache für einen
+`Missing publishableKey`-Fehler nach dem ersten Deployment sind:
+
+Environment-Variablen gelten **je Deployment**. Wer sie nachträglich hinterlegt, muss neu
+deployen — ein bestehendes Deployment übernimmt sie nicht.
+
+Sie werden **je Umgebung** freigeschaltet. Nur für Production gesetzt und dann eine
+Preview-URL geöffnet ergibt genau dieses Bild.
+
+Ist eine Clerk-Variable nicht da, antwortet die Anwendung mit 503 und benennt beides,
+statt in einem Stacktrace aus `.next/server/chunks` zu enden.
+
 ### 2. Datenbank anlegen
 
 ```bash

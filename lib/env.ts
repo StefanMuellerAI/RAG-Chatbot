@@ -52,11 +52,49 @@ export function optionalEnv(name: string): string | undefined {
 }
 
 /**
+ * Sind die Clerk-Schluessel da?
+ *
+ * Der Zugriff ist hier ausgeschrieben und laeuft ausdruecklich NICHT ueber
+ * `requireEnv`, und dafuer gibt es einen belegten Grund.
+ *
+ * Clerk liest den Publishable Key selbst wortwoertlich als
+ * `process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` (siehe
+ * @clerk/nextjs/server/constants). Next.js ersetzt einen solchen
+ * wortwoertlichen Zugriff beim Build durch den Wert, sofern er zum Buildzeitpunkt
+ * gesetzt ist; fehlt er, bleibt der Zugriff stehen und wird zur Laufzeit
+ * aufgeloest. Ein dynamischer Zugriff wie `process.env[name]` — so arbeitet
+ * `requireEnv` — wird nie ersetzt und liest immer die Laufzeitumgebung.
+ *
+ * Damit koennen beide Wege auseinanderfallen: Wurde beim Build gesetzt und zur
+ * Laufzeit nicht, sieht der wortwoertliche Zugriff den Wert und der dynamische
+ * nicht. Clerk sieht in diesem Fall den Wert und funktioniert. Eine Pruefung
+ * ueber `requireEnv` wuerde hier faelschlich Alarm schlagen.
+ *
+ * Diese Funktion liest deshalb genauso wie Clerk — dann stimmt ihre Antwort mit
+ * dem ueberein, was Clerk tatsaechlich vorfindet.
+ */
+export function clerkKonfigurationFehlt(): string[] {
+  const fehlt: string[] = [];
+
+  if (!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY) {
+    fehlt.push("NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY");
+  }
+  if (!process.env.CLERK_SECRET_KEY) {
+    fehlt.push("CLERK_SECRET_KEY");
+  }
+
+  return fehlt;
+}
+
+/**
  * Welche Variablen fuer welchen Bereich noetig sind.
  *
  * "chat" deckt den Frageweg ab, "collections" die Dokumentenverwaltung eines
  * Nutzers, "admin" zusaetzlich nichts weiter — der Admin-Bereich braucht nur
  * die Datenbank, weil Plaene und Groessenklassen dort liegen.
+ *
+ * Die Clerk-Schluessel stehen hier NICHT: Sie brauchen die wortwoertliche
+ * Pruefung von `clerkKonfigurationFehlt` und wuerden hier falsch beantwortet.
  */
 const BEREICHE = {
   chat: [
@@ -74,7 +112,6 @@ const BEREICHE = {
     "BLOB_READ_WRITE_TOKEN",
   ],
   admin: ["DATABASE_URL"],
-  auth: ["CLERK_SECRET_KEY", "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY"],
 } as const;
 
 export type Bereich = keyof typeof BEREICHE;
