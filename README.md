@@ -30,8 +30,13 @@ vercel integration add upstash   # setzt die Redis-Werte
 ```
 
 Blob-Store im Vercel-Projekt unter **Storage → Create Database → Blob**; das setzt
-`BLOB_READ_WRITE_TOKEN`. Pinecone-Schlüssel aus der [Pinecone-Konsole](https://app.pinecone.io),
-Gateway-Schlüssel aus dem [AI-Gateway-Bereich](https://vercel.com/dashboard/ai-gateway).
+`BLOB_READ_WRITE_TOKEN`. Pinecone-Schlüssel aus der [Pinecone-Konsole](https://app.pinecone.io).
+Den Gateway-Schlüssel braucht es **lokal**; auf Vercel authentifiziert das AI Gateway
+über den OIDC-Token des Projekts, ohne `AI_GATEWAY_API_KEY`.
+
+Wer Neon oder Redis über **Storage** im Dashboard anlegt, bekommt oft andere Namen
+(`POSTGRES_URL`, `KV_REST_API_URL` / `KV_REST_API_TOKEN`). Die App akzeptiert diese
+Aliase. Nach dem Setzen der Variablen ist ein erneutes Deployment nötig.
 
 Alle Variablen samt Zweck stehen in `.env.example`. Lokal:
 
@@ -184,9 +189,10 @@ machte.
 ## Prüfungen
 
 ```bash
-npm run pruefe            # beide zusammen
+npm run pruefe            # Chunks, Kontingente und Environment-Erkennung
 npm run pruefe:chunks     # die drei Zerlegungsstrategien
 npm run pruefe:kontingente # Grenzen der Pläne und Größenklassen
+npm run pruefe:env        # Aliase und OIDC der Environment-Variablen
 npm run typecheck
 npm run lint
 ```
@@ -280,9 +286,12 @@ und jede Größenprüfung vorher bestehen.
 Verarbeitungsschrittes gefahrlos — sie überschreibt dieselben Einträge statt Duplikate
 anzulegen — und ein Dokument lässt sich ohne mitgeführte ID-Liste entfernen.
 
-**Die Konfiguration wird erst im Request gelesen.** Dadurch läuft der allererste Build
-durch, obwohl noch kein Schlüssel hinterlegt ist. Fehlende Variablen führen zu einer
-benannten Meldung in der Oberfläche statt zu einem abgebrochenen Build.
+**Die Konfiguration wird erst im Request gelesen**, und zwar als `process.env.NAME`
+mit festem Literal. Next.js ersetzt nur diese Form; ein dynamisches
+`process.env[name]` bleibt im Server-Bundle leer, obwohl die Werte in Vercel
+stehen. Fehlende Variablen führen zu einer benannten Meldung in der Oberfläche
+statt zu einem abgebrochenen Build. Marketplace-Aliase (`POSTGRES_URL`,
+`KV_REST_API_*`) und der Vercel-OIDC-Token für das AI Gateway zählen mit.
 
 **Modell-Routing ist nicht nur ein Kostenhebel.** Anthropic zählt seine Minutenlimits
 getrennt pro Modell. Last über Haiku, Sonnet und Opus zu verteilen verdreifacht damit den

@@ -1,3 +1,4 @@
+import { connection } from "next/server";
 import NichtBereit from "@/components/NichtBereit";
 import SammlungenBereich from "@/components/SammlungenBereich";
 import { requireKontextFuerSeite } from "@/lib/auth/user";
@@ -8,6 +9,7 @@ import { PRESETS } from "@/lib/presets";
 export const dynamic = "force-dynamic";
 
 export default async function SammlungenSeite() {
+  await connection();
   const fehlt = missingFor("collections");
   if (fehlt.length > 0) {
     return <NichtBereit bereich="Die Dokumentenverwaltung" fehlt={fehlt} />;

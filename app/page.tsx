@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { connection } from "next/server";
 import ChatBereich from "@/components/ChatBereich";
 import NichtBereit from "@/components/NichtBereit";
 import { requireKontextFuerSeite } from "@/lib/auth/user";
@@ -9,6 +10,9 @@ import { leseTagesstand } from "@/lib/ratelimit";
 export const dynamic = "force-dynamic";
 
 export default async function ChatSeite() {
+  // Request-Zeit, nicht Build-Zeit: sonst waeren die Server-Variablen leer,
+  // obwohl sie in Vercel gesetzt sind.
+  await connection();
   const fehlt = missingFor("chat");
   if (fehlt.length > 0) return <NichtBereit bereich="Der Assistent" fehlt={fehlt} />;
 

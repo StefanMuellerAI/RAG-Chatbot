@@ -11,9 +11,10 @@ import { MIN_SCORE, sucheInSammlung, type Hit } from "./vector";
 
 /** Alle Modellaufrufe laufen ueber das AI Gateway. */
 export function modell(modelId: string) {
-  // Auf Vercel genuegt der OIDC-Token des Projekts; lokal braucht es den
-  // Schluessel. Die Pruefung hier liefert eine benannte Meldung statt eines
-  // nackten 401 aus dem Gateway, das dem Nutzer nichts sagt.
+  // Auf Vercel genuegt der OIDC-Token des Projekts (`VERCEL_OIDC_TOKEN`);
+  // lokal braucht es AI_GATEWAY_API_KEY. requireEnv akzeptiert beides.
+  // Die Pruefung liefert eine benannte Meldung statt eines nackten 401
+  // aus dem Gateway, das dem Nutzer nichts sagt.
   requireEnv("AI_GATEWAY_API_KEY");
   return gateway(modelId);
 }
