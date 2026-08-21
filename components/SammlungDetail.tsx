@@ -28,7 +28,43 @@ type Eigenschaften = {
   preset: Preset;
 };
 
-type Vorgang = { key: string; filename: string; text: string; fehler: boolean };
+type Vorgang = {
+  key: string;
+  filename: string;
+  text: string;
+  fehler: boolean;
+  dokumentId?: string;
+};
+
+/**
+ * Die Warteschlange oben ist lokaler Upload-Fortschritt. Sobald dasselbe
+ * Dokument im Bestand fertig oder fehlgeschlagen ist, gehoert die Zeile nicht
+ * mehr dorthin — sonst bleibt "In der Verarbeitung" stehen, obwohl die Tabelle
+ * darunter bereits "Durchsuchbar" zeigt.
+ */
+function abgleichen(vorgaenge: Vorgang[], dokumente: DocumentRecord[]): Vorgang[] {
+  const naechste = vorgaenge.flatMap((vorgang) => {
+    const dokument = vorgang.dokumentId
+      ? dokumente.find((eintrag) => eintrag.id === vorgang.dokumentId)
+      : dokumente.find((eintrag) => eintrag.filename === vorgang.filename);
+
+    if (!dokument) return [vorgang];
+    if (dokument.status === "fertig") return [];
+    if (dokument.status === "fehler") {
+      return [{ ...vorgang, text: dokument.error ?? "Fehlgeschlagen", fehler: true }];
+    }
+    return [vorgang];
+  });
+
+  if (
+    naechste.length === vorgaenge.length &&
+    naechste.every((eintrag, i) => eintrag === vorgaenge[i])
+  ) {
+    return vorgaenge;
+  }
+
+  return naechste;
+}
 
 export default function SammlungDetail({ sammlung, dokumente, preset }: Eigenschaften) {
   const router = useRouter();
@@ -47,6 +83,13 @@ export default function SammlungDetail({ sammlung, dokumente, preset }: Eigensch
     (dokument) => dokument.status === "wartet" || dokument.status === "laeuft",
   );
 
+  // router.refresh() nach dem letzten Abschluss liefert die fertigen Saetze
+  // als Props. Die Warteschlange oben kennt die nur, wenn wir sie hier
+  // dagegenhalten — die Polling-Schleife laeuft dann schon nicht mehr.
+  useEffect(() => {
+    setVorgaenge((bisher) => abgleichen(bisher, dokumente));
+  }, [dokumente]);
+
   const aktualisiere = useCallback(async () => {
     // Ueberholende Abfragen vermeiden: bei langsamer Verbindung wuerden sich
     // sonst mehrere ueberlagern und die Liste hin und her springen.
@@ -58,6 +101,7 @@ export default function SammlungDetail({ sammlung, dokumente, preset }: Eigensch
       if (!antwort.ok) return;
       const daten = (await antwort.json()) as { dokumente: DocumentRecord[] };
       setListe(daten.dokumente);
+      setVorgaenge((bisher) => abgleichen(bisher, daten.dokumente));
     } catch {
       // Ein misslungener Abfrageversuch ist kein Anlass fuer eine Fehlermeldung;
       // der naechste folgt in wenigen Sekunden.
@@ -115,7 +159,15 @@ export default function SammlungDetail({ sammlung, dokumente, preset }: Eigensch
         const angemeldet = await anmeldung.json().catch(() => ({}));
         if (!anmeldung.ok) throw new Error(angemeldet.error ?? `Status ${anmeldung.status}`);
 
-        setzeVorgang({ key, filename: datei.name, text: "Wird hochgeladen …", fehler: false });
+        const dokumentId = angemeldet.dokument.id as string;
+
+        setzeVorgang({
+          key,
+          filename: datei.name,
+          text: "Wird hochgeladen …",
+          fehler: false,
+          dokumentId,
+        });
 
         // Schritt 2: direkt vom Browser in den Blob-Store — so greift das
         // 4,5-MB-Limit fuer Request-Bodies von Serverless-Funktionen nicht.
@@ -126,10 +178,9 @@ export default function SammlungDetail({ sammlung, dokumente, preset }: Eigensch
         });
 
         // Schritt 3: Verarbeitung anstossen. Kommt sofort zurueck.
-        const angestossen = await fetch(
-          `/api/documents/${angemeldet.dokument.id}/verarbeiten`,
-          { method: "POST" },
-        );
+        const angestossen = await fetch(`/api/documents/${dokumentId}/verarbeiten`, {
+          method: "POST",
+        });
 
         if (!angestossen.ok) {
           const daten = await angestossen.json().catch(() => ({}));
@@ -141,6 +192,7 @@ export default function SammlungDetail({ sammlung, dokumente, preset }: Eigensch
           filename: datei.name,
           text: "In der Verarbeitung",
           fehler: false,
+          dokumentId,
         });
       } catch (error) {
         setzeVorgang({
