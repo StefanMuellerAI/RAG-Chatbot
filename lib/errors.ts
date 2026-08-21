@@ -53,3 +53,26 @@ export class ValidationError extends Error {
     this.name = "ValidationError";
   }
 }
+
+/**
+ * Lesbare Meldung aus einem unbekannten Fehler.
+ *
+ * Workflow-Schritte liefern FatalError nach der Serialisierung oft als
+ * schlichtes Objekt. Dann greift `instanceof Error` nicht — die eigentliche
+ * Meldung steht aber weiter in `message`. Ohne diesen Zugriff zeigte die
+ * Oberflaeche nur "Unbekannter Fehler.", obwohl der Ablauf den Grund kannte.
+ */
+export function fehlerMeldung(
+  error: unknown,
+  fallback = "Unbekannter Fehler.",
+): string {
+  if (error instanceof Error && error.message.trim()) return error.message;
+  if (typeof error === "string" && error.trim()) return error;
+
+  if (error && typeof error === "object") {
+    const meldung = (error as { message?: unknown }).message;
+    if (typeof meldung === "string" && meldung.trim()) return meldung;
+  }
+
+  return fallback;
+}

@@ -1,5 +1,6 @@
 import { RetryableError } from "workflow";
 import { loescheUnterPraefix, nutzerPraefix } from "@/lib/documents";
+import { fehlerMeldung } from "@/lib/errors";
 import { loescheSammlung } from "@/lib/vector";
 
 /**
@@ -24,7 +25,7 @@ async function loescheNamespace(collectionId: string): Promise<void> {
   try {
     await loescheSammlung(collectionId);
   } catch (error) {
-    const meldung = error instanceof Error ? error.message : String(error);
+    const meldung = fehlerMeldung(error);
     // Ueberlast lohnt einen weiteren Versuch; alles andere waere eine Schleife.
     if (/429|ueberlastet|timeout|ECONNRESET/i.test(meldung)) {
       throw new RetryableError(meldung, { retryAfter: "1m" });

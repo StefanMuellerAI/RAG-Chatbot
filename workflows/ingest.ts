@@ -11,7 +11,7 @@ import {
   schliesseDokumentAb,
   setzeDokumentStatus,
 } from "@/lib/documents";
-import { QuotaError } from "@/lib/errors";
+import { QuotaError, fehlerMeldung } from "@/lib/errors";
 import { extractBlocks } from "@/lib/extract";
 import { chunkBlocks } from "@/lib/chunk";
 import { DEFAULT_MODEL_ID } from "@/lib/models";
@@ -172,7 +172,7 @@ async function extrahiereUndSchreibe(
       abschnitte,
     );
   } catch (error) {
-    const meldung = error instanceof Error ? error.message : String(error);
+    const meldung = fehlerMeldung(error);
 
     // Ueberlast ist voruebergehend und lohnt einen weiteren Versuch. Ein
     // falsch angelegter Index dagegen wird sich durch Wiederholen nie
@@ -280,10 +280,7 @@ export async function verarbeiteDokument(docId: string): Promise<void> {
   } catch (error) {
     // Der Fehler muss am Dokument landen, sonst steht es bis in alle Ewigkeit
     // auf "laeuft" und der Nutzer erfaehrt nie, woran es lag.
-    await vermerkeFehler(
-      docId,
-      error instanceof Error ? error.message : "Unbekannter Fehler.",
-    );
+    await vermerkeFehler(docId, fehlerMeldung(error));
     throw error;
   }
 }
