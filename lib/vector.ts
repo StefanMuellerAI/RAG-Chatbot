@@ -1,5 +1,6 @@
 import { Pinecone } from "@pinecone-database/pinecone";
 import { requireEnv } from "./env";
+import { fehlerMeldung } from "./errors";
 
 /**
  * Vektorsuche ueber Pinecone Serverless — ein Namespace je Sammlung.
@@ -217,7 +218,9 @@ export async function zaehleVektoren(collectionId: string): Promise<number> {
 }
 
 function istUnbekannterNamespace(error: unknown): boolean {
-  const meldung = error instanceof Error ? error.message : String(error);
+  const meldung = fehlerMeldung(error);
+  // Ein 404 auf /indexes/... ist ein fehlender Index, kein leerer Namespace.
+  if (/\/indexes\//i.test(meldung)) return false;
   return /namespace not found|not found.*namespace|404/i.test(meldung);
 }
 
@@ -227,7 +230,16 @@ function istUnbekannterNamespace(error: unknown): boolean {
  * generischen Meldung — hier wird daraus ein verwertbarer Hinweis.
  */
 function erklaerePineconeFehler(error: unknown): string {
-  const meldung = error instanceof Error ? error.message : String(error);
+  const meldung = fehlerMeldung(error);
+
+  if (/HTTP status 404/i.test(meldung) && /\/indexes\//i.test(meldung)) {
+    return (
+      `Der Pinecone-Index existiert nicht (${meldung}). ` +
+      `Die Anwendung braucht einen Index mit eingebautem Embedding-Modell. ` +
+      `Bitte einmal "npm run pinecone:init" ausfuehren; das legt einen Index mit ` +
+      `dem Modell "${EMBEDDING_MODELL}" und dem Textfeld "${TEXT_FELD}" an.`
+    );
+  }
 
   if (/embed|field_map|fieldMap|integrated|dimension/i.test(meldung)) {
     return (
