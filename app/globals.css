@@ -363,6 +363,18 @@ td select {
   margin-bottom: 16px;
 }
 
+.meldung p {
+  margin: 0 0 8px;
+}
+
+.meldung p:last-child {
+  margin-bottom: 0;
+}
+
+.meldung-diagnose {
+  font-size: 13px;
+}
+
 .meldung-neutral {
   border-left-color: var(--grau-600);
   background: var(--grau-100);
