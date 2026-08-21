@@ -7,15 +7,17 @@
  * Gelegenheit hatte, die Keys zu hinterlegen. Stattdessen wird jeder Wert erst
  * im Request-Handler angefordert.
  *
- * Next.js (Webpack/Turbopack) ersetzt nur die Form `process.env.NAME` mit
- * festem Literal. `process.env[name]` sieht im Server-Bundle ein Objekt, in
- * dem nur Keys stehen, die irgendwo statisch vorkommen — der Rest wirkt
- * unset, obwohl Vercel die Werte zur Laufzeit injiziert. Deshalb muss jeder
- * von der App gelesene Name hier als Literal stehen.
+ * Zwei Lesewelten, die Next.js / Turbopack auseinanderreisst:
  *
- * Marketplace-Aliase: Neon setzt oft POSTGRES_URL, Vercel-Storage-Redis
- * KV_REST_API_*, und auf Vercel authentifiziert das AI Gateway per OIDC
- * (`VERCEL_OIDC_TOKEN`) ohne eigenen Gateway-Schluessel.
+ * 1. `process.env.NAME` mit festem Literal kann der Bundler zur Build-Zeit
+ *    durch den damaligen Wert ersetzen. Fehlt der Key beim Build, steht dort
+ *    dauerhaft leer — auch wenn Vercel ihn zur Laufzeit in die Funktion legt.
+ * 2. `globalThis.process.env[name]` umgeht die Ersetzung und sieht das echte
+ *    Node-Environment der laufenden Instanz.
+ *
+ * `roh()` nimmt beides. Marketplace-Aliase (Neon: POSTGRES_URL, Redis:
+ * KV_REST_API_*, AI Gateway: VERCEL_OIDC_TOKEN) zaehlen fuer den kanonischen
+ * Namen mit.
  */
 
 export class MissingConfigError extends Error {
@@ -35,26 +37,46 @@ function nichtLeer(wert: string | undefined): string | undefined {
   return wert && wert.length > 0 ? wert : undefined;
 }
 
-function read(name: string): string | undefined {
+/** Echtes Node-`process.env` der laufenden Instanz, ohne Turbopack-Ersetzung. */
+function live(name: string): string | undefined {
+  const env = (globalThis as { process?: { env?: NodeJS.ProcessEnv } }).process?.env;
+  return nichtLeer(env?.[name]);
+}
+
+/**
+ * Statische Form, die Next.js kennt. Fallback, falls der Bundler den Wert
+ * zur Build-Zeit eingesetzt hat und `globalThis.process.env` ihn nicht zeigt.
+ */
+function statisch(name: string): string | undefined {
   switch (name) {
     case "DATABASE_URL":
-      return (
-        nichtLeer(process.env.DATABASE_URL) ??
-        nichtLeer(process.env.POSTGRES_URL) ??
-        nichtLeer(process.env.POSTGRES_PRISMA_URL)
-      );
+      return nichtLeer(process.env.DATABASE_URL);
+    case "POSTGRES_URL":
+      return nichtLeer(process.env.POSTGRES_URL);
+    case "POSTGRES_PRISMA_URL":
+      return nichtLeer(process.env.POSTGRES_PRISMA_URL);
     case "AI_GATEWAY_API_KEY":
-      return nichtLeer(process.env.AI_GATEWAY_API_KEY) ?? nichtLeer(process.env.VERCEL_OIDC_TOKEN);
+      return nichtLeer(process.env.AI_GATEWAY_API_KEY);
+    case "VERCEL_OIDC_TOKEN":
+      return nichtLeer(process.env.VERCEL_OIDC_TOKEN);
+    case "VERCEL":
+      return nichtLeer(process.env.VERCEL);
+    case "VERCEL_ENV":
+      return nichtLeer(process.env.VERCEL_ENV);
     case "PINECONE_API_KEY":
       return nichtLeer(process.env.PINECONE_API_KEY);
     case "PINECONE_INDEX":
       return nichtLeer(process.env.PINECONE_INDEX);
     case "UPSTASH_REDIS_REST_URL":
-      return nichtLeer(process.env.UPSTASH_REDIS_REST_URL) ?? nichtLeer(process.env.KV_REST_API_URL);
+      return nichtLeer(process.env.UPSTASH_REDIS_REST_URL);
     case "UPSTASH_REDIS_REST_TOKEN":
-      return (
-        nichtLeer(process.env.UPSTASH_REDIS_REST_TOKEN) ?? nichtLeer(process.env.KV_REST_API_TOKEN)
-      );
+      return nichtLeer(process.env.UPSTASH_REDIS_REST_TOKEN);
+    case "KV_REST_API_URL":
+      return nichtLeer(process.env.KV_REST_API_URL);
+    case "KV_REST_API_TOKEN":
+      return nichtLeer(process.env.KV_REST_API_TOKEN);
+    case "KV_URL":
+      return nichtLeer(process.env.KV_URL);
     case "BLOB_READ_WRITE_TOKEN":
       return nichtLeer(process.env.BLOB_READ_WRITE_TOKEN);
     case "CLERK_SECRET_KEY":
@@ -68,7 +90,26 @@ function read(name: string): string | undefined {
     case "GLOBAL_QUESTIONS_PER_MINUTE":
       return nichtLeer(process.env.GLOBAL_QUESTIONS_PER_MINUTE);
     default:
-      return nichtLeer(process.env[name]);
+      return undefined;
+  }
+}
+
+function roh(name: string): string | undefined {
+  return live(name) ?? statisch(name);
+}
+
+function read(name: string): string | undefined {
+  switch (name) {
+    case "DATABASE_URL":
+      return roh("DATABASE_URL") ?? roh("POSTGRES_URL") ?? roh("POSTGRES_PRISMA_URL");
+    case "AI_GATEWAY_API_KEY":
+      return roh("AI_GATEWAY_API_KEY") ?? roh("VERCEL_OIDC_TOKEN");
+    case "UPSTASH_REDIS_REST_URL":
+      return roh("UPSTASH_REDIS_REST_URL") ?? roh("KV_REST_API_URL") ?? roh("KV_URL");
+    case "UPSTASH_REDIS_REST_TOKEN":
+      return roh("UPSTASH_REDIS_REST_TOKEN") ?? roh("KV_REST_API_TOKEN");
+    default:
+      return roh(name);
   }
 }
 
@@ -128,4 +169,52 @@ export type Bereich = keyof typeof BEREICHE;
 /** Namen aller Variablen, die fuer den jeweiligen Bereich fehlen. */
 export function missingFor(area: Bereich): string[] {
   return BEREICHE[area].filter((name) => read(name) === undefined);
+}
+
+/**
+ * Welche Keys diese Instanz wirklich sieht — nur Namen, keine Werte.
+ *
+ * Damit laesst sich unterscheiden: Variable in Vercel nur fuer Development
+ * hinterlegt, anderer Name (POSTGRES_URL statt DATABASE_URL), oder der
+ * Bundler hat den Build-Zeit-Wert leer eingesetzt.
+ */
+const DIAGNOSE_KEYS = [
+  "VERCEL",
+  "VERCEL_ENV",
+  "VERCEL_OIDC_TOKEN",
+  "DATABASE_URL",
+  "POSTGRES_URL",
+  "POSTGRES_PRISMA_URL",
+  "AI_GATEWAY_API_KEY",
+  "PINECONE_API_KEY",
+  "PINECONE_INDEX",
+  "UPSTASH_REDIS_REST_URL",
+  "UPSTASH_REDIS_REST_TOKEN",
+  "KV_REST_API_URL",
+  "KV_REST_API_TOKEN",
+  "KV_URL",
+  "BLOB_READ_WRITE_TOKEN",
+  "CLERK_SECRET_KEY",
+  "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY",
+  "CLERK_WEBHOOK_SIGNING_SECRET",
+] as const;
+
+export type EnvDiagnose = {
+  vercelEnv: string;
+  gesetzt: string[];
+  leer: string[];
+};
+
+export function envDiagnose(): EnvDiagnose {
+  const gesetzt: string[] = [];
+  const leer: string[] = [];
+  for (const name of DIAGNOSE_KEYS) {
+    if (roh(name)) gesetzt.push(name);
+    else leer.push(name);
+  }
+  return {
+    vercelEnv: roh("VERCEL_ENV") ?? "unbekannt",
+    gesetzt,
+    leer,
+  };
 }

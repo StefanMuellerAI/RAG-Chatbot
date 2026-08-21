@@ -1,4 +1,4 @@
-import { missingFor, requireEnv, MissingConfigError } from "../lib/env";
+import { missingFor, requireEnv, MissingConfigError, envDiagnose } from "../lib/env";
 
 /**
  * Pruefung der Environment-Erkennung.
@@ -104,6 +104,15 @@ pruefe(
   geworfen?.join(",") === "PINECONE_INDEX",
   geworfen?.join(","),
 );
+
+setzen({ POSTGRES_URL: "postgres://neon.example/db", PINECONE_API_KEY: "pc-key" });
+const diagnose = envDiagnose();
+pruefe(
+  "Diagnose listet den Roh-Namen POSTGRES_URL, nicht den Alias DATABASE_URL",
+  diagnose.gesetzt.includes("POSTGRES_URL") && diagnose.leer.includes("DATABASE_URL"),
+  `gesetzt=${diagnose.gesetzt.join(",")} leer=${diagnose.leer.join(",")}`,
+);
+pruefe("Diagnose sieht PINECONE_API_KEY", diagnose.gesetzt.includes("PINECONE_API_KEY"));
 
 for (const name of SCHLUESSEL) {
   const wert = original[name];
