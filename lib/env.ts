@@ -16,8 +16,12 @@
  *    Node-Environment der laufenden Instanz.
  *
  * `roh()` nimmt beides. Marketplace-Aliase (Neon: POSTGRES_URL, Redis:
- * KV_REST_API_*, AI Gateway: VERCEL_OIDC_TOKEN) zaehlen fuer den kanonischen
- * Namen mit.
+ * KV_REST_API_*) zaehlen fuer den kanonischen Namen mit.
+ *
+ * Das AI Gateway authentifiziert auf Vercel nicht ueber `VERCEL_OIDC_TOKEN` im
+ * Environment — der Token liegt am Request-Header `x-vercel-oidc-token` und
+ * wird von `@vercel/oidc` gelesen. `PINECONE_INDEX` faellt auf
+ * `wissensassistent` zurueck, denselben Namen wie `npm run pinecone:init`.
  */
 
 export class MissingConfigError extends Error {
@@ -104,6 +108,8 @@ function read(name: string): string | undefined {
       return roh("DATABASE_URL") ?? roh("POSTGRES_URL") ?? roh("POSTGRES_PRISMA_URL");
     case "AI_GATEWAY_API_KEY":
       return roh("AI_GATEWAY_API_KEY") ?? roh("VERCEL_OIDC_TOKEN");
+    case "PINECONE_INDEX":
+      return roh("PINECONE_INDEX") ?? "wissensassistent";
     case "UPSTASH_REDIS_REST_URL":
       return roh("UPSTASH_REDIS_REST_URL") ?? roh("KV_REST_API_URL") ?? roh("KV_URL");
     case "UPSTASH_REDIS_REST_TOKEN":
@@ -167,8 +173,35 @@ const BEREICHE = {
 export type Bereich = keyof typeof BEREICHE;
 
 /** Namen aller Variablen, die fuer den jeweiligen Bereich fehlen. */
-export function missingFor(area: Bereich): string[] {
-  return BEREICHE[area].filter((name) => read(name) === undefined);
+export async function missingFor(area: Bereich): Promise<string[]> {
+  const fehlt: string[] = [];
+  for (const name of BEREICHE[area]) {
+    if (name === "AI_GATEWAY_API_KEY") {
+      if (!(await gatewayBereit())) fehlt.push(name);
+    } else if (read(name) === undefined) {
+      fehlt.push(name);
+    }
+  }
+  return fehlt;
+}
+
+/**
+ * Auf Vercel liegt der OIDC-Token am Request, nicht in process.env.
+ * Lokal zaehlt AI_GATEWAY_API_KEY bzw. ein per `vercel env pull` geholtes
+ * VERCEL_OIDC_TOKEN.
+ */
+async function gatewayBereit(): Promise<boolean> {
+  if (roh("AI_GATEWAY_API_KEY") || roh("VERCEL_OIDC_TOKEN")) return true;
+  return (await oidcHeader()) !== undefined;
+}
+
+async function oidcHeader(): Promise<string | undefined> {
+  try {
+    const { headers } = await import("next/headers");
+    return nichtLeer((await headers()).get("x-vercel-oidc-token") ?? undefined);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -205,13 +238,15 @@ export type EnvDiagnose = {
   leer: string[];
 };
 
-export function envDiagnose(): EnvDiagnose {
+export async function envDiagnose(): Promise<EnvDiagnose> {
   const gesetzt: string[] = [];
   const leer: string[] = [];
   for (const name of DIAGNOSE_KEYS) {
     if (roh(name)) gesetzt.push(name);
     else leer.push(name);
   }
+  if (await oidcHeader()) gesetzt.push("x-vercel-oidc-token");
+  else leer.push("x-vercel-oidc-token");
   return {
     vercelEnv: roh("VERCEL_ENV") ?? "unbekannt",
     gesetzt,

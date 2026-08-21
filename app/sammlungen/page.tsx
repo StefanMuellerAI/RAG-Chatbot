@@ -10,7 +10,7 @@ export const dynamic = "force-dynamic";
 
 export default async function SammlungenSeite() {
   await connection();
-  const fehlt = missingFor("collections");
+  const fehlt = await missingFor("collections");
   if (fehlt.length > 0) {
     return <NichtBereit bereich="Die Dokumentenverwaltung" fehlt={fehlt} />;
   }

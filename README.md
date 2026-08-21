@@ -31,12 +31,18 @@ vercel integration add upstash   # setzt die Redis-Werte
 
 Blob-Store im Vercel-Projekt unter **Storage → Create Database → Blob**; das setzt
 `BLOB_READ_WRITE_TOKEN`. Pinecone-Schlüssel aus der [Pinecone-Konsole](https://app.pinecone.io).
-Den Gateway-Schlüssel braucht es **lokal**; auf Vercel authentifiziert das AI Gateway
-über den OIDC-Token des Projekts, ohne `AI_GATEWAY_API_KEY`.
+Den Gateway-Schlüssel braucht es **lokal**. Auf Vercel liegt der OIDC-Token am
+Request-Header `x-vercel-oidc-token`, nicht in `process.env` — deshalb reicht
+dort kein manuell hinterlegtes `VERCEL_OIDC_TOKEN`. OIDC Federation in den
+Projekteinstellungen muss an sein; sonst einen `AI_GATEWAY_API_KEY` setzen.
+
+`PINECONE_INDEX` ist optional und fällt auf `wissensassistent` zurück.
 
 Wer Neon oder Redis über **Storage** im Dashboard anlegt, bekommt oft andere Namen
 (`POSTGRES_URL`, `KV_REST_API_URL` / `KV_REST_API_TOKEN`). Die App akzeptiert diese
-Aliase. Nach dem Setzen der Variablen ist ein erneutes Deployment nötig.
+Aliase. Ohne Neon und ohne Redis bleibt der Chat gesperrt — Clerk, Blob und der
+Pinecone-Key allein reichen nicht. Nach dem Setzen der Variablen ist ein erneutes
+Deployment nötig.
 
 Alle Variablen samt Zweck stehen in `.env.example`. Lokal:
 
