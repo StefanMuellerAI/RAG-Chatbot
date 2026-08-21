@@ -57,7 +57,7 @@ export const plans = pgTable("plans", {
    * koennte sonst das Monatsbudget des Modellanbieters aufbrauchen.
    */
   maxQuestionsPerDay: integer("max_questions_per_day").notNull(),
-  /** Modellkennung fuer das AI Gateway, z. B. "anthropic/claude-haiku-4.5". */
+  /** Modellkennung fuer das AI Gateway, z. B. "google/gemini-2.5-flash-lite". */
   modelId: text("model_id").notNull(),
   /** Genau ein Plan traegt true — den bekommen neue Registrierungen. */
   isDefault: boolean("is_default").default(false).notNull(),

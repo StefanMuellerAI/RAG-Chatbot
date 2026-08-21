@@ -80,7 +80,7 @@ function kontextMit(klassenRang: number, planLabel = "S"): Kontext {
       maxSizeClassId: planLabel,
       maxCollections: 3,
       maxQuestionsPerDay: 200,
-      modelId: "anthropic/claude-haiku-4.5",
+      modelId: "google/gemini-2.5-flash-lite",
       isDefault: true,
     },
     maxSizeClass: klasse(planLabel, klassenRang),

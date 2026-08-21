@@ -130,15 +130,16 @@ export async function POST(request: Request) {
 
     const ergebnis = streamText({
       model: modell(modelId),
-      // Systemanweisung und Sammlungskatalog aendern sich zwischen den Fragen
-      // eines Nutzers nicht. Als Cache-Marke gekennzeichnet zaehlen sie nicht
-      // gegen das Minutenlimit des Anbieters und kosten ein Zehntel - bei
-      // mehrstufigen Werkzeugaufrufen, die den Prompt jedes Mal erneut senden,
-      // ist das der Unterschied zwischen tragbar und nicht tragbar.
+      // Anthropic-Prompt-Cache nur, wenn der Plan noch ein Claude-Modell
+      // traegt. Gemini und OpenAI ignorieren die Marke nicht immer still.
       instructions: {
         role: "system",
         content: anweisung,
-        providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } },
+        ...(modelId.startsWith("anthropic/")
+          ? {
+              providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } },
+            }
+          : {}),
       },
       messages: nachrichten,
       tools: werkzeuge,

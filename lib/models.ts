@@ -5,12 +5,10 @@
  * verbucht wird. Ohne diese Zuordnung ist bei 15.000 Nutzern nicht
  * feststellbar, wer die Rechnung treibt.
  *
- * Der Plan eines Nutzers waehlt das Modell (plans.model_id). Dass hier drei
- * Modelle stehen und nicht eines, ist nicht nur eine Kostenfrage: Anthropic
- * zaehlt seine Minutenlimits GETRENNT PRO MODELL. Wer die Last auf Haiku,
- * Sonnet und Opus verteilt, hat damit das Dreifache an Durchsatz zur
- * Verfuegung — der entscheidende Hebel, um ueberhaupt in die Naehe von
- * 15.000 gleichzeitigen Nutzern zu kommen.
+ * Der Plan eines Nutzers waehlt das Modell (plans.model_id). Die drei Stufen
+ * sind Modelle, die das AI Gateway im Free-Tier zulaesst: Anthropic (Haiku,
+ * Sonnet, Opus) ist dort gesperrt. Getestet gegen denselben Account:
+ * Gemini 2.5 Flash Lite / Flash und GPT-5 mini antworten, Claude nicht.
  *
  * Preise in US-Dollar je 1 Mio. Token, Stand August 2026. Cache-Treffer kosten
  * ein Zehntel des Eingabepreises.
@@ -26,30 +24,40 @@ export type ModelInfo = {
 
 export const MODELS: readonly ModelInfo[] = [
   {
-    id: "anthropic/claude-haiku-4.5",
-    label: "Haiku 4.5 — schnell und guenstig",
-    inputPerMillion: 1,
-    outputPerMillion: 5,
-    cacheReadPerMillion: 0.1,
+    id: "google/gemini-2.5-flash-lite",
+    label: "Gemini 2.5 Flash Lite — schnell und guenstig",
+    inputPerMillion: 0.1,
+    outputPerMillion: 0.4,
+    cacheReadPerMillion: 0.01,
   },
   {
-    id: "anthropic/claude-sonnet-5",
-    label: "Sonnet 5 — ausgewogen",
-    inputPerMillion: 3,
-    outputPerMillion: 15,
-    cacheReadPerMillion: 0.3,
+    id: "google/gemini-2.5-flash",
+    label: "Gemini 2.5 Flash — ausgewogen",
+    inputPerMillion: 0.3,
+    outputPerMillion: 2.5,
+    cacheReadPerMillion: 0.03,
   },
   {
-    id: "anthropic/claude-opus-5",
-    label: "Opus 5 — hoechste Qualitaet",
-    inputPerMillion: 5,
-    outputPerMillion: 25,
-    cacheReadPerMillion: 0.5,
+    id: "openai/gpt-5-mini",
+    label: "GPT-5 mini — hoehere Qualitaet",
+    inputPerMillion: 0.25,
+    outputPerMillion: 2,
+    cacheReadPerMillion: 0.025,
   },
 ] as const;
 
 /** Fallback, falls ein Plan eine unbekannte Modellkennung traegt. */
-export const DEFAULT_MODEL_ID = "anthropic/claude-haiku-4.5";
+export const DEFAULT_MODEL_ID = "google/gemini-2.5-flash-lite";
+
+/**
+ * Alte Anthropic-Kennungen, die im Free-Tier nicht mehr gehen.
+ * Der Seed setzt bestehende Plaene darauf um.
+ */
+export const MODELL_UMSTELLUNG: Readonly<Record<string, string>> = {
+  "anthropic/claude-haiku-4.5": "google/gemini-2.5-flash-lite",
+  "anthropic/claude-sonnet-5": "google/gemini-2.5-flash",
+  "anthropic/claude-opus-5": "openai/gpt-5-mini",
+};
 
 export function findModel(id: string): ModelInfo {
   return MODELS.find((model) => model.id === id) ?? MODELS[0];

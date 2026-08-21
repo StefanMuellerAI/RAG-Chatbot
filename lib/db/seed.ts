@@ -1,3 +1,5 @@
+import { eq } from "drizzle-orm";
+import { MODELL_UMSTELLUNG } from "../models";
 import { getDb } from "./index";
 import { plans, sizeClasses } from "./schema";
 
@@ -68,7 +70,7 @@ const PLAENE = [
     maxSizeClassId: "S",
     maxCollections: 3,
     maxQuestionsPerDay: 200,
-    modelId: "anthropic/claude-haiku-4.5",
+    modelId: "google/gemini-2.5-flash-lite",
     isDefault: true,
   },
   {
@@ -77,7 +79,7 @@ const PLAENE = [
     maxSizeClassId: "M",
     maxCollections: 10,
     maxQuestionsPerDay: 1_000,
-    modelId: "anthropic/claude-haiku-4.5",
+    modelId: "google/gemini-2.5-flash-lite",
     isDefault: false,
   },
   {
@@ -86,7 +88,7 @@ const PLAENE = [
     maxSizeClassId: "L",
     maxCollections: 25,
     maxQuestionsPerDay: 5_000,
-    modelId: "anthropic/claude-sonnet-5",
+    modelId: "google/gemini-2.5-flash",
     isDefault: false,
   },
   {
@@ -95,7 +97,7 @@ const PLAENE = [
     maxSizeClassId: "XL",
     maxCollections: 100,
     maxQuestionsPerDay: 25_000,
-    modelId: "anthropic/claude-opus-5",
+    modelId: "openai/gpt-5-mini",
     isDefault: false,
   },
 ] as const;
@@ -106,4 +108,14 @@ export async function seedStammdaten(): Promise<void> {
   // Groessenklassen zuerst: die Plaene verweisen darauf.
   await db.insert(sizeClasses).values([...GROESSENKLASSEN]).onConflictDoNothing();
   await db.insert(plans).values([...PLAENE]).onConflictDoNothing();
+
+  // Bestehende Plaene behalten durch onConflictDoNothing ihre Modellkennung.
+  // Anthropic ist im AI-Gateway-Free-Tier gesperrt — ohne diese Umstellung
+  // wuerde der Chat weiter gegen Claude laufen und mit 403 scheitern.
+  for (const [alt, neu] of Object.entries(MODELL_UMSTELLUNG)) {
+    await db
+      .update(plans)
+      .set({ modelId: neu, updatedAt: new Date() })
+      .where(eq(plans.modelId, alt));
+  }
 }
