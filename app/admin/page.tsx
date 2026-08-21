@@ -20,7 +20,7 @@ export default async function AdminSeite({
   searchParams: Promise<{ suche?: string; seite?: string }>;
 }) {
   await connection();
-  const fehlt = missingFor("admin");
+  const fehlt = await missingFor("admin");
   if (fehlt.length > 0) return <NichtBereit bereich="Die Administration" fehlt={fehlt} />;
 
   // Zur Anmeldung, wenn niemand angemeldet ist. Ist jemand angemeldet, hat aber

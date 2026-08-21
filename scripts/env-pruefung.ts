@@ -6,8 +6,9 @@ import { missingFor, requireEnv, MissingConfigError, envDiagnose } from "../lib/
  *   npm run pruefe:env
  *
  * Die Chat-Seite zeigte gesetzte Vercel-Variablen als fehlend, weil
- * `process.env[name]` im Next-Bundle leer bleibt und weil Marketplace-
- * Integrationen andere Namen setzen. Die Faelle unten halten beides fest.
+ * `process.env[name]` im Next-Bundle leer bleibt, Marketplace-Integrationen
+ * andere Namen setzen, und der OIDC-Token auf Vercel im Request-Header
+ * liegt statt in process.env. Die Faelle unten halten das fest.
  */
 
 const SCHLUESSEL = [
@@ -47,42 +48,47 @@ function pruefe(bezeichnung: string, bedingung: boolean, zusatz = ""): void {
   }
 }
 
+async function main() {
 console.log("\nEnvironment-Erkennung");
 
 setzen({});
+const chatLeer = await missingFor("chat");
 pruefe(
-  "ohne Werte fehlen alle Chat-Variablen",
-  missingFor("chat").join(",") ===
-    "DATABASE_URL,AI_GATEWAY_API_KEY,PINECONE_API_KEY,PINECONE_INDEX,UPSTASH_REDIS_REST_URL,UPSTASH_REDIS_REST_TOKEN",
-  missingFor("chat").join(","),
+  "ohne Werte fehlen DB, Gateway, Pinecone-Key und Redis — Index hat Default",
+  chatLeer.join(",") ===
+    "DATABASE_URL,AI_GATEWAY_API_KEY,PINECONE_API_KEY,UPSTASH_REDIS_REST_URL,UPSTASH_REDIS_REST_TOKEN",
+  chatLeer.join(","),
 );
 
 setzen({ POSTGRES_URL: "postgres://neon.example/db" });
-pruefe("Neon-Alias POSTGRES_URL gilt als DATABASE_URL", missingFor("admin").length === 0);
+pruefe("Neon-Alias POSTGRES_URL gilt als DATABASE_URL", (await missingFor("admin")).length === 0);
 
 setzen({ POSTGRES_PRISMA_URL: "postgres://neon.example/prisma" });
 pruefe(
   "Neon-Alias POSTGRES_PRISMA_URL gilt als DATABASE_URL",
-  missingFor("admin").length === 0,
+  (await missingFor("admin")).length === 0,
 );
 
 setzen({ DATABASE_URL: "" });
-pruefe("leere DATABASE_URL zaehlt als fehlend", missingFor("admin").includes("DATABASE_URL"));
+pruefe(
+  "leere DATABASE_URL zaehlt als fehlend",
+  (await missingFor("admin")).includes("DATABASE_URL"),
+);
 
 setzen({ VERCEL_OIDC_TOKEN: "oidc-token" });
 pruefe(
-  "OIDC auf Vercel erfuellt AI_GATEWAY_API_KEY",
-  !missingFor("chat").includes("AI_GATEWAY_API_KEY"),
+  "OIDC-Env erfuellt AI_GATEWAY_API_KEY",
+  !(await missingFor("chat")).includes("AI_GATEWAY_API_KEY"),
 );
 
 setzen({
   KV_REST_API_URL: "https://example.upstash.io",
   KV_REST_API_TOKEN: "kv-token",
 });
+const chatKv = await missingFor("chat");
 pruefe(
   "Vercel-Storage-Redis KV_REST_API_* gilt als Upstash",
-  !missingFor("chat").includes("UPSTASH_REDIS_REST_URL") &&
-    !missingFor("chat").includes("UPSTASH_REDIS_REST_TOKEN"),
+  !chatKv.includes("UPSTASH_REDIS_REST_URL") && !chatKv.includes("UPSTASH_REDIS_REST_TOKEN"),
 );
 
 setzen({ POSTGRES_URL: "postgres://neon.example/db" });
@@ -93,26 +99,36 @@ pruefe(
 );
 
 setzen({});
+pruefe(
+  "PINECONE_INDEX faellt auf wissensassistent zurueck",
+  requireEnv("PINECONE_INDEX").PINECONE_INDEX === "wissensassistent",
+);
+
+setzen({});
 let geworfen: string[] | undefined;
 try {
-  requireEnv("PINECONE_INDEX");
+  requireEnv("DATABASE_URL");
 } catch (error) {
   if (error instanceof MissingConfigError) geworfen = error.variables;
 }
 pruefe(
   "requireEnv nennt die fehlende Variable",
-  geworfen?.join(",") === "PINECONE_INDEX",
+  geworfen?.join(",") === "DATABASE_URL",
   geworfen?.join(","),
 );
 
 setzen({ POSTGRES_URL: "postgres://neon.example/db", PINECONE_API_KEY: "pc-key" });
-const diagnose = envDiagnose();
+const diagnose = await envDiagnose();
 pruefe(
   "Diagnose listet den Roh-Namen POSTGRES_URL, nicht den Alias DATABASE_URL",
   diagnose.gesetzt.includes("POSTGRES_URL") && diagnose.leer.includes("DATABASE_URL"),
   `gesetzt=${diagnose.gesetzt.join(",")} leer=${diagnose.leer.join(",")}`,
 );
 pruefe("Diagnose sieht PINECONE_API_KEY", diagnose.gesetzt.includes("PINECONE_API_KEY"));
+pruefe(
+  "Diagnose listet den OIDC-Header-Namen, auch wenn er hier fehlt",
+  diagnose.leer.includes("x-vercel-oidc-token"),
+);
 
 for (const name of SCHLUESSEL) {
   const wert = original[name];
@@ -125,3 +141,6 @@ if (fehler > 0) {
   process.exit(1);
 }
 console.log("\nAlle Environment-Pruefungen bestanden.\n");
+}
+
+void main();

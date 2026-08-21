@@ -375,6 +375,15 @@ td select {
   font-size: 13px;
 }
 
+.meldung-schritte {
+  margin: 8px 0;
+  padding-left: 18px;
+}
+
+.meldung-schritte li {
+  margin: 4px 0;
+}
+
 .meldung-neutral {
   border-left-color: var(--grau-600);
   background: var(--grau-100);

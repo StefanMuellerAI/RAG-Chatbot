@@ -13,7 +13,7 @@ export default async function ChatSeite() {
   // Request-Zeit, nicht Build-Zeit: sonst waeren die Server-Variablen leer,
   // obwohl sie in Vercel gesetzt sind.
   await connection();
-  const fehlt = missingFor("chat");
+  const fehlt = await missingFor("chat");
   if (fehlt.length > 0) return <NichtBereit bereich="Der Assistent" fehlt={fehlt} />;
 
   const kontext = await requireKontextFuerSeite("/");

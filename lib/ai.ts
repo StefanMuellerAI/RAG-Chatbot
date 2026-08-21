@@ -1,7 +1,6 @@
 import { gateway, tool } from "ai";
 import { z } from "zod";
 import { ladeEigeneSammlungen, type SammlungMitKlasse } from "./collections";
-import { requireEnv } from "./env";
 import { findPreset } from "./presets";
 import { MIN_SCORE, sucheInSammlung, type Hit } from "./vector";
 
@@ -11,11 +10,8 @@ import { MIN_SCORE, sucheInSammlung, type Hit } from "./vector";
 
 /** Alle Modellaufrufe laufen ueber das AI Gateway. */
 export function modell(modelId: string) {
-  // Auf Vercel genuegt der OIDC-Token des Projekts (`VERCEL_OIDC_TOKEN`);
-  // lokal braucht es AI_GATEWAY_API_KEY. requireEnv akzeptiert beides.
-  // Die Pruefung liefert eine benannte Meldung statt eines nackten 401
-  // aus dem Gateway, das dem Nutzer nichts sagt.
-  requireEnv("AI_GATEWAY_API_KEY");
+  // Auth: AI_GATEWAY_API_KEY, oder auf Vercel der OIDC-Token aus dem
+  // Request-Header `x-vercel-oidc-token` (nicht aus process.env).
   return gateway(modelId);
 }
 

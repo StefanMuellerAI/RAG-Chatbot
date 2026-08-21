@@ -14,12 +14,10 @@ import { EMBEDDING_MODELL, TEXT_FELD } from "../lib/vector";
  */
 async function main() {
   const apiKey = process.env.PINECONE_API_KEY;
-  const name = process.env.PINECONE_INDEX;
+  const name = process.env.PINECONE_INDEX || "wissensassistent";
 
-  if (!apiKey || !name) {
-    throw new Error(
-      "PINECONE_API_KEY und PINECONE_INDEX muessen gesetzt sein (siehe .env.example).",
-    );
+  if (!apiKey) {
+    throw new Error("PINECONE_API_KEY muss gesetzt sein (siehe .env.example).");
   }
 
   const pinecone = new Pinecone({ apiKey });
