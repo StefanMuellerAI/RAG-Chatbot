@@ -994,10 +994,20 @@ fieldset.auswahl .feld-zusatz {
   gap: 10px;
 }
 
+/* Spezifischer als `.feld label` weiter unten (display:block, alles fett):
+   sonst fliessen Titel, Kurztext und Beispiele in einer Zeile zusammen. */
+.feld label.wahlkarte {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-weight: 400;
+  margin-bottom: 0;
+}
+
 .wahlkarte {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
   border: 1px solid var(--grau-300);
   background: var(--weiss);
   padding: 13px 15px;
@@ -1027,6 +1037,12 @@ fieldset.auswahl .feld-zusatz {
 .wahlkarte:has(input:focus-visible) {
   outline: 3px solid var(--rot);
   outline-offset: 2px;
+}
+
+.wahlkarte-titel,
+.wahlkarte-kurz,
+.wahlkarte-beispiele {
+  display: block;
 }
 
 .wahlkarte-titel {
@@ -1075,6 +1091,13 @@ fieldset.auswahl .feld-zusatz {
   font-weight: 700;
   font-size: 14px;
   margin-bottom: 6px;
+}
+
+.feld label.wahlkarte {
+  display: flex;
+  font-weight: 400;
+  font-size: inherit;
+  margin-bottom: 0;
 }
 
 /* --- Fussbereich ---------------------------------------------------------- */
