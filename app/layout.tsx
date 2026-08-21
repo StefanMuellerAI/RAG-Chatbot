@@ -5,7 +5,7 @@ import Kopfzeile from "@/components/Kopfzeile";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Wissensassistent",
+  title: "Knowledge Base",
   description:
     "Fragen an die eigenen Dokumente — jede Antwort nennt ihre Fundstellen.",
 };

@@ -26,7 +26,7 @@ export default async function Kopfzeile() {
       <header className="kopf">
         <div className="kopf-inner">
           <Link href="/" className="wortmarke">
-            Wissens<span>assistent</span>
+            Knowledge<span> Base</span>
           </Link>
           <div className="kopf-zusatz">Auskunft aus den eigenen Dokumenten</div>
 
