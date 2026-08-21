@@ -1,3 +1,4 @@
+import { connection } from "next/server";
 import AdminKonsole from "@/components/AdminKonsole";
 import NichtBereit from "@/components/NichtBereit";
 import {
@@ -18,6 +19,7 @@ export default async function AdminSeite({
 }: {
   searchParams: Promise<{ suche?: string; seite?: string }>;
 }) {
+  await connection();
   const fehlt = missingFor("admin");
   if (fehlt.length > 0) return <NichtBereit bereich="Die Administration" fehlt={fehlt} />;
 
