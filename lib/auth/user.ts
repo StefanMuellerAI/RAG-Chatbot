@@ -80,6 +80,14 @@ async function anlegen(clerkUserId: string, plan: Plan): Promise<Kontext> {
   const db = getDb();
   const clerk = await currentUser().catch(() => null);
 
+  // Ohne bestehenden Admin gaebe es niemanden, der die Rolle in der
+  // Oberflaeche vergeben kann. Der erste Nutzer ist deshalb Admin — danach
+  // bleibt die Rolle eine bewusste Entscheidung in der Nutzerliste.
+  const schonEinAdmin = await db.query.users.findFirst({
+    columns: { clerkUserId: true },
+    where: eq(users.isAdmin, true),
+  });
+
   await db
     .insert(users)
     .values({
@@ -87,6 +95,7 @@ async function anlegen(clerkUserId: string, plan: Plan): Promise<Kontext> {
       email: clerk?.primaryEmailAddress?.emailAddress ?? null,
       name: [clerk?.firstName, clerk?.lastName].filter(Boolean).join(" ") || null,
       planId: plan.id,
+      isAdmin: !schonEinAdmin,
     })
     // Zwei gleichzeitige Anfragen desselben neuen Nutzers duerfen sich nicht
     // gegenseitig mit einem Schluesselkonflikt abschiessen.
