@@ -34,7 +34,7 @@ export default async function ChatSeite() {
     }
 
     if (eigene.status === "fulfilled") {
-      sammlungen = eigene.value.map(({ id, name }) => ({ id, name }));
+      sammlungen = eigene.value.map(({ id, name, kind }) => ({ id, name, kind }));
     } else {
       hinweis ??= eigene.reason instanceof Error ? eigene.reason.message : "Die Sammlungen konnten nicht geladen werden.";
     }

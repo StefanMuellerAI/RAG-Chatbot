@@ -338,6 +338,184 @@ textarea::placeholder {
   color: var(--rot-dunkel);
 }
 
+/* Typ-Kennzeichen einer Sammlung */
+.typ-marke {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  border: 1px solid var(--grau-300);
+  border-radius: 2px;
+  color: var(--grau-600);
+  background: var(--grau-100);
+  vertical-align: middle;
+}
+
+.typ-sql {
+  border-color: #b7c9e6;
+  color: #1f4d8f;
+  background: #eef3fb;
+}
+
+.typ-graph {
+  border-color: #c9b7e6;
+  color: #5a2d91;
+  background: #f3eefb;
+}
+
+/* Typwahl beim Anlegen */
+.typwahl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.typkarte {
+  display: block;
+  border: 1px solid var(--grau-300);
+  padding: 12px 14px;
+  cursor: pointer;
+  background: var(--weiss);
+}
+
+.typkarte input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.typkarte.aktiv {
+  border-color: var(--rot);
+  background: var(--rot-hell);
+}
+
+.typkarte.gesperrt {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.typkarte:has(input:focus-visible) {
+  outline: 3px solid var(--rot);
+  outline-offset: 2px;
+}
+
+.typkarte-titel {
+  display: block;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.typkarte-text {
+  display: block;
+  font-size: 13px;
+  color: var(--grau-600);
+}
+
+/* Schema-Anzeige */
+.schema-block {
+  border: 1px solid var(--grau-200);
+  margin-bottom: 8px;
+}
+
+.schema-block summary {
+  cursor: pointer;
+  padding: 10px 12px;
+  font-weight: 700;
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.schema-meta {
+  font-weight: 400;
+  color: var(--grau-600);
+  font-size: 13px;
+}
+
+.schema-beispiele {
+  color: var(--grau-600);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.marken {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.marken code {
+  background: var(--grau-100);
+  border: 1px solid var(--grau-300);
+  padding: 1px 6px;
+  font-size: 13px;
+}
+
+/* Werkzeugaufrufe unter einer Antwort */
+.abfragen {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--grau-200);
+  font-size: 13px;
+  white-space: normal;
+}
+
+.abfrage {
+  border: 1px solid var(--grau-200);
+  margin-bottom: 6px;
+  background: var(--weiss);
+}
+
+.abfrage summary {
+  cursor: pointer;
+  padding: 7px 10px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.abfrage summary .typ-marke {
+  margin-left: 0;
+}
+
+.abfrage-sammlung {
+  font-weight: 700;
+}
+
+.abfrage-text {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--grau-100);
+  border-top: 1px solid var(--grau-200);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.abfrage-fehler {
+  padding: 8px 12px;
+  color: var(--rot-dunkel);
+  border-top: 1px solid var(--grau-200);
+}
+
+table.vorschau {
+  font-size: 12.5px;
+}
+
+table.vorschau th,
+table.vorschau td {
+  padding: 5px 8px;
+  white-space: nowrap;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Sammlungsauswahl ueber dem Chat */
 .chat-kopf {
   display: flex;

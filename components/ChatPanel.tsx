@@ -2,8 +2,13 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { KIND_LABEL, type CollectionKind } from "@/lib/collection-kinds";
+import type { ToolStep } from "@/lib/tools";
 
-export type ChatSammlung = { id: string; name: string };
+export type ChatSammlung = { id: string; name: string; kind: CollectionKind };
+
+/** Kennung fuer "Alle meine Sammlungen" — muss zur Chat-Route passen. */
+export const ALLE_SAMMLUNGEN = "all";
 
 type Quelle = {
   n: number;
@@ -17,11 +22,14 @@ type Nachricht = {
   role: "user" | "assistant";
   content: string;
   sources?: Quelle[];
+  /** Werkzeugaufrufe (Suche, SQL, Cypher), die zu dieser Antwort gefuehrt haben. */
+  steps?: ToolStep[];
   fehler?: boolean;
 };
 
 type Ereignis =
   | { type: "sources"; sources: Quelle[] }
+  | { type: "step"; step: ToolStep }
   | { type: "text"; delta: string }
   | { type: "error"; message: string }
   | { type: "done" };
@@ -63,8 +71,11 @@ export default function ChatPanel({ sammlungen }: { sammlungen: ChatSammlung[] }
   const nutzerIstUnten = useRef(true);
 
   const gemerkt = useSyncExternalStore(abonniereAuswahl, leseAuswahl, () => null);
-  const sammlungId =
-    gemerkt && sammlungen.some((sammlung) => sammlung.id === gemerkt) ? gemerkt : (sammlungen[0]?.id ?? "");
+  const alleErlaubt = sammlungen.length > 1;
+  const gemerktGueltig =
+    gemerkt !== null &&
+    ((gemerkt === ALLE_SAMMLUNGEN && alleErlaubt) || sammlungen.some((sammlung) => sammlung.id === gemerkt));
+  const sammlungId = gemerktGueltig ? gemerkt : (sammlungen[0]?.id ?? "");
 
   function wechsleSammlung(id: string) {
     merkeAuswahl(id);
@@ -114,6 +125,11 @@ export default function ChatPanel({ sammlungen }: { sammlungen: ChatSammlung[] }
     switch (ereignis.type) {
       case "sources":
         aendereLetzteAntwort((letzte) => ({ ...letzte, sources: ereignis.sources }));
+        break;
+      case "step":
+        // Werkzeugaufruf sofort zeigen — der Nutzer sieht, was die KI gerade abfragt.
+        schreibeAusstehendenText();
+        aendereLetzteAntwort((letzte) => ({ ...letzte, steps: [...(letzte.steps ?? []), ereignis.step] }));
         break;
       case "text":
         ausstehenderText.current += ereignis.delta;
@@ -221,6 +237,7 @@ export default function ChatPanel({ sammlungen }: { sammlungen: ChatSammlung[] }
 
   const letzte = verlauf[verlauf.length - 1];
   const wartetAufErstesWort = laeuft && (!letzte || letzte.role === "user" || !letzte.content);
+  const alleModus = sammlungId === ALLE_SAMMLUNGEN;
   const aktiveSammlung = sammlungen.find((sammlung) => sammlung.id === sammlungId);
 
   if (sammlungen.length === 0) {
@@ -229,13 +246,22 @@ export default function ChatPanel({ sammlungen }: { sammlungen: ChatSammlung[] }
         <div className="chat-leer">
           <h2>Noch keine Sammlung</h2>
           <p>
-            Der Chat beantwortet Fragen zu Ihren eigenen Dokumenten. Legen Sie zuerst unter{" "}
-            <Link href="/sammlungen">Sammlungen</Link> eine an und laden Sie Dokumente hoch.
+            Der Chat beantwortet Fragen zu Ihren eigenen Sammlungen — Dokumente, Tabellen oder
+            Graphen. Legen Sie zuerst unter <Link href="/sammlungen">Sammlungen</Link> eine an
+            und laden Sie Inhalte hoch.
           </p>
         </div>
       </div>
     );
   }
+
+  const leerText = alleModus
+    ? "Die KI entscheidet selbst, welche Ihrer Sammlungen sie befragt — per Suche, SQL oder Cypher. Unter jeder Antwort sehen Sie die ausgefuehrten Abfragen."
+    : aktiveSammlung?.kind === "sql"
+      ? `Fragen Sie etwas zu den Tabellen in „${aktiveSammlung.name}“. Die KI formuliert SQL und zeigt es unter der Antwort.`
+      : aktiveSammlung?.kind === "graph"
+        ? `Fragen Sie etwas zum Graphen „${aktiveSammlung.name}“. Die KI formuliert Cypher und zeigt es unter der Antwort.`
+        : `Fragen Sie etwas zu den Dokumenten in „${aktiveSammlung?.name ?? "dieser Sammlung"}“. Jede Antwort nennt die Fundstellen, auf die sie sich stuetzt.`;
 
   return (
     <div className="karte">
@@ -248,9 +274,10 @@ export default function ChatPanel({ sammlungen }: { sammlungen: ChatSammlung[] }
             onChange={(event) => wechsleSammlung(event.target.value)}
             disabled={laeuft}
           >
+            {alleErlaubt && <option value={ALLE_SAMMLUNGEN}>Alle meine Sammlungen (KI waehlt)</option>}
             {sammlungen.map((sammlung) => (
               <option key={sammlung.id} value={sammlung.id}>
-                {sammlung.name}
+                {sammlung.name} · {KIND_LABEL[sammlung.kind]}
               </option>
             ))}
           </select>
@@ -260,10 +287,7 @@ export default function ChatPanel({ sammlungen }: { sammlungen: ChatSammlung[] }
           {verlauf.length === 0 && (
             <div className="chat-leer">
               <h2>Was moechten Sie wissen?</h2>
-              <p>
-                {`Fragen Sie etwas zu den Dokumenten in „${aktiveSammlung?.name ?? "dieser Sammlung"}“. `}
-                Jede Antwort nennt die Fundstellen, auf die sie sich stuetzt.
-              </p>
+              <p>{leerText}</p>
             </div>
           )}
 
@@ -280,8 +304,12 @@ export default function ChatPanel({ sammlungen }: { sammlungen: ChatSammlung[] }
             >
               {nachricht.content ||
                 (i === verlauf.length - 1 && laeuft ? (
-                  <span className="tippt">Recherchiere in den Dokumenten &hellip;</span>
+                  <span className="tippt">
+                    {nachricht.steps?.length ? "Werte Abfragen aus …" : "Recherchiere in den Sammlungen …"}
+                  </span>
                 ) : null)}
+
+              {nachricht.steps && nachricht.steps.length > 0 && <Abfragen steps={nachricht.steps} />}
 
               {nachricht.sources && nachricht.sources.length > 0 && nachricht.content && (
                 <div className="quellen">
@@ -305,7 +333,7 @@ export default function ChatPanel({ sammlungen }: { sammlungen: ChatSammlung[] }
 
           {wartetAufErstesWort && verlauf[verlauf.length - 1]?.role === "user" && (
             <div className="blase blase-assistent">
-              <span className="tippt">Recherchiere in den Dokumenten &hellip;</span>
+              <span className="tippt">Recherchiere in den Sammlungen &hellip;</span>
             </div>
           )}
 
@@ -339,4 +367,87 @@ export default function ChatPanel({ sammlungen }: { sammlungen: ChatSammlung[] }
       </div>
     </div>
   );
+}
+
+const WERKZEUG_LABEL: Record<ToolStep["tool"], string> = {
+  search_documents: "Suche",
+  run_sql: "SQL",
+  run_cypher: "Cypher",
+};
+
+/** Die Werkzeugaufrufe einer Antwort: was die KI abgefragt hat und was zurueckkam. */
+function Abfragen({ steps }: { steps: ToolStep[] }) {
+  return (
+    <div className="abfragen">
+      <div className="quellen-titel">Abfragen</div>
+      {steps.map((step, i) => (
+        <details key={i} className="abfrage" open={steps.length === 1 || Boolean(step.error)}>
+          <summary>
+            <span className={`typ-marke typ-${step.tool === "run_sql" ? "sql" : step.tool === "run_cypher" ? "graph" : "vector"}`}>
+              {WERKZEUG_LABEL[step.tool]}
+            </span>
+            <span className="abfrage-sammlung">{step.collectionName}</span>
+            <span className="schema-meta">
+              {step.error
+                ? "Fehler"
+                : step.rowCount !== undefined
+                  ? `${step.rowCount} ${step.tool === "search_documents" ? "Treffer" : "Zeilen"}${step.truncated ? " (gekuerzt)" : ""}`
+                  : ""}
+            </span>
+          </summary>
+          <pre className="abfrage-text">{step.query}</pre>
+          {step.error && <div className="abfrage-fehler">{step.error}</div>}
+          {!step.error && step.tool !== "search_documents" && <Vorschau columns={step.columns ?? []} rows={step.preview ?? []} />}
+        </details>
+      ))}
+    </div>
+  );
+}
+
+/** Ergebnisvorschau fuer SQL (Zeilen als Arrays) und Cypher (Zeilen als Objekte). */
+function Vorschau({ columns, rows }: { columns: string[]; rows: unknown[] }) {
+  if (rows.length === 0) return <div className="schema-meta">Kein Ergebnis.</div>;
+
+  const zellen = (row: unknown): unknown[] =>
+    Array.isArray(row) ? row : columns.map((column) => (row as Record<string, unknown>)[column]);
+
+  return (
+    <div className="tabelle-huelle">
+      <table className="vorschau">
+        {columns.length > 0 && (
+          <thead>
+            <tr>
+              {columns.map((column) => (
+                <th key={column}>{column}</th>
+              ))}
+            </tr>
+          </thead>
+        )}
+        <tbody>
+          {rows.map((row, i) => (
+            <tr key={i}>
+              {zellen(row).map((zelle, j) => (
+                <td key={j}>{zelleAlsText(zelle)}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function zelleAlsText(value: unknown): string {
+  if (value === null || value === undefined) return "∅";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  const record = value as { type?: string; labels?: string[]; relationshipType?: string; properties?: Record<string, unknown> };
+  if (record.type === "node") return `(${(record.labels ?? []).join(":")} ${kurzJson(record.properties)})`;
+  if (record.type === "edge") return `-[:${record.relationshipType} ${kurzJson(record.properties)}]-`;
+  return kurzJson(value);
+}
+
+function kurzJson(value: unknown): string {
+  const text = JSON.stringify(value ?? {});
+  return text.length > 120 ? `${text.slice(0, 120)}…` : text;
 }

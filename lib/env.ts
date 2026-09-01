@@ -61,6 +61,15 @@ export function redisCredentials(): { url: string; token: string } | undefined {
 export const REDIS_VARIABLES = "UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN";
 
 /**
+ * FalkorDB ist optional: ohne FALKORDB_URL gibt es keine Graph-Sammlungen,
+ * alles andere laeuft unveraendert. Deshalb taucht die Variable nicht in
+ * `missingFor` auf.
+ */
+export function graphConfigured(): boolean {
+  return read("FALKORDB_URL") !== undefined;
+}
+
+/**
  * Namen aller Variablen, die fuer den jeweiligen Bereich fehlen.
  * Der API-Key des Modellanbieters gehoert bewusst nicht dazu: er wird im
  * Admin hinterlegt, die Umgebungsvariable ist nur noch ein Rueckfallwert.

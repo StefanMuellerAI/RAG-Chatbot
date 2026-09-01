@@ -1,13 +1,17 @@
 import { NextResponse } from "next/server";
 import { NotFoundError, errorResponse, requireSession } from "@/lib/api";
 import { assertCollectionAccess } from "@/lib/collections";
-import { deleteDocument, getDocument } from "@/lib/documents";
-import { deleteDocumentChunks } from "@/lib/vector";
+import { getDocument } from "@/lib/documents";
+import { removeDocument } from "@/lib/ingest";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-/** Entfernt ein einzelnes Dokument samt aller zugehoerigen Abschnitte. */
+/**
+ * Entfernt ein einzelnes Dokument samt seiner Spuren: Abschnitte im
+ * Vektor-Namespace, Tabelle in der SQLite-Datei oder Statements im Graphen
+ * (der dann aus den verbleibenden Skripten neu aufgebaut wird).
+ */
 export async function DELETE(_request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const session = await requireSession();
@@ -17,13 +21,8 @@ export async function DELETE(_request: Request, context: { params: Promise<{ id:
     if (!record) throw new NotFoundError("Dokument nicht gefunden.");
     const collection = await assertCollectionAccess(record.collectionId, session);
 
-    // Erst die Abschnitte: bliebe der Metadatensatz als einziger stehen,
-    // waere das Dokument sichtbar und im Chat unauffindbar. Andersherum
-    // waeren die Abschnitte verwaist und ueber die Oberflaeche nicht mehr loeschbar.
-    const deleted = await deleteDocumentChunks(collection.namespace, id);
-    await deleteDocument(record);
-
-    return NextResponse.json({ ok: true, deletedChunks: deleted });
+    const removed = await removeDocument(collection, record);
+    return NextResponse.json({ ok: true, removedUnits: removed });
   } catch (error) {
     return errorResponse(error);
   }

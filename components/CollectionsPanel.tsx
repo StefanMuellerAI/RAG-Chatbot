@@ -2,28 +2,39 @@
 
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
+import {
+  COLLECTION_KINDS,
+  KIND_DESCRIPTION,
+  KIND_LABEL,
+  type CollectionKind,
+} from "@/lib/collection-kinds";
 
 export type SammlungKurz = {
   id: string;
   name: string;
+  kind: CollectionKind;
   createdAt: string;
 };
 
 /**
- * Eigene Sammlungen: anlegen, umbenennen, loeschen, auswaehlen. Die Auswahl
- * landet als `?sammlung=` in der URL, damit die Seite die Dokumente
- * serverseitig laden kann.
+ * Eigene Sammlungen: anlegen (mit Typ), umbenennen, loeschen, auswaehlen.
+ * Die Auswahl landet als `?sammlung=` in der URL, damit die Seite die
+ * Dokumente serverseitig laden kann.
  */
 export default function CollectionsPanel({
   sammlungen,
   aktiveId,
+  graphVerfuegbar,
 }: {
   sammlungen: SammlungKurz[];
   aktiveId: string | null;
+  /** Ohne FALKORDB_URL lassen sich keine Graph-Sammlungen anlegen. */
+  graphVerfuegbar: boolean;
 }) {
   const router = useRouter();
   const [aktualisiert, aktualisiere] = useTransition();
   const [neuerName, setNeuerName] = useState("");
+  const [neuerTyp, setNeuerTyp] = useState<CollectionKind>("vector");
   const [umbenennen, setUmbenennen] = useState<{ id: string; name: string } | null>(null);
   const [laeuft, setLaeuft] = useState(false);
   const [fehler, setFehler] = useState<string | null>(null);
@@ -55,6 +66,7 @@ export default function CollectionsPanel({
     try {
       const { collection } = await anfrage<{ collection: SammlungKurz }>("/api/collections", "POST", {
         name: neuerName,
+        kind: neuerTyp,
       });
       setNeuerName("");
       waehle(collection.id);
@@ -158,6 +170,7 @@ export default function CollectionsPanel({
                       aria-current={aktiv ? "true" : undefined}
                     >
                       {sammlung.name}
+                      <span className={`typ-marke typ-${sammlung.kind}`}>{KIND_LABEL[sammlung.kind]}</span>
                     </button>
                     <span className="knopf-reihe">
                       <button
@@ -184,19 +197,47 @@ export default function CollectionsPanel({
         </ul>
       )}
 
-      <form className="knopf-reihe" onSubmit={anlegen} style={{ marginTop: 16 }}>
-        <input
-          type="text"
-          value={neuerName}
-          onChange={(event) => setNeuerName(event.target.value)}
-          placeholder="Name der neuen Sammlung"
-          maxLength={80}
-          aria-label="Name der neuen Sammlung"
-          style={{ flex: 1, minWidth: 220 }}
-        />
-        <button className="knopf" type="submit" disabled={laeuft || !neuerName.trim()}>
-          Sammlung anlegen
-        </button>
+      <form onSubmit={anlegen} style={{ marginTop: 20 }}>
+        <h3 className="unter-titel">Neue Sammlung</h3>
+
+        <div className="typwahl" role="radiogroup" aria-label="Art der Sammlung">
+          {COLLECTION_KINDS.map((kind) => {
+            const gesperrt = kind === "graph" && !graphVerfuegbar;
+            return (
+              <label key={kind} className={`typkarte${neuerTyp === kind ? " aktiv" : ""}${gesperrt ? " gesperrt" : ""}`}>
+                <input
+                  type="radio"
+                  name="typ"
+                  value={kind}
+                  checked={neuerTyp === kind}
+                  disabled={gesperrt}
+                  onChange={() => setNeuerTyp(kind)}
+                />
+                <span className="typkarte-titel">{KIND_LABEL[kind]}</span>
+                <span className="typkarte-text">
+                  {gesperrt
+                    ? "Nicht verfuegbar: FALKORDB_URL ist nicht gesetzt."
+                    : KIND_DESCRIPTION[kind]}
+                </span>
+              </label>
+            );
+          })}
+        </div>
+
+        <div className="knopf-reihe" style={{ marginTop: 12 }}>
+          <input
+            type="text"
+            value={neuerName}
+            onChange={(event) => setNeuerName(event.target.value)}
+            placeholder="Name der neuen Sammlung"
+            maxLength={80}
+            aria-label="Name der neuen Sammlung"
+            style={{ flex: 1, minWidth: 220 }}
+          />
+          <button className="knopf" type="submit" disabled={laeuft || !neuerName.trim()}>
+            {KIND_LABEL[neuerTyp]}-Sammlung anlegen
+          </button>
+        </div>
       </form>
     </div>
   );

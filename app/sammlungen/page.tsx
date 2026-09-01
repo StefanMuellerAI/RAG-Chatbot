@@ -2,7 +2,7 @@ import CollectionsPanel from "@/components/CollectionsPanel";
 import DocumentsPanel from "@/components/DocumentsPanel";
 import { listCollections } from "@/lib/collections";
 import { listDocuments, type DocumentRecord } from "@/lib/documents";
-import { missingFor } from "@/lib/env";
+import { graphConfigured, missingFor } from "@/lib/env";
 import { currentSession } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
@@ -51,8 +51,9 @@ export default async function SammlungenSeite({
       {fehler && <div className="meldung">{fehler}</div>}
 
       <CollectionsPanel
-        sammlungen={sammlungen.map(({ id, name, createdAt }) => ({ id, name, createdAt }))}
+        sammlungen={sammlungen.map(({ id, name, kind, createdAt }) => ({ id, name, kind, createdAt }))}
         aktiveId={aktive?.id ?? null}
+        graphVerfuegbar={graphConfigured()}
       />
 
       {aktive && (
@@ -60,6 +61,8 @@ export default async function SammlungenSeite({
           key={aktive.id}
           collectionId={aktive.id}
           collectionName={aktive.name}
+          kind={aktive.kind}
+          schema={aktive.schema ?? null}
           dokumente={dokumente}
         />
       )}

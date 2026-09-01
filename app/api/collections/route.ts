@@ -33,12 +33,12 @@ export async function GET(request: Request) {
   }
 }
 
-/** Neue Sammlung fuer die angemeldete Sitzung. */
+/** Neue Sammlung fuer die angemeldete Sitzung; `kind` ist vector (Standard), sql oder graph. */
 export async function POST(request: Request) {
   try {
     const session = await requireSession();
-    const { name } = await readJson<{ name: unknown }>(request);
-    const collection = await createCollection(session.userId, name);
+    const { name, kind } = await readJson<{ name: unknown; kind: unknown }>(request);
+    const collection = await createCollection(session.userId, name, kind ?? "vector");
     return NextResponse.json({ collection }, { status: 201 });
   } catch (error) {
     return errorResponse(error);

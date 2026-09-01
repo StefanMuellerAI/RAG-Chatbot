@@ -1,7 +1,10 @@
 import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
 import { NextResponse } from "next/server";
 import { errorResponse, requireSession } from "@/lib/api";
+import type { CollectionKind } from "@/lib/collection-kinds";
 import { assertCollectionAccess } from "@/lib/collections";
+import { CSV_MAX_BYTES } from "@/lib/csv";
+import { CYPHER_MAX_BYTES } from "@/lib/cypher-script";
 import { filePathPrefix } from "@/lib/documents";
 import { MissingConfigError, requireEnv } from "@/lib/env";
 import { SUPPORTED_MIME_TYPES } from "@/lib/extract";
@@ -10,6 +13,20 @@ export const runtime = "nodejs";
 
 /** 100 MB — grosszuegig genug fuer umfangreiche Handbuecher. */
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+
+/**
+ * Zulaessige Inhaltstypen je Sammlungstyp. Browser melden CSV- und
+ * Cypher-Dateien uneinheitlich (oft leer oder octet-stream); die verbindliche
+ * Pruefung der Endung uebernimmt die Verarbeitungsroute.
+ */
+const ALLOWED: Record<CollectionKind, { types: string[]; maxBytes: number }> = {
+  vector: { types: [...SUPPORTED_MIME_TYPES], maxBytes: MAX_UPLOAD_BYTES },
+  sql: {
+    types: ["text/csv", "application/csv", "text/plain", "application/vnd.ms-excel", "application/octet-stream"],
+    maxBytes: CSV_MAX_BYTES,
+  },
+  graph: { types: ["text/plain", "application/octet-stream", "text/x-cypher"], maxBytes: CYPHER_MAX_BYTES },
+};
 
 /**
  * Gibt ein kurzlebiges Token aus, mit dem der Browser die Datei *direkt* zu
@@ -49,9 +66,10 @@ export async function POST(request: Request) {
         if (!pathname.startsWith(filePathPrefix(collection.id)) || pathname.includes("..")) {
           throw new Error("Ungueltiger Ablagepfad.");
         }
+        const erlaubt = ALLOWED[collection.kind];
         return {
-          allowedContentTypes: [...SUPPORTED_MIME_TYPES],
-          maximumSizeInBytes: MAX_UPLOAD_BYTES,
+          allowedContentTypes: erlaubt.types,
+          maximumSizeInBytes: erlaubt.maxBytes,
           addRandomSuffix: true,
         };
       },

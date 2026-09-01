@@ -20,6 +20,18 @@ const vector = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/vector", () => vector);
 
+const sqlstore = vi.hoisted(() => ({
+  deleteDatabase: vi.fn(async () => undefined),
+  deleteAllDatabases: vi.fn(async () => 0),
+}));
+vi.mock("@/lib/sqlstore", () => sqlstore);
+
+const graphstore = vi.hoisted(() => ({
+  deleteGraph: vi.fn(async () => undefined),
+  deleteAllGraphs: vi.fn(async () => 0),
+}));
+vi.mock("@/lib/graphstore", () => graphstore);
+
 import { fakeRedis, hashes, keys, reset } from "./helpers/fakeRedis";
 import { ADMIN_USER_ID, type Session } from "@/lib/auth";
 import {
@@ -40,6 +52,7 @@ beforeEach(() => {
   reset();
   vi.clearAllMocks();
   vi.stubEnv("BLOB_READ_WRITE_TOKEN", "vercel_blob_rw_test");
+  vi.stubEnv("FALKORDB_URL", "");
 });
 
 function dokument(id: string, collectionId: string): DocumentRecord {
@@ -110,6 +123,41 @@ describe("Sammlungen verwalten", () => {
     expect(vector.resetNamespace).toHaveBeenCalledWith(c.id);
     expect(blob.del).toHaveBeenCalled();
     expect(await listCollections(ANNA.userId)).toEqual([]);
+  });
+});
+
+describe("Sammlungstypen", () => {
+  it("legt ohne Angabe Dokumentensammlungen an und prueft den Typ", async () => {
+    expect((await createCollection(ANNA.userId, "Docs")).kind).toBe("vector");
+    expect((await createCollection(ANNA.userId, "Tab", "sql")).kind).toBe("sql");
+    await expect(createCollection(ANNA.userId, "X", "excel")).rejects.toBeInstanceOf(ValidationError);
+  });
+
+  it("erlaubt Graph-Sammlungen nur mit FALKORDB_URL", async () => {
+    await expect(createCollection(ANNA.userId, "G", "graph")).rejects.toThrow(/FALKORDB_URL/);
+    vi.stubEnv("FALKORDB_URL", "falkor://user:pw@host:6379");
+    expect((await createCollection(ANNA.userId, "G", "graph")).kind).toBe("graph");
+  });
+
+  it("liest alte Sammlungen ohne Typ als Dokumentensammlung", async () => {
+    await fakeRedis.hset("collections", {
+      alt: JSON.stringify({ id: "alt", ownerId: ANNA.userId, name: "Alt", namespace: "alt", createdAt: "2026-01-01" }),
+    });
+    await fakeRedis.set("collections:migrated", "1");
+    expect((await listCollections(ANNA.userId))[0].kind).toBe("vector");
+  });
+
+  it("raeumt beim Loeschen den typabhaengigen Speicher", async () => {
+    vi.stubEnv("FALKORDB_URL", "falkor://user:pw@host:6379");
+    const tab = await createCollection(ANNA.userId, "Tab", "sql");
+    const gr = await createCollection(ANNA.userId, "Gr", "graph");
+
+    await deleteCollection(tab);
+    expect(sqlstore.deleteDatabase).toHaveBeenCalledWith(tab.id);
+    expect(vector.resetNamespace).not.toHaveBeenCalled();
+
+    await deleteCollection(gr);
+    expect(graphstore.deleteGraph).toHaveBeenCalledWith(gr.id);
   });
 });
 

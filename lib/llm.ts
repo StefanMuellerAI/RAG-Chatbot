@@ -1,6 +1,8 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { generateText, type LanguageModel } from "ai";
+import { KIND_LABEL } from "./collection-kinds";
+import type { Collection } from "./collections";
 import { PROVIDER_LABEL, type Provider } from "./providers";
 import type { Hit } from "./vector";
 
@@ -65,6 +67,65 @@ Regeln:
 - Widersprechen sich Auszuege, benenne den Widerspruch, statt dich fuer eine Seite zu entscheiden.
 - Antworte auf Deutsch, sachlich und so knapp wie moeglich. Nutze Absaetze oder Aufzaehlungen, wenn das die Antwort klarer macht.
 - Fragen zur Bedienung des Assistenten selbst darfst du direkt beantworten, ohne Beleg.`;
+
+/**
+ * System-Prompt fuer den Werkzeugmodus: das Modell befragt Sammlungen selbst
+ * (Suche, SQL, Cypher). `collections` ist die Liste, aus der es waehlen darf;
+ * im Einzelmodus ist es genau eine.
+ */
+export function buildToolPrompt(collections: Collection[], einzelmodus: boolean): string {
+  const liste = collections.map(describeCollection).join("\n\n");
+
+  return `Du bist der Wissensassistent einer Organisation. Du beantwortest Fragen ausschliesslich auf Grundlage dessen, was du mit den bereitgestellten Werkzeugen aus den Sammlungen des Nutzers abrufst.
+
+${einzelmodus ? "Es gibt genau eine Sammlung:" : "Verfuegbare Sammlungen (waehle selbst, welche zur Frage passen — auch mehrere):"}
+
+${liste}
+
+Regeln:
+- Rufe zuerst Werkzeuge auf, dann antworte. Nutze kein Allgemeinwissen, um Luecken zu fuellen.
+- Dokumentensammlungen: search_documents. Zitiere Auszuege mit ihrer Nummer in eckigen Klammern, z. B. [1] oder [2][3].
+- Tabellen-Sammlungen: run_sql mit SQLite-Dialekt. Genau ein SELECT (auch WITH), ohne Semikolon. Aggregiere und filtere in SQL statt viele Zeilen zu lesen; nutze die Spaltennamen exakt wie angegeben (in doppelten Anfuehrungszeichen, falls noetig). Ergebnisse sind auf 200 Zeilen begrenzt — bei mehr Daten gruppieren oder LIMIT/ORDER BY einsetzen.
+- Graph-Sammlungen: run_cypher mit openCypher (FalkorDB). Genau ein MATCH/RETURN-Statement, ohne Semikolon. Wenn du Kanten zaehlst, referenziere den Beziehungs-Alias in RETURN oder WHERE. Keine Aggregation innerhalb von Pattern-Comprehensions. Keine Schreiboperationen (CREATE, MERGE, SET, DELETE).
+- Schlaegt eine Abfrage fehl, lies die Fehlermeldung, korrigiere die Abfrage und versuche es hoechstens zweimal erneut.
+- Nenne in der Antwort, aus welcher Sammlung die Information stammt. Zahlen aus SQL/Cypher gibst du so wieder, wie sie zurueckkamen.
+- Liefern die Werkzeuge nichts Passendes, sage das ausdruecklich. Rate nicht und formuliere nichts Plausibles hinzu.
+- Antworte auf Deutsch, sachlich und so knapp wie moeglich. Nutze Absaetze oder Aufzaehlungen, wenn das die Antwort klarer macht.
+- Fragen zur Bedienung des Assistenten selbst darfst du direkt beantworten, ohne Werkzeug.`;
+}
+
+function describeCollection(collection: Collection): string {
+  const kopf = `### ${collection.name}\n- Typ: ${KIND_LABEL[collection.kind]}\n- collectionId: ${collection.id}`;
+  const schema = collection.schema;
+
+  if (collection.kind === "sql") {
+    if (!schema || schema.kind !== "sql" || schema.tables.length === 0) return `${kopf}\n- Noch keine Tabellen.`;
+    const tabellen = schema.tables
+      .map((table) => {
+        const spalten = table.columns
+          .map((column) => {
+            const beispiele = table.samples?.[column.name];
+            return `${column.name} ${column.type}${beispiele && beispiele.length > 0 ? ` (z. B. ${beispiele.join(", ")})` : ""}`;
+          })
+          .join("; ");
+        return `- Tabelle "${table.name}" (${table.rows.toLocaleString("de-DE")} Zeilen): ${spalten}`;
+      })
+      .join("\n");
+    return `${kopf}\n${tabellen}`;
+  }
+
+  if (collection.kind === "graph") {
+    if (!schema || schema.kind !== "graph" || schema.nodes === 0) return `${kopf}\n- Graph ist noch leer.`;
+    return (
+      `${kopf}\n- ${schema.nodes.toLocaleString("de-DE")} Knoten, ${schema.relationships.toLocaleString("de-DE")} Kanten` +
+      `\n- Labels: ${schema.labels.join(", ") || "—"}` +
+      `\n- Beziehungstypen: ${schema.relationshipTypes.join(", ") || "—"}` +
+      `\n- Eigenschaften: ${schema.propertyKeys.join(", ") || "—"}`
+    );
+  }
+
+  return `${kopf}\n- Dokumente mit semantischer Suche (search_documents).`;
+}
 
 /** Baut den Kontextblock, der der Frage vorangestellt wird. */
 export function buildContext(hits: Hit[]): string {

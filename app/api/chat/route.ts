@@ -1,14 +1,22 @@
-import { streamText, type ModelMessage } from "ai";
+import { isStepCount, streamText, type ModelMessage } from "ai";
 import { errorResponse, readJson, requireSession } from "@/lib/api";
-import { assertCollectionAccess } from "@/lib/collections";
-import { REASONING, SYSTEM_PROMPT, buildContext, describeProviderError, getModel } from "@/lib/llm";
+import { assertCollectionAccess, listCollections, type Collection } from "@/lib/collections";
+import {
+  REASONING,
+  SYSTEM_PROMPT,
+  buildContext,
+  buildToolPrompt,
+  describeProviderError,
+  getModel,
+} from "@/lib/llm";
 import {
   budgetExhausted,
   consumeDailyBudget,
   enforceLimits,
   tooManyRequests,
 } from "@/lib/ratelimit";
-import { resolveSettings } from "@/lib/settings";
+import { resolveSettings, type ResolvedSettings } from "@/lib/settings";
+import { buildTools, toStep, type ToolContext } from "@/lib/tools";
 import { search, type Hit } from "@/lib/vector";
 
 export const runtime = "nodejs";
@@ -23,20 +31,38 @@ const MAX_QUESTION_CHARS = 2_000;
 const MAX_MESSAGE_CHARS = 8_000;
 const MAX_HISTORY = 10;
 
+/** Wie viele Werkzeugrunden das Modell hoechstens drehen darf. */
+const MAX_TOOL_STEPS = 6;
+
+/** Kennung fuer "alle meine Sammlungen" im Request. */
+const ALLE = "all";
+
 type ClientMessage = { role: "user" | "assistant"; content: string };
+
+type Source = { n: number; filename: string; location: string | null; score: number; snippet: string };
 
 export async function POST(request: Request) {
   const { messages, collectionId } = await readJson<{ messages: unknown; collectionId: unknown }>(request);
 
-  // Sitzung, Rate-Limit pro Nutzer und Zugriff auf die Sammlung — alles vor
-  // jeglicher Arbeit, die Geld kostet.
+  // Sitzung, Rate-Limit pro Nutzer und Zugriff auf die Sammlung(en) — alles
+  // vor jeglicher Arbeit, die Geld kostet.
   let session;
-  let collection;
+  let collections: Collection[];
+  let einzelne: Collection | undefined;
   try {
     session = await requireSession();
     const limit = await enforceLimits(session.userId, ["chat-minute", "chat-hour"]);
     if (!limit.ok) return tooManyRequests(limit);
-    collection = await assertCollectionAccess(collectionId, session);
+
+    if (collectionId === ALLE) {
+      collections = await listCollections(session.userId);
+      if (collections.length === 0) {
+        return Response.json({ error: "Es gibt noch keine Sammlung, die befragt werden koennte." }, { status: 400 });
+      }
+    } else {
+      einzelne = await assertCollectionAccess(collectionId, session);
+      collections = [einzelne];
+    }
   } catch (error) {
     return errorResponse(error);
   }
@@ -64,6 +90,36 @@ export async function POST(request: Request) {
     return errorResponse(error);
   }
 
+  const abort = new AbortController();
+  request.signal.addEventListener("abort", () => abort.abort(), { once: true });
+
+  const gemeinsam = { request, abort, session, settings, history };
+
+  return einzelne?.kind === "vector"
+    ? vektorEinzelmodus({ ...gemeinsam, collection: einzelne, question })
+    : werkzeugmodus({ ...gemeinsam, collections, einzelne });
+}
+
+type Gemeinsam = {
+  request: Request;
+  abort: AbortController;
+  session: { userId: string };
+  settings: ResolvedSettings;
+  history: ClientMessage[];
+};
+
+/**
+ * Der klassische Ablauf fuer eine einzelne Dokumentensammlung: erst suchen,
+ * ohne Treffer kein Modellaufruf, sonst Kontext in die Frage einbetten.
+ */
+async function vektorEinzelmodus({
+  abort,
+  session,
+  settings,
+  history,
+  collection,
+  question,
+}: Gemeinsam & { collection: Collection; question: string }): Promise<Response> {
   let hits: Hit[];
   try {
     hits = (await search(collection.namespace, question, TOP_K)).filter((hit) => hit.score >= MIN_SCORE);
@@ -87,37 +143,14 @@ export async function POST(request: Request) {
     ]);
   }
 
-  // Erst jetzt zaehlt die Anfrage gegen das Tagesbudget — nur echte Modellaufrufe kosten.
-  try {
-    const budget = await consumeDailyBudget({
-      globalLimit: settings.dailyAnswerLimit,
-      userId: session.userId,
-      userLimit: settings.dailyAnswerLimitPerUser,
-    });
-    if (!budget.ok) return budgetExhausted(budget);
-  } catch (error) {
-    return errorResponse(error);
-  }
+  const budget = await reserviereBudget(settings, session.userId);
+  if (budget) return budget;
 
   const apiMessages: ModelMessage[] = history.map((message, i) =>
     i === history.length - 1 && message.role === "user"
       ? { role: "user", content: `${buildContext(hits)}\n\nFrage: ${message.content}` }
       : { role: message.role, content: message.content },
   );
-
-  const sources = hits.map((hit, i) => ({
-    n: i + 1,
-    filename: hit.metadata.filename,
-    location: hit.metadata.location ?? null,
-    score: Math.round(hit.score * 1000) / 1000,
-    snippet: hit.text.slice(0, 240),
-  }));
-
-  // Bricht der Browser die Verbindung ab (Tab geschlossen, neue Frage), wird
-  // auch die Anfrage an den Anbieter beendet — sonst liefe die Generierung
-  // samt Abrechnung im Hintergrund bis zum Ende weiter.
-  const abort = new AbortController();
-  request.signal.addEventListener("abort", () => abort.abort(), { once: true });
 
   const result = streamText({
     model: getModel(settings),
@@ -131,7 +164,107 @@ export async function POST(request: Request) {
     },
   });
 
+  return streamAntwort({
+    abort,
+    settings,
+    stream: result.stream,
+    vorab: [{ type: "sources", sources: alsQuellen(hits, 0) }],
+  });
+}
+
+/**
+ * Werkzeugmodus: fuer Tabellen- und Graph-Sammlungen sowie "alle Sammlungen".
+ * Das Modell entscheidet, welche Werkzeuge es aufruft; jeder Aufruf wird als
+ * `step`-Ereignis an den Browser gemeldet.
+ */
+async function werkzeugmodus({
+  abort,
+  session,
+  settings,
+  history,
+  collections,
+  einzelne,
+}: Gemeinsam & { collections: Collection[]; einzelne: Collection | undefined }): Promise<Response> {
+  const budget = await reserviereBudget(settings, session.userId);
+  if (budget) return budget;
+
+  const gesammelt: Source[] = [];
+  const context: ToolContext = {
+    collections,
+    fixed: einzelne,
+    onHits: (hits) => gesammelt.push(...alsQuellen(hits, gesammelt.length)),
+  };
+
+  const apiMessages: ModelMessage[] = history.map((message) => ({ role: message.role, content: message.content }));
+
+  const result = streamText({
+    model: getModel(settings),
+    instructions: buildToolPrompt(collections, einzelne !== undefined),
+    messages: apiMessages,
+    tools: buildTools(context),
+    stopWhen: isStepCount(MAX_TOOL_STEPS),
+    maxOutputTokens: 4096,
+    reasoning: REASONING,
+    abortSignal: abort.signal,
+    onError: ({ error }) => {
+      if (!abort.signal.aborted) console.error("Modellaufruf fehlgeschlagen:", error);
+    },
+  });
+
+  return streamAntwort({
+    abort,
+    settings,
+    stream: result.stream,
+    context,
+    nachher: () => [{ type: "sources", sources: gesammelt }],
+  });
+}
+
+async function reserviereBudget(settings: ResolvedSettings, userId: string): Promise<Response | null> {
+  try {
+    const budget = await consumeDailyBudget({
+      globalLimit: settings.dailyAnswerLimit,
+      userId,
+      userLimit: settings.dailyAnswerLimitPerUser,
+    });
+    return budget.ok ? null : budgetExhausted(budget);
+  } catch (error) {
+    return errorResponse(error);
+  }
+}
+
+function alsQuellen(hits: Hit[], offset: number): Source[] {
+  return hits.map((hit, i) => ({
+    n: offset + i + 1,
+    filename: hit.metadata.filename,
+    location: hit.metadata.location ?? null,
+    score: Math.round(hit.score * 1000) / 1000,
+    snippet: hit.text.slice(0, 240),
+  }));
+}
+
+/**
+ * Uebersetzt den AI-SDK-Stream in das NDJSON-Protokoll des Browsers.
+ * Bricht der Browser die Verbindung ab, wird auch die Anfrage an den Anbieter
+ * beendet — sonst liefe die Generierung samt Abrechnung im Hintergrund weiter.
+ */
+function streamAntwort({
+  abort,
+  settings,
+  stream: teile,
+  context,
+  vorab = [],
+  nachher,
+}: {
+  abort: AbortController;
+  settings: ResolvedSettings;
+  stream: AsyncIterable<{ type: string } & Record<string, unknown>>;
+  context?: ToolContext;
+  vorab?: unknown[];
+  nachher?: () => unknown[];
+}): Response {
   const encoder = new TextEncoder();
+
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const send = (event: unknown) => {
@@ -139,17 +272,33 @@ export async function POST(request: Request) {
         controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
       };
 
-      send({ type: "sources", sources });
+      vorab.forEach(send);
 
       try {
         // `streamText` wirft nicht, sondern liefert Fehler als Teil des Streams.
-        for await (const part of result.stream) {
-          if (part.type === "text-delta") {
-            send({ type: "text", delta: part.text });
-          } else if (part.type === "error") {
-            send({ type: "error", message: describeProviderError(part.error, settings.provider) });
+        for await (const part of teile) {
+          switch (part.type) {
+            case "text-delta":
+              send({ type: "text", delta: part.text });
+              break;
+            case "tool-result":
+              if (context) {
+                const step = toStep(context, String(part.toolName), part.input, part.output);
+                if (step) send({ type: "step", step });
+              }
+              break;
+            case "tool-error":
+              if (context) {
+                const step = toStep(context, String(part.toolName), part.input, undefined, part.error);
+                if (step) send({ type: "step", step });
+              }
+              break;
+            case "error":
+              send({ type: "error", message: describeProviderError(part.error, settings.provider) });
+              break;
           }
         }
+        nachher?.().forEach(send);
         send({ type: "done" });
       } catch (error) {
         if (!abort.signal.aborted) {

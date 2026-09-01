@@ -2,15 +2,18 @@
 
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
+import { KIND_LABEL, type CollectionKind } from "@/lib/collection-kinds";
 import { formatiereDatum } from "@/lib/format";
 
 export type SammlungZeile = {
   id: string;
   name: string;
+  kind: CollectionKind;
   ownerId: string;
   ownerEmail: string;
   createdAt: string;
   documentCount: number;
+  /** Abschnitte, Zeilen oder Statements — je nach Typ. */
   chunkCount: number;
 };
 
@@ -44,7 +47,9 @@ export default function CollectionsOverview({
     }
   }
 
-  const abschnitte = sammlungen.reduce((summe, sammlung) => summe + sammlung.chunkCount, 0);
+  const abschnitte = sammlungen
+    .filter((sammlung) => sammlung.kind === "vector")
+    .reduce((summe, sammlung) => summe + sammlung.chunkCount, 0);
 
   return (
     <div className="karte">
@@ -69,9 +74,10 @@ export default function CollectionsOverview({
             <thead>
               <tr>
                 <th>Sammlung</th>
+                <th>Typ</th>
                 <th>Eigentuemer</th>
-                <th className="zahl">Dokumente</th>
-                <th className="zahl">Abschnitte</th>
+                <th className="zahl">Dateien</th>
+                <th className="zahl">Einheiten</th>
                 <th className="zahl">Angelegt</th>
                 <th />
               </tr>
@@ -80,6 +86,9 @@ export default function CollectionsOverview({
               {sammlungen.map((sammlung) => (
                 <tr key={sammlung.id}>
                   <td>{sammlung.name}</td>
+                  <td>
+                    <span className={`typ-marke typ-${sammlung.kind}`}>{KIND_LABEL[sammlung.kind]}</span>
+                  </td>
                   <td>{sammlung.ownerEmail}</td>
                   <td className="zahl">{sammlung.documentCount}</td>
                   <td className="zahl">{sammlung.chunkCount}</td>

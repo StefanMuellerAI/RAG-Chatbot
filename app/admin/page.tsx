@@ -101,6 +101,7 @@ async function ladeSammlungen(): Promise<SammlungZeile[]> {
       return {
         id: collection.id,
         name: collection.name,
+        kind: collection.kind,
         ownerId: collection.ownerId,
         ownerEmail: collection.ownerId,
         createdAt: collection.createdAt,

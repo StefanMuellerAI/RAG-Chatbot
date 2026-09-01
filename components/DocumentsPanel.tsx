@@ -3,6 +3,13 @@
 import { upload } from "@vercel/blob/client";
 import { useRouter } from "next/navigation";
 import { useRef, useState, useTransition } from "react";
+import SchemaCard from "@/components/SchemaCard";
+import {
+  KIND_EXTENSIONS,
+  KIND_UNIT,
+  type CollectionKind,
+  type CollectionSchema,
+} from "@/lib/collection-kinds";
 import { formatiereDatum, formatiereGroesse } from "@/lib/format";
 
 type Dokument = {
@@ -21,19 +28,47 @@ type Vorgang = {
   text: string;
 };
 
-const ERLAUBTE_ENDUNGEN = [".pdf", ".docx", ".xlsx"];
+const TEXTE: Record<CollectionKind, { titel: string; hinweis: string; grenze: string; leer: string }> = {
+  vector: {
+    titel: "Dokumente einpflegen",
+    hinweis:
+      "PDF, DOCX und XLSX. Der Text wird ausgelesen, in Abschnitte zerlegt und in die Vektor-Datenbank geschrieben. Ab dann ist er im Chat dieser Sammlung auffindbar.",
+    grenze: "Mehrere Dateien gleichzeitig möglich · max. 100 MB je Datei",
+    leer: "Noch nichts eingepflegt. Der Chat kann in dieser Sammlung derzeit keine Fragen beantworten.",
+  },
+  sql: {
+    titel: "Tabellen aus CSV anlegen",
+    hinweis:
+      "Eine CSV-Datei wird zu einer Tabelle (Name aus dem Dateinamen). Kopfzeile ist Pflicht; Trennzeichen und Dezimalkomma werden erkannt. Eine Datei mit gleichem Namen ersetzt die Tabelle.",
+    grenze: "Mehrere Dateien gleichzeitig möglich · max. 20 MB und 200.000 Zeilen je Datei",
+    leer: "Noch keine Tabelle. Die KI kann in dieser Sammlung derzeit kein SQL ausführen.",
+  },
+  graph: {
+    titel: "Graph aus Cypher-Skript aufbauen",
+    hinweis:
+      "Ein Skript mit CREATE-/MERGE-Statements (Neo4j-Stil, durch Semikolon getrennt) wird in den Graphen dieser Sammlung eingespielt. Mehrere Skripte ergänzen sich.",
+    grenze: "Endungen .cypher, .cql, .txt · max. 5 MB und 5.000 Statements je Datei",
+    leer: "Noch kein Skript. Die KI kann in dieser Sammlung derzeit kein Cypher ausführen.",
+  },
+};
 
-/** Dokumente einer einzelnen Sammlung: hochladen, auflisten, loeschen. */
+/** Dateien einer einzelnen Sammlung: hochladen, auflisten, loeschen — je Typ mit passenden Regeln. */
 export default function DocumentsPanel({
   collectionId,
   collectionName,
+  kind,
+  schema,
   dokumente,
 }: {
   collectionId: string;
   collectionName: string;
+  kind: CollectionKind;
+  schema: CollectionSchema | null;
   dokumente: Dokument[];
 }) {
   const router = useRouter();
+  const endungen = KIND_EXTENSIONS[kind];
+  const texte = TEXTE[kind];
   const [aktualisiert, aktualisiere] = useTransition();
   const [fehler, setFehler] = useState<string | null>(null);
   const [vorgaenge, setVorgaenge] = useState<Vorgang[]>([]);
@@ -59,12 +94,12 @@ export default function DocumentsPanel({
         continue;
       }
 
-      if (!ERLAUBTE_ENDUNGEN.some((endung) => datei.name.toLowerCase().endsWith(endung))) {
+      if (!endungen.some((endung) => datei.name.toLowerCase().endsWith(endung))) {
         setzeVorgang({
           key,
           filename: datei.name,
           status: "fehler",
-          text: "Format nicht unterstützt (nur PDF, DOCX, XLSX)",
+          text: `Format nicht unterstützt (nur ${endungen.join(", ")})`,
         });
         continue;
       }
@@ -109,7 +144,7 @@ export default function DocumentsPanel({
           key,
           filename: datei.name,
           status: "fertig",
-          text: `Fertig · ${daten.document.chunkCount} Abschnitte`,
+          text: `Fertig · ${Number(daten.document.chunkCount).toLocaleString("de-DE")} ${KIND_UNIT[kind]}`,
         });
       } catch (error) {
         setzeVorgang({
@@ -159,11 +194,10 @@ export default function DocumentsPanel({
       {fehler && <div className="meldung">{fehler}</div>}
 
       <div className="karte">
-        <h2 className="karte-titel">Dokumente einpflegen · {collectionName}</h2>
-        <p className="hinweis-text">
-          PDF, DOCX und XLSX. Der Text wird ausgelesen, in Abschnitte zerlegt und in die
-          Vektor-Datenbank geschrieben. Ab dann ist er im Chat dieser Sammlung auffindbar.
-        </p>
+        <h2 className="karte-titel">
+          {texte.titel} · {collectionName}
+        </h2>
+        <p className="hinweis-text">{texte.hinweis}</p>
 
         <label
           className={ueberAblage ? "ablage aktiv" : "ablage"}
@@ -181,7 +215,7 @@ export default function DocumentsPanel({
           <input
             type="file"
             multiple
-            accept={ERLAUBTE_ENDUNGEN.join(",")}
+            accept={endungen.join(",")}
             style={{ display: "none" }}
             onChange={(event) => {
               void verarbeite(Array.from(event.target.files ?? []));
@@ -191,9 +225,7 @@ export default function DocumentsPanel({
           <div>
             Dateien hierher ziehen oder <b>auswählen</b>
           </div>
-          <div className="ablage-hinweis">
-            Mehrere Dateien gleichzeitig möglich · max. 100 MB je Datei
-          </div>
+          <div className="ablage-hinweis">{texte.grenze}</div>
         </label>
 
         {vorgaenge.length > 0 && (
@@ -208,28 +240,28 @@ export default function DocumentsPanel({
         )}
       </div>
 
+      {schema && <SchemaCard schema={schema} />}
+
       <div className="karte">
         <h2 className="karte-titel">
-          Inhalt{" "}
+          Dateien{" "}
           <span style={{ fontWeight: 400, color: "var(--grau-600)", fontSize: 15 }}>
-            · {dokumente.length} {dokumente.length === 1 ? "Dokument" : "Dokumente"} ·{" "}
-            {abschnitteGesamt} Abschnitte
+            · {dokumente.length} {dokumente.length === 1 ? "Datei" : "Dateien"} ·{" "}
+            {abschnitteGesamt.toLocaleString("de-DE")} {KIND_UNIT[kind]}
             {aktualisiert ? " · wird aktualisiert …" : ""}
           </span>
         </h2>
 
         {dokumente.length === 0 ? (
-          <p className="hinweis-text">
-            Noch nichts eingepflegt. Der Chat kann in dieser Sammlung derzeit keine Fragen beantworten.
-          </p>
+          <p className="hinweis-text">{texte.leer}</p>
         ) : (
           <div className="tabelle-huelle">
             <table>
               <thead>
                 <tr>
-                  <th>Dokument</th>
+                  <th>Datei</th>
                   <th className="zahl">Größe</th>
-                  <th className="zahl">Abschnitte</th>
+                  <th className="zahl">{KIND_UNIT[kind]}</th>
                   <th className="zahl">Hinzugefügt</th>
                   <th />
                 </tr>
