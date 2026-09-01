@@ -2,7 +2,8 @@
 
 import { upload } from "@vercel/blob/client";
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useRef, useState, useTransition } from "react";
+import { formatiereDatum, formatiereGroesse } from "@/lib/format";
 
 type Dokument = {
   id: string;
@@ -21,22 +22,23 @@ type Vorgang = {
 };
 
 const ERLAUBTE_ENDUNGEN = [".pdf", ".docx", ".xlsx"];
-const BESTAETIGUNG = "LÖSCHEN";
 
-export default function AdminPanel({
+/** Dokumente einer einzelnen Sammlung: hochladen, auflisten, loeschen. */
+export default function DocumentsPanel({
+  collectionId,
+  collectionName,
   dokumente,
-  ladeFehler,
 }: {
+  collectionId: string;
+  collectionName: string;
   dokumente: Dokument[];
-  ladeFehler: string | null;
 }) {
   const router = useRouter();
   const [aktualisiert, aktualisiere] = useTransition();
   const [fehler, setFehler] = useState<string | null>(null);
   const [vorgaenge, setVorgaenge] = useState<Vorgang[]>([]);
   const [ueberAblage, setUeberAblage] = useState(false);
-  const [bestaetigung, setBestaetigung] = useState("");
-  const [leert, setLeert] = useState(false);
+  const vorgangZaehler = useRef(0);
 
   /** Laedt die serverseitig gerenderte Liste neu. */
   function aktualisiereListe() {
@@ -44,8 +46,18 @@ export default function AdminPanel({
   }
 
   async function verarbeite(dateien: File[]) {
+    let verarbeitet = 0;
+    let abgemeldet = false;
+
     for (const datei of dateien) {
-      const key = `${datei.name}-${datei.lastModified}-${datei.size}`;
+      // Laufende Nummer, damit dieselbe Datei mehrfach hintereinander einen
+      // eigenen Eintrag bekommt statt den vorigen zu ueberschreiben.
+      const key = `${++vorgangZaehler.current}-${datei.name}`;
+
+      if (abgemeldet) {
+        setzeVorgang({ key, filename: datei.name, status: "fehler", text: "Abgebrochen: nicht angemeldet" });
+        continue;
+      }
 
       if (!ERLAUBTE_ENDUNGEN.some((endung) => datei.name.toLowerCase().endsWith(endung))) {
         setzeVorgang({
@@ -62,10 +74,11 @@ export default function AdminPanel({
       try {
         // Schritt 1: direkt vom Browser in den Blob-Store — so greift das
         // 4,5-MB-Limit fuer Request-Bodies von Serverless-Funktionen nicht.
-        const blob = await upload(`files/${crypto.randomUUID()}/${datei.name}`, datei, {
+        const blob = await upload(`files/${collectionId}/${crypto.randomUUID()}/${datei.name}`, datei, {
           access: "private",
           handleUploadUrl: "/api/upload",
           contentType: datei.type || undefined,
+          clientPayload: JSON.stringify({ collectionId }),
         });
 
         setzeVorgang({ key, filename: datei.name, status: "laeuft", text: "Wird ausgewertet …" });
@@ -78,21 +91,26 @@ export default function AdminPanel({
             blobPath: blob.pathname,
             filename: datei.name,
             contentType: datei.type,
+            collectionId,
           }),
         });
 
-        if (antwort.status === 401) return void router.push("/login?weiter=/admin");
+        if (antwort.status === 401) {
+          abgemeldet = true;
+          setzeVorgang({ key, filename: datei.name, status: "fehler", text: "Abgebrochen: nicht angemeldet" });
+          continue;
+        }
 
         const daten = await antwort.json();
         if (!antwort.ok) throw new Error(daten.error ?? "Verarbeitung fehlgeschlagen.");
 
+        verarbeitet++;
         setzeVorgang({
           key,
           filename: datei.name,
           status: "fertig",
           text: `Fertig · ${daten.document.chunkCount} Abschnitte`,
         });
-        aktualisiereListe();
       } catch (error) {
         setzeVorgang({
           key,
@@ -102,6 +120,10 @@ export default function AdminPanel({
         });
       }
     }
+
+    // Einmal am Ende statt nach jeder Datei — jeder Refresh laedt die Liste neu.
+    if (verarbeitet > 0) aktualisiereListe();
+    if (abgemeldet) router.push(`/login?weiter=/sammlungen`);
   }
 
   function setzeVorgang(vorgang: Vorgang) {
@@ -115,12 +137,12 @@ export default function AdminPanel({
   }
 
   async function loesche(dokument: Dokument) {
-    if (!window.confirm(`"${dokument.filename}" wirklich aus der Wissensbasis entfernen?`)) return;
+    if (!window.confirm(`"${dokument.filename}" wirklich aus „${collectionName}" entfernen?`)) return;
     setFehler(null);
 
     try {
       const antwort = await fetch(`/api/documents/${dokument.id}`, { method: "DELETE" });
-      if (antwort.status === 401) return void router.push("/login?weiter=/admin");
+      if (antwort.status === 401) return void router.push("/login?weiter=/sammlungen");
 
       const daten = await antwort.json();
       if (!antwort.ok) throw new Error(daten.error ?? "Löschen fehlgeschlagen.");
@@ -130,44 +152,17 @@ export default function AdminPanel({
     }
   }
 
-  async function leereCollection() {
-    setLeert(true);
-    setFehler(null);
-
-    try {
-      const antwort = await fetch("/api/collection", { method: "DELETE" });
-      if (antwort.status === 401) return void router.push("/login?weiter=/admin");
-
-      const daten = await antwort.json();
-      if (!antwort.ok) throw new Error(daten.error ?? "Die Collection konnte nicht geleert werden.");
-      setBestaetigung("");
-      setVorgaenge([]);
-      aktualisiereListe();
-    } catch (error) {
-      setFehler(error instanceof Error ? error.message : "Unbekannter Fehler.");
-    } finally {
-      setLeert(false);
-    }
-  }
-
-  async function abmelden() {
-    await fetch("/api/auth", { method: "DELETE" });
-    router.push("/");
-    router.refresh();
-  }
-
   const abschnitteGesamt = dokumente.reduce((summe, dokument) => summe + dokument.chunkCount, 0);
-  const anzeigeFehler = fehler ?? ladeFehler;
 
   return (
     <>
-      {anzeigeFehler && <div className="meldung">{anzeigeFehler}</div>}
+      {fehler && <div className="meldung">{fehler}</div>}
 
       <div className="karte">
-        <h1 className="karte-titel">Dokumente einpflegen</h1>
+        <h2 className="karte-titel">Dokumente einpflegen · {collectionName}</h2>
         <p className="hinweis-text">
           PDF, DOCX und XLSX. Der Text wird ausgelesen, in Abschnitte zerlegt und in die
-          Vektor-Datenbank geschrieben. Ab dann ist er im Chat auffindbar.
+          Vektor-Datenbank geschrieben. Ab dann ist er im Chat dieser Sammlung auffindbar.
         </p>
 
         <label
@@ -215,7 +210,7 @@ export default function AdminPanel({
 
       <div className="karte">
         <h2 className="karte-titel">
-          Wissensbasis{" "}
+          Inhalt{" "}
           <span style={{ fontWeight: 400, color: "var(--grau-600)", fontSize: 15 }}>
             · {dokumente.length} {dokumente.length === 1 ? "Dokument" : "Dokumente"} ·{" "}
             {abschnitteGesamt} Abschnitte
@@ -225,7 +220,7 @@ export default function AdminPanel({
 
         {dokumente.length === 0 ? (
           <p className="hinweis-text">
-            Noch nichts eingepflegt. Der Chat kann derzeit keine Fragen beantworten.
+            Noch nichts eingepflegt. Der Chat kann in dieser Sammlung derzeit keine Fragen beantworten.
           </p>
         ) : (
           <div className="tabelle-huelle">
@@ -260,55 +255,6 @@ export default function AdminPanel({
           </div>
         )}
       </div>
-
-      <div className="karte gefahr">
-        <h2 className="karte-titel">Collection löschen</h2>
-        <p className="hinweis-text">
-          Entfernt <b>alle</b> Dokumente, alle Abschnitte und alle Originaldateien. Der Chat hat
-          danach keine Wissensbasis mehr. Das lässt sich nicht rückgängig machen — zum Bestätigen
-          bitte <b>{BESTAETIGUNG}</b> eintippen.
-        </p>
-
-        <div className="feld" style={{ maxWidth: 260 }}>
-          <label htmlFor="bestaetigung">Bestätigung</label>
-          <input
-            id="bestaetigung"
-            type="text"
-            value={bestaetigung}
-            onChange={(event) => setBestaetigung(event.target.value)}
-            placeholder={BESTAETIGUNG}
-            autoComplete="off"
-          />
-        </div>
-
-        <button
-          className="knopf"
-          onClick={() => void leereCollection()}
-          disabled={bestaetigung !== BESTAETIGUNG || leert}
-        >
-          {leert ? "Wird gelöscht …" : "Collection unwiderruflich löschen"}
-        </button>
-      </div>
-
-      <div className="karte">
-        <button className="knopf knopf-sekundaer" onClick={() => void abmelden()}>
-          Abmelden
-        </button>
-      </div>
     </>
   );
-}
-
-function formatiereGroesse(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function formatiereDatum(iso: string): string {
-  return new Date(iso).toLocaleDateString("de-DE", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-  });
 }

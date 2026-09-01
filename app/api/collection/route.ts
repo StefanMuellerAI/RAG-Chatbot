@@ -1,35 +1,20 @@
 import { NextResponse } from "next/server";
-import { deleteAllDocuments } from "@/lib/documents";
-import { MissingConfigError } from "@/lib/env";
-import { resetCollection, vectorCount } from "@/lib/vector";
+import { errorResponse, requireAdmin } from "@/lib/api";
+import { deleteEverything } from "@/lib/collections";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-/** Kennzahlen fuer den Admin-Bereich. */
-export async function GET() {
-  try {
-    return NextResponse.json({ vectorCount: await vectorCount() });
-  } catch (error) {
-    return handle(error);
-  }
-}
-
-/** Leert die komplette Wissensbasis: alle Vektoren und alle Dateien. */
+/**
+ * Admin-Notausgang: leert die komplette Wissensbasis — alle Sammlungen,
+ * Dokumente, Dateien und Vektoren. Nutzerkonten und Einstellungen bleiben.
+ */
 export async function DELETE() {
   try {
-    await resetCollection();
-    const removedFiles = await deleteAllDocuments();
-    return NextResponse.json({ ok: true, removedFiles });
+    await requireAdmin();
+    const result = await deleteEverything();
+    return NextResponse.json({ ok: true, removedCollections: result.collections, removedFiles: result.files });
   } catch (error) {
-    return handle(error);
+    return errorResponse(error);
   }
-}
-
-function handle(error: unknown): NextResponse {
-  const status = error instanceof MissingConfigError ? 503 : 500;
-  return NextResponse.json(
-    { error: error instanceof Error ? error.message : "Unbekannter Fehler." },
-    { status },
-  );
 }

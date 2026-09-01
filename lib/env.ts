@@ -46,11 +46,29 @@ export function requireEnv<const T extends readonly string[]>(
   return result as Record<T[number], string>;
 }
 
-/** Namen aller Variablen, die fuer den jeweiligen Bereich fehlen. */
+/**
+ * Upstash Redis kommt je nach Einrichtungsweg unter zwei Namenspaaren an:
+ * direkt aus der Upstash-Konsole als UPSTASH_REDIS_REST_*, ueber den
+ * Vercel-Marketplace als KV_REST_API_*. Beide werden akzeptiert.
+ */
+export function redisCredentials(): { url: string; token: string } | undefined {
+  const url = read("UPSTASH_REDIS_REST_URL") ?? read("KV_REST_API_URL");
+  const token = read("UPSTASH_REDIS_REST_TOKEN") ?? read("KV_REST_API_TOKEN");
+  return url && token ? { url, token } : undefined;
+}
+
+/** Sammelname, unter dem fehlende Redis-Zugangsdaten gemeldet werden. */
+export const REDIS_VARIABLES = "UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN";
+
+/**
+ * Namen aller Variablen, die fuer den jeweiligen Bereich fehlen.
+ * Der API-Key des Modellanbieters gehoert bewusst nicht dazu: er wird im
+ * Admin hinterlegt, die Umgebungsvariable ist nur noch ein Rueckfallwert.
+ */
 export function missingFor(area: "chat" | "admin"): string[] {
   const needed =
     area === "chat"
-      ? ["ANTHROPIC_API_KEY", "UPSTASH_VECTOR_REST_URL", "UPSTASH_VECTOR_REST_TOKEN"]
+      ? ["UPSTASH_VECTOR_REST_URL", "UPSTASH_VECTOR_REST_TOKEN", "AUTH_SECRET"]
       : [
           "UPSTASH_VECTOR_REST_URL",
           "UPSTASH_VECTOR_REST_TOKEN",
@@ -58,5 +76,7 @@ export function missingFor(area: "chat" | "admin"): string[] {
           "ADMIN_PASSWORD",
           "AUTH_SECRET",
         ];
-  return needed.filter((name) => read(name) === undefined);
+  const missing = needed.filter((name) => read(name) === undefined);
+  if (!redisCredentials()) missing.push(REDIS_VARIABLES);
+  return missing;
 }

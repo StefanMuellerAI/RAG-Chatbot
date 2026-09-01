@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import TabNav from "@/components/TabNav";
+import { currentSession } from "@/lib/session";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -8,7 +9,9 @@ export const metadata: Metadata = {
     "Interner Chatbot, der Fragen anhand der eingepflegten Dokumente beantwortet.",
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const rolle = (await currentSession())?.role ?? null;
+
   return (
     <html lang="de">
       <body>
@@ -21,7 +24,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </div>
         </header>
 
-        <TabNav />
+        <TabNav rolle={rolle} />
 
         <main className="inhalt">{children}</main>
 

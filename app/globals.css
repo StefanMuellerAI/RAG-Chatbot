@@ -131,6 +131,22 @@ a {
   color: var(--rot-dunkel);
 }
 
+.reiter-abmelden {
+  margin-left: auto;
+  font: inherit;
+  font-size: 14px;
+  color: var(--grau-600);
+  background: none;
+  border: none;
+  padding: 13px 8px;
+  cursor: pointer;
+}
+
+.reiter-abmelden:hover:not(:disabled) {
+  color: var(--rot-dunkel);
+  text-decoration: underline;
+}
+
 /* --- Grundgeruest --------------------------------------------------------- */
 
 .inhalt {
@@ -211,6 +227,9 @@ a {
 
 input[type="text"],
 input[type="password"],
+input[type="email"],
+input[type="number"],
+select,
 textarea {
   font: inherit;
   width: 100%;
@@ -226,6 +245,118 @@ textarea::placeholder {
   color: var(--grau-600);
 }
 
+.knopf-reihe {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.formular-raster {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 0 24px;
+}
+
+.feld-hinweis {
+  color: var(--grau-600);
+  font-size: 13px;
+  margin-top: 6px;
+}
+
+.feld-hinweis code {
+  font-size: 12px;
+}
+
+.unter-titel {
+  font-size: 15px;
+  margin: 20px 0 8px;
+}
+
+/* Umschalter, z. B. Nutzer / Administrator im Login. */
+.umschalter {
+  display: flex;
+  border: 1px solid var(--grau-300);
+  border-radius: 2px;
+  margin-bottom: 18px;
+}
+
+.umschalter button {
+  flex: 1;
+  font: inherit;
+  font-weight: 700;
+  padding: 10px 12px;
+  background: var(--weiss);
+  color: var(--grau-600);
+  border: none;
+  cursor: pointer;
+}
+
+.umschalter button + button {
+  border-left: 1px solid var(--grau-300);
+}
+
+.umschalter button[aria-selected="true"] {
+  background: var(--rot-hell);
+  color: var(--rot-dunkel);
+}
+
+/* Sammlungsliste */
+.sammlungsliste {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sammlungsliste li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--grau-200);
+}
+
+.sammlungsliste li.aktiv {
+  background: var(--rot-hell);
+  border-left: 4px solid var(--rot);
+}
+
+.sammlung-name {
+  font: inherit;
+  font-weight: 700;
+  background: none;
+  border: none;
+  padding: 6px 0;
+  color: var(--schwarz);
+  cursor: pointer;
+  text-align: left;
+  flex: 1;
+}
+
+.sammlung-name:hover {
+  color: var(--rot-dunkel);
+}
+
+/* Sammlungsauswahl ueber dem Chat */
+.chat-kopf {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.chat-kopf label {
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.chat-kopf select {
+  width: auto;
+  min-width: 220px;
+  padding: 8px 10px;
+}
+
 /* --- Meldungen ------------------------------------------------------------ */
 
 .meldung {
@@ -239,6 +370,11 @@ textarea::placeholder {
 .meldung-neutral {
   border-left-color: var(--grau-600);
   background: var(--grau-100);
+}
+
+.meldung-erfolg {
+  border-left-color: #1c7a35;
+  background: #eef7f0;
 }
 
 /* --- Chat ----------------------------------------------------------------- */

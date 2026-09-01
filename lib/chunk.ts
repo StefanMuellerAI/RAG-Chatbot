@@ -66,16 +66,28 @@ function splitText(text: string): string[] {
 function findBreak(text: string, start: number, hardEnd: number): number {
   const earliest = start + Math.floor(TARGET_SIZE / 2);
 
-  const paragraph = text.lastIndexOf("\n\n", hardEnd);
-  if (paragraph > earliest) return paragraph;
+  // Nur im Fenster [earliest, hardEnd) suchen. `lastIndexOf` auf dem ganzen
+  // Text laeuft ohne Fundstelle bis zum Textanfang zurueck — bei grossen
+  // Tabellenblaettern ohne Absaetze wird das quadratisch.
+  const window = text.slice(earliest, hardEnd);
 
+  const paragraph = window.lastIndexOf("\n\n");
+  if (paragraph >= 0) return earliest + paragraph;
+
+  let sentence = -1;
   for (const marker of [". ", ".\n", "! ", "? ", "; "]) {
-    const position = text.lastIndexOf(marker, hardEnd);
-    if (position > earliest) return position + marker.length;
+    const position = window.lastIndexOf(marker);
+    if (position >= 0) sentence = Math.max(sentence, position + marker.length);
   }
+  if (sentence >= 0) return earliest + sentence;
 
-  const space = text.lastIndexOf(" ", hardEnd);
-  return space > earliest ? space : hardEnd;
+  // Zeilenumbruch vor Leerzeichen: Tabellenzeilen (XLSX) enthalten selten
+  // Satzzeichen, sollen aber nicht mitten in der Zeile getrennt werden.
+  const line = window.lastIndexOf("\n");
+  if (line >= 0) return earliest + line + 1;
+
+  const space = window.lastIndexOf(" ");
+  return space >= 0 ? earliest + space : hardEnd;
 }
 
 /** Enthaelt der Abschnitt genug Substanz, um durchsuchbar zu sein? */
