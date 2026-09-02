@@ -57,7 +57,14 @@ export default function ChatBereich({ typen = [] }: { typen?: CollectionKind[] }
   }, []);
 
   const gespeichert = nachrichtenVon(aktiveId);
-  const angezeigt = streamend ? [...gespeichert, streamend] : gespeichert;
+  // Die laufende Antwort haengt hinten an — ausser sie steht schon als letzte
+  // im Verlauf. Beide Aktualisierungen (Store und State) kommen aus
+  // verschiedenen Quellen; ohne diese Pruefung gaebe es dazwischen einen
+  // Render, in dem die Antwort doppelt erscheint.
+  const angezeigt =
+    streamend && gespeichert[gespeichert.length - 1] !== streamend
+      ? [...gespeichert, streamend]
+      : gespeichert;
 
   async function senden(frage: string) {
     if (laeuft) return;
@@ -161,7 +168,12 @@ export default function ChatBereich({ typen = [] }: { typen?: CollectionKind[] }
         });
       }
 
-      if (antwort.content) await nachrichtAnhaengen(chatId, antwort);
+      // Nicht auf das Speichern warten: `nachrichtAnhaengen` legt die Antwort
+      // sofort in den Verlauf und schickt sie dann zum Server. Wer hier auf
+      // den Request wartete, sah die Antwort so lange doppelt — einmal aus dem
+      // Verlauf, einmal als laufende. Fehler beim Speichern meldet die
+      // Funktion selbst ueber den Verlaufs-Hinweis.
+      if (antwort.content) void nachrichtAnhaengen(chatId, antwort);
 
       setStreamend(null);
       setLaeuft(false);
