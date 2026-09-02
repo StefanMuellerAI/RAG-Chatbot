@@ -1,10 +1,11 @@
-import { errorResponse, readJson } from "@/lib/api";
+import { errorResponse } from "@/lib/api";
 import { requireAdmin } from "@/lib/auth/user";
-import { ladeNutzer, setzeAdminRolle, setzeNutzerPlan } from "@/lib/admin";
-import { ValidationError } from "@/lib/errors";
+import { ladeNutzer } from "@/lib/admin";
 
 export const runtime = "nodejs";
 
+// Nur lesend. Plan zuweisen und Adminrolle setzen laufen ueber Server Actions
+// (app/admin/actions.ts).
 export async function GET(request: Request) {
   try {
     await requireAdmin();
@@ -16,35 +17,6 @@ export async function GET(request: Request) {
     return Response.json(
       await ladeNutzer(suche, Number.isFinite(seite) ? seite : 1),
     );
-  } catch (error) {
-    return errorResponse(error);
-  }
-}
-
-/** Plan zuweisen oder Adminrolle setzen. */
-export async function PATCH(request: Request) {
-  try {
-    const admin = await requireAdmin();
-
-    const eingabe = await readJson<{
-      clerkUserId?: string;
-      planId?: string;
-      isAdmin?: boolean;
-    }>(request);
-
-    if (typeof eingabe.clerkUserId !== "string" || !eingabe.clerkUserId) {
-      throw new ValidationError("Es wurde kein Nutzer angegeben.");
-    }
-
-    if (typeof eingabe.planId === "string") {
-      await setzeNutzerPlan(eingabe.clerkUserId, eingabe.planId);
-    }
-
-    if (typeof eingabe.isAdmin === "boolean") {
-      await setzeAdminRolle(eingabe.clerkUserId, eingabe.isAdmin, admin.userId);
-    }
-
-    return Response.json({ ok: true });
   } catch (error) {
     return errorResponse(error);
   }

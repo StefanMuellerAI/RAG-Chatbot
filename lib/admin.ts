@@ -34,6 +34,15 @@ import { kontextSchluessel, verwirfZwischenspeicher } from "./ratelimit";
 
 const EIN_MB = 1024 * 1024;
 
+/**
+ * Rohe Eingaben (JSON einer Route oder Argument einer Server Action) als
+ * Objekt — alles andere wird zu einem leeren Objekt, damit die Feldpruefungen
+ * darunter die Meldung liefern und nicht ein TypeError.
+ */
+function alsObjekt(roh: unknown): Record<string, unknown> {
+  return roh && typeof roh === "object" ? (roh as Record<string, unknown>) : {};
+}
+
 // --- Groessenklassen --------------------------------------------------------
 
 export async function ladeGroessenklassen(): Promise<SizeClass[]> {
@@ -49,6 +58,27 @@ export type GroessenklasseEingabe = {
   maxTotalPages: number;
   maxFileMegabytes: number;
 };
+
+const GROESSENKLASSE_KENNUNG = /^[A-Za-z0-9_-]{1,8}$/;
+
+/** Formularwerte in eine typisierte Eingabe; prueft nur die Kennung, den Rest `speichereGroessenklasse`. */
+export function normalisiereGroessenklasseEingabe(roh: unknown): GroessenklasseEingabe {
+  const eingabe = alsObjekt(roh);
+  if (typeof eingabe.id !== "string" || !GROESSENKLASSE_KENNUNG.test(eingabe.id)) {
+    throw new ValidationError(
+      "Die Kennung muss aus 1 bis 8 Buchstaben, Ziffern, Binde- oder Unterstrichen bestehen.",
+    );
+  }
+  return {
+    id: eingabe.id,
+    label: String(eingabe.label ?? ""),
+    rank: Number(eingabe.rank),
+    maxDocuments: Number(eingabe.maxDocuments),
+    maxPagesPerDocument: Number(eingabe.maxPagesPerDocument),
+    maxTotalPages: Number(eingabe.maxTotalPages),
+    maxFileMegabytes: Number(eingabe.maxFileMegabytes),
+  };
+}
 
 export async function speichereGroessenklasse(eingabe: GroessenklasseEingabe): Promise<void> {
   pruefeGanzzahl(eingabe.rank, 1, 999, "Rang");
@@ -109,6 +139,33 @@ export type PlanEingabe = {
   modelId: string;
   isDefault: boolean;
 };
+
+const PLAN_KENNUNG = /^[A-Za-z0-9_-]{1,16}$/;
+
+export function normalisierePlanEingabe(roh: unknown): PlanEingabe {
+  const eingabe = alsObjekt(roh);
+  if (typeof eingabe.id !== "string" || !PLAN_KENNUNG.test(eingabe.id)) {
+    throw new ValidationError(
+      "Die Kennung muss aus 1 bis 16 Buchstaben, Ziffern, Binde- oder Unterstrichen bestehen.",
+    );
+  }
+  return {
+    id: eingabe.id,
+    label: String(eingabe.label ?? ""),
+    maxSizeClassId: String(eingabe.maxSizeClassId ?? ""),
+    maxCollections: Number(eingabe.maxCollections),
+    maxQuestionsPerDay: Number(eingabe.maxQuestionsPerDay),
+    modelId: String(eingabe.modelId ?? ""),
+    isDefault: Boolean(eingabe.isDefault),
+  };
+}
+
+/** Kennung eines zu loeschenden Plans; leer ist keine Kennung. */
+export function pruefePlanKennung(roh: unknown): string {
+  const wert = typeof roh === "string" ? roh.trim() : "";
+  if (!wert) throw new ValidationError("Es wurde kein Plan angegeben.");
+  return wert;
+}
 
 export async function speicherePlan(eingabe: PlanEingabe): Promise<void> {
   pruefeGanzzahl(eingabe.maxCollections, 0, 100_000, "Sammlungen je Nutzer");
@@ -241,6 +298,30 @@ export type ModellEingabe = {
   enabled: boolean;
   sortOrder: number;
 };
+
+export function normalisiereModellEingabe(roh: unknown): ModellEingabe {
+  const eingabe = alsObjekt(roh);
+  if (!istAnbieter(eingabe.provider)) {
+    throw new ValidationError("Unbekannter Anbieter. Zulaessig sind AI Gateway, Anthropic und OpenAI.");
+  }
+  return {
+    id: String(eingabe.id ?? ""),
+    provider: eingabe.provider,
+    label: String(eingabe.label ?? ""),
+    inputPerMillion: Number(eingabe.inputPerMillion),
+    outputPerMillion: Number(eingabe.outputPerMillion),
+    cacheReadPerMillion: Number(eingabe.cacheReadPerMillion),
+    enabled: Boolean(eingabe.enabled),
+    sortOrder: Number(eingabe.sortOrder ?? 0),
+  };
+}
+
+/** Kennung eines zu loeschenden Modells; leer ist keine Kennung. */
+export function pruefeModellKennung(roh: unknown): string {
+  const wert = typeof roh === "string" ? roh.trim() : "";
+  if (!wert) throw new ValidationError("Es wurde kein Modell angegeben.");
+  return wert;
+}
 
 /** Prueft eine Kennung und liefert sie getrimmt zurueck. */
 export function pruefeKennung(id: unknown): string {
@@ -388,34 +469,41 @@ export async function ladeNutzer(suche: string, seite: number): Promise<NutzerSe
         eq(users.clerkUserId, begriff))
     : undefined;
 
-  const [{ gesamt }] = await db
-    .select({ gesamt: count() })
-    .from(users)
-    .where(filter);
+  const ladeZeilen = (zielSeite: number) =>
+    db
+      .select({
+        clerkUserId: users.clerkUserId,
+        email: users.email,
+        name: users.name,
+        planId: users.planId,
+        isAdmin: users.isAdmin,
+        createdAt: users.createdAt,
+        collectionCount: sql<number>`(
+          select count(*)::int from ${collections} where ${collections.userId} = ${users.clerkUserId}
+        )`,
+        documentCount: sql<number>`(
+          select count(*)::int from ${documents} where ${documents.userId} = ${users.clerkUserId}
+        )`,
+      })
+      .from(users)
+      .where(filter)
+      .orderBy(desc(users.createdAt))
+      .limit(SEITENGROESSE)
+      .offset((zielSeite - 1) * SEITENGROESSE);
+
+  // Zaehlen und Lesen parallel fuer die gewuenschte Seite. Nur wenn die Seite
+  // hinter dem Ende liegt (etwa nach einer Suche mit weniger Treffern), wird
+  // die letzte Seite einmal nachgeladen — der seltene Fall zahlt den zweiten
+  // Roundtrip, nicht jeder Aufruf.
+  const gewuenscht = Math.max(seite, 1);
+  const [[{ gesamt }], gelesen] = await Promise.all([
+    db.select({ gesamt: count() }).from(users).where(filter),
+    ladeZeilen(gewuenscht),
+  ]);
 
   const seiten = Math.max(Math.ceil(gesamt / SEITENGROESSE), 1);
-  const aktuelleSeite = Math.min(Math.max(seite, 1), seiten);
-
-  const zeilen = await db
-    .select({
-      clerkUserId: users.clerkUserId,
-      email: users.email,
-      name: users.name,
-      planId: users.planId,
-      isAdmin: users.isAdmin,
-      createdAt: users.createdAt,
-      collectionCount: sql<number>`(
-        select count(*)::int from ${collections} where ${collections.userId} = ${users.clerkUserId}
-      )`,
-      documentCount: sql<number>`(
-        select count(*)::int from ${documents} where ${documents.userId} = ${users.clerkUserId}
-      )`,
-    })
-    .from(users)
-    .where(filter)
-    .orderBy(desc(users.createdAt))
-    .limit(SEITENGROESSE)
-    .offset((aktuelleSeite - 1) * SEITENGROESSE);
+  const aktuelleSeite = Math.min(gewuenscht, seiten);
+  const zeilen = aktuelleSeite === gewuenscht ? gelesen : await ladeZeilen(aktuelleSeite);
 
   return { zeilen, gesamt, seite: aktuelleSeite, seiten };
 }
@@ -458,6 +546,34 @@ export async function setzeAdminRolle(
   await verwirfZwischenspeicher(kontextSchluessel(clerkUserId));
 }
 
+export type NutzerAenderung = {
+  clerkUserId: string;
+  planId?: string;
+  isAdmin?: boolean;
+};
+
+export function normalisiereNutzerAenderung(roh: unknown): NutzerAenderung {
+  const eingabe = alsObjekt(roh);
+  if (typeof eingabe.clerkUserId !== "string" || !eingabe.clerkUserId) {
+    throw new ValidationError("Es wurde kein Nutzer angegeben.");
+  }
+  return {
+    clerkUserId: eingabe.clerkUserId,
+    planId: typeof eingabe.planId === "string" ? eingabe.planId : undefined,
+    isAdmin: typeof eingabe.isAdmin === "boolean" ? eingabe.isAdmin : undefined,
+  };
+}
+
+/** Plan zuweisen und/oder Adminrolle setzen — was die Aenderung enthaelt. */
+export async function aendereNutzer(aenderung: NutzerAenderung, eigeneId: string): Promise<void> {
+  if (aenderung.planId !== undefined) {
+    await setzeNutzerPlan(aenderung.clerkUserId, aenderung.planId);
+  }
+  if (aenderung.isAdmin !== undefined) {
+    await setzeAdminRolle(aenderung.clerkUserId, aenderung.isAdmin, eigeneId);
+  }
+}
+
 // --- Verbrauch --------------------------------------------------------------
 
 export type VerbrauchZeile = {
@@ -487,35 +603,37 @@ export async function ladeVerbrauch(): Promise<VerbrauchUebersicht> {
   const heute = tagesschluessel(0);
   const vor30Tagen = tagesschluessel(30);
 
-  const [heuteZeile] = await db
-    .select({
-      fragen: count(),
-      kosten: sum(usageEvents.costMicros).mapWith(Number),
-    })
-    .from(usageEvents)
-    .where(and(eq(usageEvents.day, heute), eq(usageEvents.kind, "frage")));
-
-  const [zeitraumZeile] = await db
-    .select({
-      fragen: count(),
-      kosten: sum(usageEvents.costMicros).mapWith(Number),
-    })
-    .from(usageEvents)
-    .where(and(gte(usageEvents.day, vor30Tagen), eq(usageEvents.kind, "frage")));
-
-  const vielnutzer = await db
-    .select({
-      userId: usageEvents.userId,
-      email: users.email,
-      fragen: count(),
-      kostenMicros: sum(usageEvents.costMicros).mapWith(Number),
-    })
-    .from(usageEvents)
-    .leftJoin(users, eq(users.clerkUserId, usageEvents.userId))
-    .where(and(gte(usageEvents.day, vor30Tagen), eq(usageEvents.kind, "frage")))
-    .groupBy(usageEvents.userId, users.email)
-    .orderBy(desc(sum(usageEvents.costMicros)))
-    .limit(20);
+  // Drei unabhaengige Aggregationen — parallel, sonst zahlt jeder Aufruf der
+  // Admin-Seite drei Datenbank-Roundtrips hintereinander.
+  const [[heuteZeile], [zeitraumZeile], vielnutzer] = await Promise.all([
+    db
+      .select({
+        fragen: count(),
+        kosten: sum(usageEvents.costMicros).mapWith(Number),
+      })
+      .from(usageEvents)
+      .where(and(eq(usageEvents.day, heute), eq(usageEvents.kind, "frage"))),
+    db
+      .select({
+        fragen: count(),
+        kosten: sum(usageEvents.costMicros).mapWith(Number),
+      })
+      .from(usageEvents)
+      .where(and(gte(usageEvents.day, vor30Tagen), eq(usageEvents.kind, "frage"))),
+    db
+      .select({
+        userId: usageEvents.userId,
+        email: users.email,
+        fragen: count(),
+        kostenMicros: sum(usageEvents.costMicros).mapWith(Number),
+      })
+      .from(usageEvents)
+      .leftJoin(users, eq(users.clerkUserId, usageEvents.userId))
+      .where(and(gte(usageEvents.day, vor30Tagen), eq(usageEvents.kind, "frage")))
+      .groupBy(usageEvents.userId, users.email)
+      .orderBy(desc(sum(usageEvents.costMicros)))
+      .limit(20),
+  ]);
 
   return {
     fragenHeute: heuteZeile?.fragen ?? 0,

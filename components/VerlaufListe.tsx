@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useBestaetigung } from "@/components/BestaetigungsDialog";
 import { alleLoeschen, loeschen, umbenennen, type Chat } from "@/lib/chatVerlauf";
 
 type Eigenschaften = {
@@ -29,6 +30,25 @@ export default function VerlaufListe({
 }: Eigenschaften) {
   const [bearbeitet, setBearbeitet] = useState<string | null>(null);
   const [entwurf, setEntwurf] = useState("");
+  const { bestaetige, dialog } = useBestaetigung();
+
+  async function loescheChat(chat: Chat) {
+    const ja = await bestaetige({
+      titel: `„${chat.titel}" löschen?`,
+      text: "Der Chat und seine Nachrichten werden endgültig entfernt.",
+      bestaetigen: "Löschen",
+    });
+    if (ja) void loeschen(chat.id);
+  }
+
+  async function loescheAlle() {
+    const ja = await bestaetige({
+      titel: `Alle ${chats.length} Chats löschen?`,
+      text: "Der gesamte Verlauf wird endgültig entfernt. Das lässt sich nicht rückgängig machen.",
+      bestaetigen: "Alle löschen",
+    });
+    if (ja) void alleLoeschen();
+  }
 
   function starteUmbenennen(chat: Chat) {
     setBearbeitet(chat.id);
@@ -107,11 +127,7 @@ export default function VerlaufListe({
                     </button>
                     <button
                       className="verlauf-aktion"
-                      onClick={() => {
-                        if (window.confirm(`"${chat.titel}" wirklich löschen?`)) {
-                          void loeschen(chat.id);
-                        }
-                      }}
+                      onClick={() => void loescheChat(chat)}
                       disabled={gesperrt}
                       aria-label={`"${chat.titel}" löschen`}
                     >
@@ -127,17 +143,15 @@ export default function VerlaufListe({
         {chats.length > 0 && (
           <button
             className="verlauf-alle-loeschen"
-            onClick={() => {
-              if (window.confirm(`Alle ${chats.length} Chats endgültig löschen?`)) {
-                void alleLoeschen();
-              }
-            }}
+            onClick={() => void loescheAlle()}
             disabled={gesperrt}
           >
             Alle Chats löschen
           </button>
         )}
       </div>
+
+      {dialog}
     </aside>
   );
 }

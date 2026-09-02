@@ -9,7 +9,6 @@ import {
   ladeVerbrauch,
 } from "@/lib/admin";
 import { requireKontextFuerSeite } from "@/lib/auth/user";
-import { seedStammdaten } from "@/lib/db/seed";
 import { ladeEinladungen } from "@/lib/einladungen";
 import { missingFor, providerKeySecretKonfiguriert } from "@/lib/env";
 import { ladeKeyStatus } from "@/lib/provider-keys";
@@ -40,11 +39,10 @@ export default async function AdminSeite({
     );
   }
 
-  // Idempotent. Faengt den Fall ab, dass die Datenbank frisch aufgesetzt wurde
-  // und noch keine Groessenklassen existieren - dann waere die Oberflaeche leer
-  // und nicht bedienbar, weil sich ein Plan ohne Groessenklasse nicht anlegen laesst.
-  await seedStammdaten();
-
+  // Kein Seed mehr an dieser Stelle: Eine leere Datenbank faengt schon
+  // getKontext ab (anlegenFallsNoetig in lib/auth/user.ts), das vor jeder
+  // Seite laeuft. Hier kostete der Aufruf bei jedem Refresh sechs
+  // Datenbank-Roundtrips fuer Daten, die laengst vorhanden sind.
   const parameter = await searchParams;
   const suche = parameter.suche ?? "";
   const seite = Number(parameter.seite ?? "1");

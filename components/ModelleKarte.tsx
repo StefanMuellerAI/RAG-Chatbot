@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useBestaetigung } from "@/components/BestaetigungsDialog";
 import type { KatalogEintrag, ModellEingabe } from "@/lib/admin";
 import type { VerfuegbaresModell } from "@/lib/anbieter-modelle";
 import {
@@ -25,24 +26,34 @@ const KEY_PLATZHALTER: Record<KeyAnbieter, string> = {
   openai: "sk-…",
 };
 
-type Eigenschaften = {
-  katalog: KatalogEintrag[];
-  keyStatus: KeyStatusUebersicht;
-  secretKonfiguriert: boolean;
-  gesperrt: boolean;
-  sende: (
-    pfad: string,
-    methode: "PUT" | "PATCH" | "DELETE",
-    koerper?: unknown,
-  ) => Promise<boolean>;
+type KeyAktionen = {
+  /** true bei Erfolg — das Feld leert sich dann. */
+  onKeySpeichern: (provider: KeyAnbieter, key: string) => Promise<boolean>;
+  onKeyLoeschen: (provider: KeyAnbieter) => Promise<boolean>;
 };
+
+type KatalogAktionen = {
+  onModellSpeichern: (werte: ModellEingabe) => Promise<boolean>;
+  onModellLoeschen: (id: string) => Promise<boolean>;
+};
+
+type Eigenschaften = KeyAktionen &
+  KatalogAktionen & {
+    katalog: KatalogEintrag[];
+    keyStatus: KeyStatusUebersicht;
+    secretKonfiguriert: boolean;
+    gesperrt: boolean;
+  };
 
 export default function ModelleKarte({
   katalog,
   keyStatus,
   secretKonfiguriert,
   gesperrt,
-  sende,
+  onKeySpeichern,
+  onKeyLoeschen,
+  onModellSpeichern,
+  onModellLoeschen,
 }: Eigenschaften) {
   return (
     <>
@@ -50,9 +61,16 @@ export default function ModelleKarte({
         keyStatus={keyStatus}
         secretKonfiguriert={secretKonfiguriert}
         gesperrt={gesperrt}
-        sende={sende}
+        onKeySpeichern={onKeySpeichern}
+        onKeyLoeschen={onKeyLoeschen}
       />
-      <KatalogKarte katalog={katalog} keyStatus={keyStatus} gesperrt={gesperrt} sende={sende} />
+      <KatalogKarte
+        katalog={katalog}
+        keyStatus={keyStatus}
+        gesperrt={gesperrt}
+        onModellSpeichern={onModellSpeichern}
+        onModellLoeschen={onModellLoeschen}
+      />
     </>
   );
 }
@@ -80,8 +98,11 @@ function AnbieterKeysKarte({
   keyStatus,
   secretKonfiguriert,
   gesperrt,
-  sende,
-}: Omit<Eigenschaften, "katalog">) {
+  onKeySpeichern,
+  onKeyLoeschen,
+}: KeyAktionen & Pick<Eigenschaften, "keyStatus" | "secretKonfiguriert" | "gesperrt">) {
+  const { bestaetige, dialog } = useBestaetigung();
+
   return (
     <div className="karte">
       <h2 className="karte-titel">KI-Modelle · Anbieter-Keys</h2>
@@ -107,10 +128,20 @@ function AnbieterKeysKarte({
             provider={provider}
             status={keyStatus[provider]}
             gesperrt={gesperrt || !secretKonfiguriert}
-            sende={sende}
+            onSpeichern={(key) => onKeySpeichern(provider, key)}
+            onLoeschen={async () => {
+              const ja = await bestaetige({
+                titel: `Key fuer ${ANBIETER_LABEL[provider]} entfernen?`,
+                text: "Modelle dieses Anbieters laufen danach wieder ueber das AI Gateway.",
+                bestaetigen: "Entfernen",
+              });
+              if (ja) void onKeyLoeschen(provider);
+            }}
           />
         ))}
       </div>
+
+      {dialog}
     </div>
   );
 }
@@ -119,12 +150,14 @@ function KeyFeld({
   provider,
   status,
   gesperrt,
-  sende,
+  onSpeichern,
+  onLoeschen,
 }: {
   provider: KeyAnbieter;
   status: KeyStatusUebersicht[KeyAnbieter];
   gesperrt: boolean;
-  sende: Eigenschaften["sende"];
+  onSpeichern: (key: string) => Promise<boolean>;
+  onLoeschen: () => void;
 }) {
   const [eingabe, setEingabe] = useState("");
   const [testModell, setTestModell] = useState("");
@@ -187,7 +220,7 @@ function KeyFeld({
           className="knopf-schlicht"
           disabled={gesperrt || !eingabe.trim()}
           onClick={async () => {
-            if (await sende("/api/admin/provider-keys", "PUT", { provider, key: eingabe })) {
+            if (await onSpeichern(eingabe)) {
               setEingabe("");
               setTestErgebnis(null);
             }
@@ -196,15 +229,7 @@ function KeyFeld({
           {status ? "Ersetzen" : "Speichern"}
         </button>
         {status && (
-          <button
-            className="knopf-schlicht"
-            disabled={gesperrt}
-            onClick={() => {
-              if (window.confirm(`Den Key fuer ${ANBIETER_LABEL[provider]} entfernen?`)) {
-                void sende(`/api/admin/provider-keys?provider=${provider}`, "DELETE");
-              }
-            }}
-          >
+          <button className="knopf-schlicht" disabled={gesperrt} onClick={onLoeschen}>
             Entfernen
           </button>
         )}
@@ -259,10 +284,12 @@ function KatalogKarte({
   katalog,
   keyStatus,
   gesperrt,
-  sende,
-}: Omit<Eigenschaften, "secretKonfiguriert">) {
+  onModellSpeichern,
+  onModellLoeschen,
+}: KatalogAktionen & Pick<Eigenschaften, "katalog" | "keyStatus" | "gesperrt">) {
   const [entwuerfe, setEntwuerfe] = useState<Record<string, ModellFormular>>({});
   const [neues, setNeues] = useState<ModellFormular | null>(null);
+  const { bestaetige, dialog } = useBestaetigung();
 
   const [quelle, setQuelle] = useState<Anbieter>("gateway");
   const [laedt, setLaedt] = useState(false);
@@ -313,7 +340,7 @@ function KatalogKarte({
       enabled: modell.preisGefunden,
       sortOrder: naechsteSortierung,
     };
-    await sende("/api/admin/models", "PUT", werte);
+    await onModellSpeichern(werte);
   }
 
   const imKatalog = new Set(katalog.map((eintrag) => eintrag.id));
@@ -419,7 +446,7 @@ function KatalogKarte({
                     <button
                       className="knopf-schlicht"
                       disabled={gesperrt}
-                      onClick={() => void sende("/api/admin/models", "PUT", werte)}
+                      onClick={() => void onModellSpeichern(werte)}
                     >
                       Speichern
                     </button>{" "}
@@ -431,13 +458,13 @@ function KatalogKarte({
                           ? `Wird von Plan ${eintrag.plaene.join(", ")} genutzt.`
                           : undefined
                       }
-                      onClick={() => {
-                        if (window.confirm(`Modell "${eintrag.id}" aus dem Katalog entfernen?`)) {
-                          void sende(
-                            `/api/admin/models?id=${encodeURIComponent(eintrag.id)}`,
-                            "DELETE",
-                          );
-                        }
+                      onClick={async () => {
+                        const ja = await bestaetige({
+                          titel: `Modell "${eintrag.id}" entfernen?`,
+                          text: "Der Eintrag verschwindet aus dem Katalog. Kein Plan nutzt ihn derzeit.",
+                          bestaetigen: "Loeschen",
+                        });
+                        if (ja) void onModellLoeschen(eintrag.id);
                       }}
                     >
                       Loeschen
@@ -510,7 +537,7 @@ function KatalogKarte({
                     className="knopf-schlicht"
                     disabled={gesperrt}
                     onClick={async () => {
-                      if (await sende("/api/admin/models", "PUT", neues)) setNeues(null);
+                      if (await onModellSpeichern(neues)) setNeues(null);
                     }}
                   >
                     Anlegen
@@ -652,6 +679,8 @@ function KatalogKarte({
           </div>
         )}
       </div>
+
+      {dialog}
     </div>
   );
 }

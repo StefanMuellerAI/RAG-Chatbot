@@ -468,13 +468,15 @@ Speicher.
 app/
   page.tsx                        Chat
   sammlungen/                     eigene Sammlungen, Detailansicht mit Upload
+  sammlungen/actions.ts           Server Actions: Sammlung anlegen, Name und Beschreibung ändern
   admin/                          Größenklassen, Pläne, KI-Modelle, Einladungen, Nutzer, Verbrauch
+  admin/actions.ts                Server Actions aller Admin-Mutationen (ein Roundtrip, Seite kommt frisch zurück)
   sign-in/ · sign-up/             Clerk
   api/chat/                       Retrieval, Werkzeugmodus, Antwort-Streaming (NDJSON)
   api/chats/                      Verlauf
-  api/collections/                Sammlungen, Upload-Anmeldung
+  api/collections/                Sammlungen lesen und löschen, Upload-Anmeldung
   api/documents/                  Verarbeitung, Löschen je Typ, Download
-  api/admin/                      Stammdaten, Rollen, Modellkatalog, Anbieter-Keys, Einladungen, Diagnose
+  api/admin/                      lesende Routen zu Stammdaten, Modellkatalog, Anbieter-Keys, Einladungen; Key-Test, Diagnose
   api/upload/                     Token für den Direkt-Upload zu Vercel Blob
   api/webhooks/clerk/             Nutzerdaten spiegeln
   api/cron/aufraeumen/            stündlicher Aufräumlauf
@@ -486,9 +488,11 @@ components/
   ChatBereich.tsx · ChatPanel.tsx Chat mit Fundstellen und Abfragen-Block
   SammlungenBereich.tsx           Anlegen mit Typwahl, Upload je Typ
   SchemaCard.tsx                  Tabellen bzw. Labels einer Sammlung
+  BestaetigungsDialog.tsx         Löschbestätigungen als natives <dialog> statt window.confirm
 lib/
   db/                             Drizzle-Schema, Verbindung, Seed
   auth/user.ts                    Clerk-Identität zu Plan, Rolle, Größenklasse
+  api.ts · aktionen.ts            Fehler → HTTP-Antwort bzw. → Rückgabewert einer Server Action
   collection-kinds.ts             die drei Typen: Labels, Endungen, Schema-Typen
   collections.ts · documents.ts   Sammlungen und Dokumente, Nutzer-ID stets in der Abfrage
   vector.ts                       Pinecone: schreiben, suchen, löschen

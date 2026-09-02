@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { getDb } from "./db";
 import { plans } from "./db/schema";
 import { NotFoundError, ValidationError } from "./errors";
+import { ausZwischenspeicher, verwirfZwischenspeicher } from "./ratelimit";
 
 /**
  * Nutzer per Einladung in die App holen.
@@ -27,6 +28,15 @@ export const EINLADUNG_GUELTIG_TAGE = 14;
 
 /** Hoechstens so viele offene Einladungen zeigt die Liste. */
 const LISTEN_OBERGRENZE = 100;
+
+/**
+ * Die Liste kommt von der Clerk-API und ist der langsamste Teil der Admin-
+ * Seite. Eine Minute Zwischenspeicher reicht: Aendert der Admin selbst etwas,
+ * wird der Eintrag verworfen; was andere in Clerk direkt tun, erscheint mit
+ * hoechstens einer Minute Verzoegerung.
+ */
+const EINLADUNGEN_SCHLUESSEL = "wa:einladungen";
+const EINLADUNGEN_LEBENSDAUER_SEKUNDEN = 60;
 
 const EMAIL_MAX_ZEICHEN = 254;
 // Bewusst grob: genau eine @, keine Leerzeichen, ein Punkt in der Domain. Die
@@ -58,14 +68,15 @@ export type EinladungEingabe = {
 
 /** Offene Einladungen, neueste zuerst. */
 export async function ladeEinladungen(): Promise<Einladung[]> {
-  const client = await clerkClient();
-  const { data } = await client.invitations.getInvitationList({
-    status: "pending",
-    orderBy: "-created_at",
-    limit: LISTEN_OBERGRENZE,
+  return ausZwischenspeicher(EINLADUNGEN_SCHLUESSEL, EINLADUNGEN_LEBENSDAUER_SEKUNDEN, async () => {
+    const client = await clerkClient();
+    const { data } = await client.invitations.getInvitationList({
+      status: "pending",
+      orderBy: "-created_at",
+      limit: LISTEN_OBERGRENZE,
+    });
+    return data.map(zuEinladung);
   });
-
-  return data.map(zuEinladung);
 }
 
 // --- Anlegen ----------------------------------------------------------------
@@ -85,6 +96,7 @@ export async function erstelleEinladung(eingabe: EinladungEingabe): Promise<Einl
       publicMetadata: { planId },
       notify: true,
     });
+    await verwirfZwischenspeicher(EINLADUNGEN_SCHLUESSEL);
     return zuEinladung(einladung);
   } catch (error) {
     throw uebersetzeClerkFehler(error, email);
@@ -156,6 +168,7 @@ export async function widerrufeEinladung(id: unknown): Promise<void> {
   } catch (error) {
     throw uebersetzeClerkFehler(error);
   }
+  await verwirfZwischenspeicher(EINLADUNGEN_SCHLUESSEL);
 }
 
 // --- Plan aus der Einladung -------------------------------------------------

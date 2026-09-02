@@ -8,8 +8,13 @@ import { models, plans, sizeClasses } from "./schema";
  *
  * Bewusst `onConflictDoNothing`: der Seed legt den Anfangszustand an, danach
  * gehoeren die Werte dem Admin. Ein erneuter Aufruf darf seine Anpassungen
- * nicht ueberschreiben — deshalb ist die Funktion beliebig oft aufrufbar und
- * wird auch beim ersten Oeffnen des Admin-Bereichs ausgefuehrt.
+ * nicht ueberschreiben — deshalb ist die Funktion beliebig oft aufrufbar.
+ *
+ * Aufgerufen wird sie an zwei Stellen: von `npm run db:seed` nach einem
+ * Deployment (auch fuer Nachtraege wie MODELL_UMSTELLUNG) und aus
+ * lib/auth/user.ts, wenn ein Nutzer auf eine Datenbank ohne Standardplan
+ * trifft. Im Seitenrender hat sie nichts verloren — jeder Aufruf kostet
+ * einen Datenbank-Roundtrip, auch wenn nichts zu tun ist.
  */
 
 const MB = 1024 * 1024;
@@ -105,36 +110,39 @@ const PLAENE = [
 export async function seedStammdaten(): Promise<void> {
   const db = getDb();
 
-  // Groessenklassen zuerst: die Plaene verweisen darauf.
-  await db.insert(sizeClasses).values([...GROESSENKLASSEN]).onConflictDoNothing();
-  await db.insert(plans).values([...PLAENE]).onConflictDoNothing();
-
-  // Der Modellkatalog beginnt mit den drei Modellen, mit denen die Anwendung
-  // bisher fest lief. Danach pflegt ihn der Admin; Preise und Aktiv-Marke, die
-  // er geaendert hat, bleiben durch onConflictDoNothing erhalten.
-  await db
-    .insert(models)
-    .values(
-      STANDARD_MODELLE.map((modell) => ({
-        id: modell.id,
-        provider: modell.provider,
-        label: modell.label,
-        inputPerMillion: modell.inputPerMillion,
-        outputPerMillion: modell.outputPerMillion,
-        cacheReadPerMillion: modell.cacheReadPerMillion,
-        enabled: modell.enabled,
-        sortOrder: modell.sortOrder,
-      })),
-    )
-    .onConflictDoNothing();
-
   // Bestehende Plaene behalten durch onConflictDoNothing ihre Modellkennung.
   // Anthropic ist im AI-Gateway-Free-Tier gesperrt — ohne diese Umstellung
   // wuerde der Chat weiter gegen Claude laufen und mit 403 scheitern.
-  for (const [alt, neu] of Object.entries(MODELL_UMSTELLUNG)) {
-    await db
+  const umstellungen = Object.entries(MODELL_UMSTELLUNG).map(([alt, neu]) =>
+    db
       .update(plans)
       .set({ modelId: neu, updatedAt: new Date() })
-      .where(eq(plans.modelId, alt));
-  }
+      .where(eq(plans.modelId, alt)),
+  );
+
+  // Ein Roundtrip statt sechs: `batch` schickt alles in einer Transaktion.
+  // Die Reihenfolge bleibt wichtig — Groessenklassen zuerst, die Plaene
+  // verweisen darauf. Der Modellkatalog beginnt mit den drei Modellen, mit
+  // denen die Anwendung bisher fest lief; danach pflegt ihn der Admin, und
+  // seine Preise und Aktiv-Marken bleiben durch onConflictDoNothing erhalten.
+  await db.batch([
+    db.insert(sizeClasses).values([...GROESSENKLASSEN]).onConflictDoNothing(),
+    db.insert(plans).values([...PLAENE]).onConflictDoNothing(),
+    db
+      .insert(models)
+      .values(
+        STANDARD_MODELLE.map((modell) => ({
+          id: modell.id,
+          provider: modell.provider,
+          label: modell.label,
+          inputPerMillion: modell.inputPerMillion,
+          outputPerMillion: modell.outputPerMillion,
+          cacheReadPerMillion: modell.cacheReadPerMillion,
+          enabled: modell.enabled,
+          sortOrder: modell.sortOrder,
+        })),
+      )
+      .onConflictDoNothing(),
+    ...umstellungen,
+  ]);
 }
