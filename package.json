@@ -37,6 +37,7 @@
     "ai": "^7.0.70",
     "drizzle-orm": "^0.45.2",
     "exceljs": "^4.4.0",
+    "falkordb": "^6.8.0",
     "mammoth": "^1.12.1",
     "next": "^16.3.1",
     "papaparse": "^5.7.0",
@@ -45,6 +46,7 @@
     "react-markdown": "^10.1.0",
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
+    "sql.js": "^1.14.2",
     "unpdf": "^1.8.1",
     "workflow": "^4.8.4",
     "zod": "^4.4.3"
@@ -54,6 +56,7 @@
     "@types/papaparse": "^5.5.2",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
+    "@types/sql.js": "^1.4.11",
     "dotenv-cli": "^11.0.0",
     "drizzle-kit": "^0.31.10",
     "eslint": "^9.20.0",

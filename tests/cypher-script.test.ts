@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { splitStatements } from "@/lib/cypher-script";
 import { ValidationError } from "@/lib/errors";
+import { prepareReadOnlyCypher } from "@/lib/graphstore";
 
 describe("splitStatements", () => {
   it("trennt an Semikolons, aber nicht in Strings oder Kommentaren", () => {
@@ -26,5 +27,20 @@ describe("splitStatements", () => {
   it("lehnt leere Skripte und offene Strings ab", () => {
     expect(() => splitStatements("// nur Kommentar")).toThrow(ValidationError);
     expect(() => splitStatements("CREATE (n {t: 'offen})")).toThrow(ValidationError);
+  });
+});
+
+// Das Graph-Modul muss ohne FALKORDB_URL importierbar sein — hier laeuft kein Server.
+describe("prepareReadOnlyCypher", () => {
+  it("haengt ein LIMIT an, wenn keines vorhanden ist", () => {
+    expect(prepareReadOnlyCypher("MATCH (n) RETURN n")).toBe("MATCH (n) RETURN n LIMIT 200");
+    expect(prepareReadOnlyCypher("MATCH (n) RETURN n LIMIT 5;")).toBe("MATCH (n) RETURN n LIMIT 5");
+  });
+
+  it("erlaubt nur ein Statement", () => {
+    expect(() => prepareReadOnlyCypher("MATCH (n) RETURN n; MATCH (m) DELETE m")).toThrow(
+      ValidationError,
+    );
+    expect(() => prepareReadOnlyCypher("   ")).toThrow(ValidationError);
   });
 });
