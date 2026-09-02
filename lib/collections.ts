@@ -1,11 +1,18 @@
 import { and, asc, eq } from "drizzle-orm";
 import type { Kontext } from "./auth/user";
+import {
+  isCollectionKind,
+  type CollectionKind,
+  type CollectionSchema,
+} from "./collection-kinds";
 import { getDb } from "./db";
 import { collections, sizeClasses } from "./db/schema";
 import type { Collection, PresetId, SizeClass } from "./db/schema";
 import { loescheUnterPraefix, sammlungsPraefix } from "./documents";
+import { graphConfigured } from "./env";
 import { NotFoundError, ValidationError } from "./errors";
-import { isPresetId } from "./presets";
+import { deleteGraph } from "./graphstore";
+import { STANDARD_PRESET, isPresetId } from "./presets";
 import {
   pruefeGroessenklasse,
   pruefeNeueSammlung,
@@ -74,18 +81,56 @@ export type SammlungEingabe = {
   beschreibung: unknown;
   preset: unknown;
   sizeClassId: unknown;
+  /** Sammlungstyp; fehlt er, entsteht eine Dokumentensammlung. */
+  kind?: unknown;
 };
+
+/**
+ * Prueft den gewuenschten Sammlungstyp.
+ *
+ * Graph-Sammlungen gibt es nur, wenn FalkorDB angebunden ist. Ohne die
+ * Pruefung hier entstuende eine Sammlung, in die sich nichts einspielen laesst
+ * — und der Fehler kaeme erst beim ersten Upload, weit weg von seiner Ursache.
+ */
+function pruefeSammlungstyp(wert: unknown): CollectionKind {
+  if (wert === undefined || wert === null || wert === "") return "vector";
+
+  if (!isCollectionKind(wert)) {
+    throw new ValidationError(
+      "Bitte eine Art der Sammlung waehlen: Dokumente, Tabellen oder Graph.",
+    );
+  }
+
+  if (wert === "graph" && !graphConfigured()) {
+    throw new ValidationError(
+      "Graph-Sammlungen sind auf dieser Instanz nicht verfuegbar: FALKORDB_URL ist nicht gesetzt.",
+    );
+  }
+
+  return wert;
+}
 
 export async function erstelleSammlung(
   kontext: Kontext,
   eingabe: SammlungEingabe,
 ): Promise<Collection> {
   const { name, beschreibung } = pruefeSammlungsText(eingabe.name, eingabe.beschreibung);
+  const kind = pruefeSammlungstyp(eingabe.kind);
 
-  if (!isPresetId(eingabe.preset)) {
-    throw new ValidationError(
-      "Bitte eine der drei Verarbeitungsarten waehlen: Fliesstext, Tabellen und Zahlen oder Regelwerke.",
-    );
+  // Das Preset steuert nur das Zerlegen von Text und hat fuer Tabellen und
+  // Graphen keine Bedeutung. Die Spalte ist Pflicht; damit weder eine
+  // Migration noch ein Sonderfall in findPreset noetig wird, bekommen diese
+  // Sammlungen serverseitig den Standardwert.
+  let preset: PresetId;
+  if (kind === "vector") {
+    if (!isPresetId(eingabe.preset)) {
+      throw new ValidationError(
+        "Bitte eine der drei Verarbeitungsarten waehlen: Fliesstext, Tabellen und Zahlen oder Regelwerke.",
+      );
+    }
+    preset = eingabe.preset;
+  } else {
+    preset = STANDARD_PRESET;
   }
 
   const klasse = await ladeGroessenklasse(String(eingabe.sizeClassId ?? ""));
@@ -103,7 +148,8 @@ export async function erstelleSammlung(
       name,
       description: beschreibung,
       descriptionSource: beschreibung ? "user" : "auto",
-      preset: eingabe.preset as PresetId,
+      preset,
+      kind,
       sizeClassId: klasse.id,
     })
     .returning();
@@ -137,15 +183,25 @@ export async function aktualisiereSammlung(
 /**
  * Loescht eine Sammlung mit allem, was daran haengt.
  *
- * Reihenfolge: erst die Vektoren, dann die Dateien, zuletzt die Zeile. Bricht
- * es zwischendurch ab, bleibt die Zeile stehen und der Vorgang ist
- * wiederholbar. Umgekehrt waeren Vektoren und Dateien verwaist und ueber die
- * Oberflaeche nicht mehr erreichbar.
+ * Reihenfolge: erst die Vektoren bzw. der Graph, dann die Dateien, zuletzt
+ * die Zeile. Bricht es zwischendurch ab, bleibt die Zeile stehen und der
+ * Vorgang ist wiederholbar. Umgekehrt waeren Vektoren und Dateien verwaist und
+ * ueber die Oberflaeche nicht mehr erreichbar.
+ *
+ * Die SQLite-Datei einer Tabellen-Sammlung liegt unter
+ * files/<userId>/<collectionId>/_db/ und geht mit dem Praefix mit — sie
+ * braucht keinen eigenen Schritt.
  */
 export async function loescheSammlung(userId: string, collectionId: string): Promise<void> {
-  await ladeSammlung(userId, collectionId);
+  const sammlung = await ladeSammlung(userId, collectionId);
 
-  await loescheSammlungVektoren(collectionId);
+  if (sammlung.kind === "graph") {
+    // Einen nie beschriebenen Graphen toleriert deleteGraph von selbst.
+    await deleteGraph(collectionId);
+  } else if (sammlung.kind === "vector") {
+    await loescheSammlungVektoren(collectionId);
+  }
+
   await loescheUnterPraefix(sammlungsPraefix(userId, collectionId));
 
   // Die Dokumentzeilen gehen per ON DELETE CASCADE mit.
@@ -174,6 +230,24 @@ export async function setzeAutoBeschreibung(
     .where(
       and(eq(collections.id, collectionId), eq(collections.descriptionSource, "auto")),
     );
+}
+
+/**
+ * Haelt die Struktur einer Tabellen- oder Graph-Sammlung fest.
+ *
+ * Das Schema ist, was das Modell im Chat sieht, um SQL oder Cypher zu
+ * formulieren. Es wird nach jeder Ingestion und jedem Loeschen neu bestimmt;
+ * `null` bedeutet: nichts mehr drin.
+ */
+export async function setzeSammlungsSchema(
+  userId: string,
+  collectionId: string,
+  schema: CollectionSchema | null,
+): Promise<void> {
+  await getDb()
+    .update(collections)
+    .set({ schema, updatedAt: new Date() })
+    .where(and(eq(collections.id, collectionId), eq(collections.userId, userId)));
 }
 
 async function ladeGroessenklasse(id: string): Promise<SizeClass> {

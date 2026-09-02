@@ -26,6 +26,13 @@ import { NotFoundError } from "./errors";
 
 export const FILE_PREFIX = "files/";
 
+/**
+ * Reservierter Ordner unterhalb des Sammlungspraefixes, in dem lib/sqlstore.ts
+ * die SQLite-Datei einer Tabellen-Sammlung ablegt. Dokumentordner heissen nach
+ * ihrer UUID und koennen damit nie kollidieren.
+ */
+export const DB_ORDNER = "_db";
+
 function assertConfigured(): void {
   requireEnv("BLOB_READ_WRITE_TOKEN");
 }
@@ -57,6 +64,10 @@ export function blobPfad(
 export function pfadGehoertNutzer(pfad: string, userId: string): boolean {
   // `..` wuerde sich sonst aus dem eigenen Praefix herausbewegen.
   if (pfad.includes("..")) return false;
+  // Der Datenbankordner wird ausschliesslich serverseitig beschrieben. Ein
+  // Upload-Token dafuer wuerde erlauben, die SQLite-Datei einer Sammlung durch
+  // eine beliebige Datei zu ersetzen.
+  if (pfad.split("/").includes(DB_ORDNER)) return false;
   return pfad.startsWith(nutzerPraefix(userId));
 }
 

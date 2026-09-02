@@ -4,7 +4,7 @@ import path from "node:path";
 import { del, get, put } from "@vercel/blob";
 import initSqlJs, { type Database, type SqlJsStatic, type SqlValue } from "sql.js";
 import type { CollectionSchema, SqlColumn, SqlTableSchema } from "./collection-kinds";
-import { sammlungsPraefix } from "./documents";
+import { DB_ORDNER, sammlungsPraefix } from "./documents";
 import { requireEnv } from "./env";
 import { ValidationError } from "./errors";
 
@@ -28,7 +28,6 @@ export const SQL_MAX_ROWS = 200;
 const CELL_MAX_CHARS = 200;
 const SAMPLE_COLUMNS = 25;
 
-const DB_ORDNER = "_db";
 const DB_DATEI = "sammlung.sqlite";
 
 export function databasePath(userId: string, collectionId: string): string {

@@ -107,10 +107,11 @@ async function nutzerSpeichern(daten: ClerkNutzer): Promise<void> {
 /**
  * Loescht einen Nutzer samt allem, was an ihm haengt.
  *
- * Reihenfolge ist hier entscheidend: Die Sammlungs-IDs muessen VOR dem Loeschen
- * gelesen werden. Danach sind sie durch ON DELETE CASCADE verschwunden, und
- * damit auch die einzige Spur, die zu den Namespaces in Pinecone fuehrt — die
- * Vektoren blieben unauffindbar liegen.
+ * Reihenfolge ist hier entscheidend: Die Sammlungs-IDs (samt Typ) muessen VOR
+ * dem Loeschen gelesen werden. Danach sind sie durch ON DELETE CASCADE
+ * verschwunden, und damit auch die einzige Spur, die zu den Namespaces in
+ * Pinecone und den Graphen in FalkorDB fuehrt — die Daten blieben unauffindbar
+ * liegen.
  *
  * Das Abraeumen selbst laeuft als Ablauf und nicht hier: Ein Nutzer mit hundert
  * Sammlungen zieht hundert Loeschvorgaenge nach sich, und der Webhook muss
@@ -120,13 +121,13 @@ async function nutzerLoeschen(clerkUserId: string): Promise<void> {
   const db = getDb();
 
   const eigene = await db
-    .select({ id: collections.id })
+    .select({ id: collections.id, kind: collections.kind })
     .from(collections)
     .where(eq(collections.userId, clerkUserId));
 
   await db.delete(users).where(eq(users.clerkUserId, clerkUserId));
 
-  await start(raeumeNutzerAb, [clerkUserId, eigene.map((zeile) => zeile.id)]);
+  await start(raeumeNutzerAb, [clerkUserId, eigene]);
 }
 
 async function standardplan(): Promise<string> {

@@ -3,6 +3,12 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
+import {
+  COLLECTION_KINDS,
+  KIND_DESCRIPTION,
+  KIND_LABEL,
+  type CollectionKind,
+} from "@/lib/collection-kinds";
 import type { SammlungMitKlasse } from "@/lib/collections";
 import type { SizeClass } from "@/lib/db/schema";
 import type { Preset } from "@/lib/presets";
@@ -11,13 +17,24 @@ type Eigenschaften = {
   sammlungen: SammlungMitKlasse[];
   klassen: SizeClass[];
   presets: Preset[];
+  /** Ohne FALKORDB_URL lassen sich keine Graph-Sammlungen anlegen. */
+  graphVerfuegbar: boolean;
   plan: { label: string; maxCollections: number; maxSizeClassId: string };
+};
+
+type NeueSammlung = {
+  name: string;
+  beschreibung: string;
+  kind: CollectionKind;
+  preset: string;
+  sizeClassId: string;
 };
 
 export default function SammlungenBereich({
   sammlungen,
   klassen,
   presets,
+  graphVerfuegbar,
   plan,
 }: Eigenschaften) {
   const router = useRouter();
@@ -27,12 +44,7 @@ export default function SammlungenBereich({
 
   const voll = sammlungen.length >= plan.maxCollections;
 
-  async function anlegen(eingabe: {
-    name: string;
-    beschreibung: string;
-    preset: string;
-    sizeClassId: string;
-  }) {
+  async function anlegen(eingabe: NeueSammlung) {
     setFehler(null);
 
     try {
@@ -93,6 +105,7 @@ export default function SammlungenBereich({
           <Anlegeformular
             klassen={klassen}
             presets={presets}
+            graphVerfuegbar={graphVerfuegbar}
             gesperrt={laueft}
             onAbbrechen={() => setFormularOffen(false)}
             onAnlegen={anlegen}
@@ -110,10 +123,21 @@ export default function SammlungenBereich({
         <div className="sammlungen-raster">
           {sammlungen.map((sammlung) => {
             const preset = presets.find((eintrag) => eintrag.id === sammlung.preset);
+            // Das Preset steuert nur das Zerlegen von Text; bei Tabellen und
+            // Graphen sagt es nichts aus und wird deshalb nicht gezeigt.
+            const verarbeitung =
+              sammlung.kind === "vector"
+                ? (preset?.label ?? sammlung.preset)
+                : KIND_LABEL[sammlung.kind];
             return (
               <Link key={sammlung.id} href={`/sammlungen/${sammlung.id}`} className="sammlung-karte">
                 <div className="sammlung-kopf">
-                  <span className="sammlung-name">{sammlung.name}</span>
+                  <span className="sammlung-name">
+                    {sammlung.name}
+                    <span className={`typ-marke typ-${sammlung.kind}`}>
+                      {KIND_LABEL[sammlung.kind]}
+                    </span>
+                  </span>
                   <span className="marke">{sammlung.sizeClass.id}</span>
                 </div>
 
@@ -122,7 +146,7 @@ export default function SammlungenBereich({
                 </p>
 
                 <div className="sammlung-fuss">
-                  {preset?.label ?? sammlung.preset} · {sammlung.documentCount}{" "}
+                  {verarbeitung} · {sammlung.documentCount}{" "}
                   {sammlung.documentCount === 1 ? "Dokument" : "Dokumente"} ·{" "}
                   {sammlung.pageCount} Seiten
                 </div>
@@ -140,23 +164,21 @@ export default function SammlungenBereich({
 function Anlegeformular({
   klassen,
   presets,
+  graphVerfuegbar,
   gesperrt,
   onAbbrechen,
   onAnlegen,
 }: {
   klassen: SizeClass[];
   presets: Preset[];
+  graphVerfuegbar: boolean;
   gesperrt: boolean;
   onAbbrechen: () => void;
-  onAnlegen: (eingabe: {
-    name: string;
-    beschreibung: string;
-    preset: string;
-    sizeClassId: string;
-  }) => Promise<void>;
+  onAnlegen: (eingabe: NeueSammlung) => Promise<void>;
 }) {
   const [name, setName] = useState("");
   const [beschreibung, setBeschreibung] = useState("");
+  const [kind, setKind] = useState<CollectionKind>("vector");
   const [preset, setPreset] = useState(presets[0]?.id ?? "fliesstext");
   // Die kleinste erlaubte Klasse als Vorauswahl: Sie ist bei allen Plaenen
   // verfuegbar, und heraufsetzen ist einfacher zu verstehen als herabsetzen.
@@ -196,33 +218,77 @@ function Anlegeformular({
       </div>
 
       <fieldset className="feld auswahl">
-        <legend>Um welche Art von Unterlagen handelt es sich?</legend>
+        <legend>Art der Sammlung</legend>
         <p className="feld-zusatz">
-          Danach richtet sich, wie die Dokumente in durchsuchbare Abschnitte zerlegt
-          werden. Die Wahl gilt fuer die ganze Sammlung und laesst sich spaeter nicht
-          aendern.
+          Dokumente werden durchsucht, Tabellen per SQL und Graphen per Cypher abgefragt.
+          Die Wahl gilt fuer die ganze Sammlung und laesst sich spaeter nicht aendern.
         </p>
 
         <div className="karten-auswahl">
-          {presets.map((eintrag) => (
-            <label
-              key={eintrag.id}
-              className={eintrag.id === preset ? "wahlkarte aktiv" : "wahlkarte"}
-            >
-              <input
-                type="radio"
-                name="preset"
-                value={eintrag.id}
-                checked={eintrag.id === preset}
-                onChange={() => setPreset(eintrag.id)}
-              />
-              <span className="wahlkarte-titel">{eintrag.label}</span>
-              <span className="wahlkarte-kurz">{eintrag.kurz}</span>
-              <span className="wahlkarte-beispiele">{eintrag.beispiele}</span>
-            </label>
-          ))}
+          {COLLECTION_KINDS.map((eintrag) => {
+            const nichtVerfuegbar = eintrag === "graph" && !graphVerfuegbar;
+            const klassenname = [
+              "wahlkarte",
+              eintrag === kind ? "aktiv" : "",
+              nichtVerfuegbar ? "gesperrt" : "",
+            ]
+              .filter(Boolean)
+              .join(" ");
+            return (
+              <label key={eintrag} className={klassenname}>
+                <input
+                  type="radio"
+                  name="kind"
+                  value={eintrag}
+                  checked={eintrag === kind}
+                  disabled={nichtVerfuegbar}
+                  onChange={() => setKind(eintrag)}
+                />
+                <span className="wahlkarte-titel">{KIND_LABEL[eintrag]}</span>
+                <span className="wahlkarte-kurz">{KIND_DESCRIPTION[eintrag]}</span>
+                {nichtVerfuegbar && (
+                  <span className="wahlkarte-beispiele">
+                    Nicht verfuegbar: FALKORDB_URL ist auf dieser Instanz nicht gesetzt.
+                  </span>
+                )}
+              </label>
+            );
+          })}
         </div>
       </fieldset>
+
+      {/* Das Preset steuert das Zerlegen von Text — fuer Tabellen und Graphen
+          gibt es nichts zu waehlen, der Server setzt dort den Standardwert. */}
+      {kind === "vector" && (
+        <fieldset className="feld auswahl">
+          <legend>Um welche Art von Unterlagen handelt es sich?</legend>
+          <p className="feld-zusatz">
+            Danach richtet sich, wie die Dokumente in durchsuchbare Abschnitte zerlegt
+            werden. Die Wahl gilt fuer die ganze Sammlung und laesst sich spaeter nicht
+            aendern.
+          </p>
+
+          <div className="karten-auswahl">
+            {presets.map((eintrag) => (
+              <label
+                key={eintrag.id}
+                className={eintrag.id === preset ? "wahlkarte aktiv" : "wahlkarte"}
+              >
+                <input
+                  type="radio"
+                  name="preset"
+                  value={eintrag.id}
+                  checked={eintrag.id === preset}
+                  onChange={() => setPreset(eintrag.id)}
+                />
+                <span className="wahlkarte-titel">{eintrag.label}</span>
+                <span className="wahlkarte-kurz">{eintrag.kurz}</span>
+                <span className="wahlkarte-beispiele">{eintrag.beispiele}</span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      )}
 
       <fieldset className="feld auswahl">
         <legend>Groesse</legend>
@@ -262,7 +328,7 @@ function Anlegeformular({
           className="knopf"
           disabled={!bereit}
           onClick={() =>
-            void onAnlegen({ name, beschreibung, preset, sizeClassId })
+            void onAnlegen({ name, beschreibung, kind, preset, sizeClassId })
           }
         >
           Sammlung anlegen

@@ -936,6 +936,35 @@ th.zahl {
   color: var(--grau-600);
 }
 
+/* Typ-Kennzeichen einer Sammlung: Dokumente, Tabellen oder Graph. Neben der
+   Groessenklasse die zweite Angabe, an der man eine Karte sofort einordnet. */
+.typ-marke {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  border: 1px solid var(--grau-300);
+  border-radius: 2px;
+  color: var(--grau-600);
+  background: var(--grau-100);
+  vertical-align: middle;
+}
+
+.typ-sql {
+  border-color: #b7c9e6;
+  color: #1f4d8f;
+  background: #eef3fb;
+}
+
+.typ-graph {
+  border-color: #c9b7e6;
+  color: #5a2d91;
+  background: #f3eefb;
+}
+
 .sammlung-beschreibung {
   margin: 0;
   font-size: 14px;
@@ -1024,6 +1053,17 @@ fieldset.auswahl .feld-zusatz {
   background: var(--rot-hell);
 }
 
+/* Eine Wahl, die auf dieser Instanz nicht moeglich ist (Graph ohne
+   FALKORDB_URL): sichtbar, aber erkennbar nicht anklickbar. */
+.wahlkarte.gesperrt {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.wahlkarte.gesperrt:hover {
+  border-color: var(--grau-300);
+}
+
 /* Der Radioknopf selbst ist unsichtbar, aber vorhanden: Die Karte ist das
    Bedienelement, die Tastaturbedienung und Vorlesbarkeit haengen aber am
    echten Eingabefeld. */
@@ -1063,6 +1103,57 @@ fieldset.auswahl .feld-zusatz {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+/* --- Schema-Anzeige (Tabellen- und Graph-Sammlungen) ---------------------- */
+
+.formular-raster {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 0 24px;
+}
+
+.schema-block {
+  border: 1px solid var(--grau-200);
+  margin-bottom: 8px;
+}
+
+.schema-block summary {
+  cursor: pointer;
+  padding: 10px 12px;
+  font-weight: 700;
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.schema-block .tabelle-huelle {
+  margin: 0 12px 12px;
+}
+
+.schema-meta {
+  font-weight: 400;
+  color: var(--grau-600);
+  font-size: 13px;
+}
+
+.schema-beispiele {
+  color: var(--grau-600);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.marken {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.marken code {
+  background: var(--grau-100);
+  border: 1px solid var(--grau-300);
+  padding: 1px 6px;
+  font-size: 13px;
 }
 
 /* --- Gefahrenzone --------------------------------------------------------- */

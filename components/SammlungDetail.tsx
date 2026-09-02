@@ -4,6 +4,13 @@ import { upload } from "@vercel/blob/client";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
+import SchemaCard from "@/components/SchemaCard";
+import {
+  KIND_EXTENSIONS,
+  KIND_LABEL,
+  KIND_UNIT,
+  type CollectionKind,
+} from "@/lib/collection-kinds";
 import type { SammlungMitKlasse } from "@/lib/collections";
 import type { DocumentRecord } from "@/lib/db/schema";
 import type { Preset } from "@/lib/presets";
@@ -15,12 +22,69 @@ import type { Preset } from "@/lib/presets";
  * eigener Ablauf auf dem Server. Diese Ansicht fragt deshalb den Zustand ab,
  * statt auf eine Antwort zu warten — ein Dokument mit hunderten Seiten braucht
  * laenger, als ein Browser sinnvoll wartet.
+ *
+ * Der Ablauf ist fuer alle Sammlungstypen derselbe (anmelden, hochladen,
+ * verarbeiten lassen, abfragen); nur Endungen, Texte und die Bezeichnung der
+ * Einheiten haengen vom Typ ab.
  */
 
-const ERLAUBTE_ENDUNGEN = [".pdf", ".docx", ".xlsx"];
 const BESTAETIGUNG = "LÖSCHEN";
 /** Abfrageabstand, solange etwas laeuft. */
 const ABFRAGE_MS = 2_500;
+
+type Texte = {
+  /** Ueberschrift der Upload-Karte. */
+  titel: string;
+  /** Erklaerender Satz unter der Ueberschrift; Grenzen haengt der Aufrufer an. */
+  hinweis: string;
+  /** Zeile unter der Ablagezone. */
+  grenze: string;
+  /** Leerer Bestand. */
+  leer: string;
+  /** Zustand eines fertigen Dokuments. */
+  fertig: string;
+  /** Was das Loeschen der Sammlung entfernt. */
+  loeschen: string;
+};
+
+/**
+ * Die Grenzen fuer CSV und Cypher stehen hier als Text und nicht als Import
+ * aus lib/csv.ts bzw. lib/cypher-script.ts: Das eine zoege papaparse in das
+ * Browser-Bundle, und beides sind Konstanten, die sich nicht von selbst
+ * aendern (CSV_MAX_BYTES, CSV_MAX_ROWS, CYPHER_MAX_BYTES, CYPHER_MAX_STATEMENTS).
+ */
+const TEXTE: Record<CollectionKind, Texte> = {
+  vector: {
+    titel: "Dokumente einpflegen",
+    hinweis: "PDF, DOCX und XLSX.",
+    grenze: "Mehrere Dateien gleichzeitig moeglich",
+    leer: "Noch nichts eingepflegt. Zu dieser Sammlung kann der Chat derzeit nichts sagen.",
+    fertig: "Durchsuchbar",
+    loeschen: "alle Dokumente dieser Sammlung, alle Abschnitte und alle Originaldateien",
+  },
+  sql: {
+    titel: "Tabellen aus CSV anlegen",
+    hinweis:
+      "Eine CSV-Datei wird zu einer Tabelle (Name aus dem Dateinamen). Kopfzeile ist " +
+      "Pflicht; Trennzeichen und Dezimalkomma werden erkannt. Eine Datei mit gleichem " +
+      "Namen ersetzt die Tabelle. Fuers Kontingent zaehlen 50 Zeilen als eine Seite.",
+    grenze: "Mehrere Dateien gleichzeitig moeglich · max. 20 MB und 200.000 Zeilen je Datei",
+    leer: "Noch keine Tabelle. Die KI kann in dieser Sammlung derzeit kein SQL ausfuehren.",
+    fertig: "Als Tabelle abfragbar",
+    loeschen: "alle Tabellen dieser Sammlung samt Datenbank und alle Originaldateien",
+  },
+  graph: {
+    titel: "Graph aus Cypher-Skript aufbauen",
+    hinweis:
+      "Ein Skript mit CREATE-/MERGE-Statements (Neo4j-Stil, durch Semikolon getrennt) " +
+      "wird in den Graphen dieser Sammlung eingespielt. Mehrere Skripte ergaenzen sich. " +
+      "Fuers Kontingent zaehlen 3.000 Zeichen als eine Seite.",
+    grenze: `Endungen ${KIND_EXTENSIONS.graph.join(", ")} · max. 5 MB und 5.000 Statements je Datei`,
+    leer: "Noch kein Skript. Die KI kann in dieser Sammlung derzeit kein Cypher ausfuehren.",
+    fertig: "Im Graphen",
+    loeschen: "den Graphen dieser Sammlung, alle Skripte und alle Originaldateien",
+  },
+};
 
 type Eigenschaften = {
   sammlung: SammlungMitKlasse;
@@ -69,6 +133,11 @@ function abgleichen(vorgaenge: Vorgang[], dokumente: DocumentRecord[]): Vorgang[
 export default function SammlungDetail({ sammlung, dokumente, preset }: Eigenschaften) {
   const router = useRouter();
 
+  const kind = sammlung.kind;
+  const endungen = KIND_EXTENSIONS[kind];
+  const texte = TEXTE[kind];
+  const einheit = KIND_UNIT[kind];
+
   const [liste, setListe] = useState(dokumente);
   const [vorgaenge, setVorgaenge] = useState<Vorgang[]>([]);
   const [ueberAblage, setUeberAblage] = useState(false);
@@ -86,9 +155,15 @@ export default function SammlungDetail({ sammlung, dokumente, preset }: Eigensch
   // router.refresh() nach dem letzten Abschluss liefert die fertigen Saetze
   // als Props. Die Warteschlange oben kennt die nur, wenn wir sie hier
   // dagegenhalten — die Polling-Schleife laeuft dann schon nicht mehr.
-  useEffect(() => {
-    setVorgaenge((bisher) => abgleichen(bisher, dokumente));
-  }, [dokumente]);
+  //
+  // Waehrend des Renderns statt in einem Effekt: So entsteht kein zweiter
+  // Renderdurchlauf mit veralteter Warteschlange, und React verwirft das
+  // gerade laufende Ergebnis zugunsten des angepassten Zustands.
+  const [gesehen, setGesehen] = useState(dokumente);
+  if (dokumente !== gesehen) {
+    setGesehen(dokumente);
+    setVorgaenge(abgleichen(vorgaenge, dokumente));
+  }
 
   const aktualisiere = useCallback(async () => {
     // Ueberholende Abfragen vermeiden: bei langsamer Verbindung wuerden sich
@@ -131,11 +206,11 @@ export default function SammlungDetail({ sammlung, dokumente, preset }: Eigensch
     for (const datei of dateien) {
       const key = `${datei.name}-${datei.lastModified}-${datei.size}`;
 
-      if (!ERLAUBTE_ENDUNGEN.some((endung) => datei.name.toLowerCase().endsWith(endung))) {
+      if (!endungen.some((endung) => datei.name.toLowerCase().endsWith(endung))) {
         setzeVorgang({
           key,
           filename: datei.name,
-          text: "Format nicht unterstuetzt (nur PDF, DOCX, XLSX)",
+          text: `Format nicht unterstuetzt (nur ${endungen.join(", ")})`,
           fehler: true,
         });
         continue;
@@ -280,6 +355,7 @@ export default function SammlungDetail({ sammlung, dokumente, preset }: Eigensch
       <div className="karte">
         <h1 className="karte-titel">
           {sammlung.name} <span className="marke">{klasse.id}</span>
+          <span className={`typ-marke typ-${kind}`}>{KIND_LABEL[kind]}</span>
         </h1>
 
         {bearbeitet ? (
@@ -322,22 +398,27 @@ export default function SammlungDetail({ sammlung, dokumente, preset }: Eigensch
           </div>
           <div className="kennzahl">
             <div className="kennzahl-wert">{abschnitteGesamt.toLocaleString("de-DE")}</div>
-            <div className="kennzahl-beschriftung">Abschnitte</div>
+            <div className="kennzahl-beschriftung">{einheit}</div>
           </div>
           <div className="kennzahl">
             <div className="kennzahl-wert" style={{ fontSize: 17 }}>
-              {preset.label}
+              {kind === "vector" ? preset.label : KIND_LABEL[kind]}
             </div>
-            <div className="kennzahl-beschriftung">Verarbeitung</div>
+            <div className="kennzahl-beschriftung">
+              {kind === "vector" ? "Verarbeitung" : "Art"}
+            </div>
           </div>
         </div>
       </div>
 
+      {sammlung.schema && <SchemaCard schema={sammlung.schema} />}
+
       <div className="karte">
-        <h2 className="karte-titel">Dokumente einpflegen</h2>
+        <h2 className="karte-titel">{texte.titel}</h2>
         <p className="hinweis-text">
-          PDF, DOCX und XLSX. {preset.kurz} Hoechstens {klasse.maxPagesPerDocument} Seiten
-          und {Math.round(klasse.maxFileBytes / (1024 * 1024))} MB je Datei.
+          {texte.hinweis} {kind === "vector" ? `${preset.kurz} ` : ""}Hoechstens{" "}
+          {klasse.maxPagesPerDocument} Seiten und{" "}
+          {Math.round(klasse.maxFileBytes / (1024 * 1024))} MB je Datei.
         </p>
 
         <label
@@ -356,7 +437,7 @@ export default function SammlungDetail({ sammlung, dokumente, preset }: Eigensch
           <input
             type="file"
             multiple
-            accept={ERLAUBTE_ENDUNGEN.join(",")}
+            accept={endungen.join(",")}
             style={{ display: "none" }}
             onChange={(ereignis) => {
               void verarbeite(Array.from(ereignis.target.files ?? []));
@@ -366,7 +447,7 @@ export default function SammlungDetail({ sammlung, dokumente, preset }: Eigensch
           <div>
             Dateien hierher ziehen oder <b>auswaehlen</b>
           </div>
-          <div className="ablage-hinweis">Mehrere Dateien gleichzeitig moeglich</div>
+          <div className="ablage-hinweis">{texte.grenze}</div>
         </label>
 
         {vorgaenge.length > 0 && (
@@ -393,7 +474,7 @@ export default function SammlungDetail({ sammlung, dokumente, preset }: Eigensch
 
         {liste.length === 0 ? (
           <p className="hinweis-text" style={{ margin: 0 }}>
-            Noch nichts eingepflegt. Zu dieser Sammlung kann der Chat derzeit nichts sagen.
+            {texte.leer}
           </p>
         ) : (
           <div className="tabelle-huelle">
@@ -404,7 +485,7 @@ export default function SammlungDetail({ sammlung, dokumente, preset }: Eigensch
                   <th>Zustand</th>
                   <th className="zahl">Groesse</th>
                   <th className="zahl">Seiten</th>
-                  <th className="zahl">Abschnitte</th>
+                  <th className="zahl">{einheit}</th>
                   <th />
                 </tr>
               </thead>
@@ -417,7 +498,7 @@ export default function SammlungDetail({ sammlung, dokumente, preset }: Eigensch
                       </a>
                     </td>
                     <td>
-                      <Zustand dokument={dokument} />
+                      <Zustand dokument={dokument} fertig={texte.fertig} />
                     </td>
                     <td className="zahl">{groesse(dokument.sizeBytes)}</td>
                     <td className="zahl">{dokument.pageCount || "—"}</td>
@@ -451,9 +532,8 @@ export default function SammlungDetail({ sammlung, dokumente, preset }: Eigensch
       <div className="karte gefahr">
         <h2 className="karte-titel">Sammlung loeschen</h2>
         <p className="hinweis-text">
-          Entfernt <b>alle</b> Dokumente dieser Sammlung, alle Abschnitte und alle
-          Originaldateien. Das laesst sich nicht rueckgaengig machen — zum Bestaetigen bitte{" "}
-          <b>{BESTAETIGUNG}</b> eintippen.
+          Entfernt <b>unwiderruflich</b> {texte.loeschen}. Das laesst sich nicht
+          rueckgaengig machen — zum Bestaetigen bitte <b>{BESTAETIGUNG}</b> eintippen.
         </p>
 
         <div className="feld" style={{ maxWidth: 260 }}>
@@ -482,9 +562,9 @@ export default function SammlungDetail({ sammlung, dokumente, preset }: Eigensch
 
 // --- Teilstuecke ------------------------------------------------------------
 
-function Zustand({ dokument }: { dokument: DocumentRecord }) {
+function Zustand({ dokument, fertig }: { dokument: DocumentRecord; fertig: string }) {
   if (dokument.status === "fertig") {
-    return <span className="status-fertig">Durchsuchbar</span>;
+    return <span className="status-fertig">{fertig}</span>;
   }
 
   if (dokument.status === "fehler") {
