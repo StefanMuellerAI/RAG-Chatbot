@@ -72,7 +72,9 @@ export async function POST(request: Request, kontextparameter: Kontextparameter)
       collectionId: id,
       userId: kontext.userId,
       filename: dateiname,
-      contentType: eingabe.contentType ?? "application/octet-stream",
+      // `||` statt `??`: ein leerer String vom Browser soll ebenfalls auf den
+      // Standardwert fallen und nicht als Inhaltstyp gespeichert werden.
+      contentType: eingabe.contentType || "application/octet-stream",
       blobPath: pfad,
       sizeBytes: groesse,
     });

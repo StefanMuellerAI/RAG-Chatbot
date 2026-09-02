@@ -10,6 +10,8 @@ import {
   timestamp,
   uuid,
 } from "drizzle-orm/pg-core";
+import type { CollectionKind, CollectionSchema } from "../collection-kinds";
+import type { ToolStep } from "../tools-types";
 
 /**
  * Datenmodell der mandantenfaehigen Anwendung.
@@ -96,6 +98,18 @@ export const collections = pgTable(
     description: text("description").notNull().default(""),
     descriptionSource: text("description_source").notNull().default("user"),
     preset: text("preset").$type<PresetId>().notNull(),
+    /**
+     * Sammlungstyp (siehe lib/collection-kinds.ts): vector = Dokumente in der
+     * Vektor-Datenbank, sql = CSV-Tabellen in SQLite, graph = Cypher in
+     * FalkorDB. Das Preset gilt nur fuer den Typ vector.
+     */
+    kind: text("kind").$type<CollectionKind>().notNull().default("vector"),
+    /**
+     * Struktur der Daten fuer sql- und graph-Sammlungen (Tabellen und
+     * Spalten bzw. Labels und Kantentypen). Das Modell braucht sie, um SQL
+     * oder Cypher zu formulieren. Bei vector-Sammlungen null.
+     */
+    schema: jsonb("schema").$type<CollectionSchema>(),
     sizeClassId: text("size_class_id")
       .notNull()
       .references(() => sizeClasses.id),
@@ -180,6 +194,8 @@ export const messages = pgTable(
     role: text("role").$type<"user" | "assistant">().notNull(),
     content: text("content").notNull(),
     sources: jsonb("sources").$type<StoredSource[]>(),
+    /** Werkzeugaufrufe (Suche, SQL, Cypher), die zu dieser Antwort gefuehrt haben. */
+    steps: jsonb("steps").$type<ToolStep[]>(),
     isError: boolean("is_error").default(false).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },

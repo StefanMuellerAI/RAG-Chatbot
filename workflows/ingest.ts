@@ -6,6 +6,7 @@ import { setzeAutoBeschreibung } from "@/lib/collections";
 import { getDb } from "@/lib/db";
 import { collections, documents, sizeClasses } from "@/lib/db/schema";
 import type { PresetId } from "@/lib/db/schema";
+import type { CollectionKind } from "@/lib/collection-kinds";
 import {
   leseDatei,
   schliesseDokumentAb,
@@ -41,6 +42,8 @@ type Vorbereitung = {
   contentType: string;
   blobPath: string;
   preset: PresetId;
+  /** Sammlungstyp — steuert kuenftig, welcher Verarbeitungsweg gewaehlt wird. */
+  kind: CollectionKind;
   /** Grenzen der Groessenklasse — die Seitenpruefung braucht sie im Schritt. */
   sizeClassId: string;
   maxPagesPerDocument: number;
@@ -87,6 +90,7 @@ async function bereiteVor(docId: string): Promise<Vorbereitung> {
     contentType: zeile.dokument.contentType,
     blobPath: zeile.dokument.blobPath,
     preset: zeile.sammlung.preset,
+    kind: zeile.sammlung.kind,
     sizeClassId: zeile.klasse.id,
     maxPagesPerDocument: zeile.klasse.maxPagesPerDocument,
     maxTotalPages: zeile.klasse.maxTotalPages,
