@@ -13,7 +13,7 @@ Eine Sammlung hat einen von drei Typen (siehe [Drei Arten von Sammlungen](#drei-
 - **Graph** — Cypher-Skripte werden zu einem Graphen in FalkorDB; das Modell schreibt
   Cypher für Fragen nach Beziehungen und Wegen.
 
-- **Anmeldung**: Clerk mit Registrierung, Nutzerkonten und Rollen
+- **Anmeldung**: Clerk mit Registrierung, Einladungen, Nutzerkonten und Rollen
 - **Antworten**: Modell je Plan aus einem im Admin gepflegten Katalog — über das Vercel AI
   Gateway oder, mit eigenem Key, direkt bei Anthropic bzw. OpenAI
 - **Vektorsuche**: Pinecone Serverless, ein Namespace je Sammlung, Embedding im Dienst
@@ -216,7 +216,8 @@ Eigenschaften des Graphen. Dasselbe Schema bekommt das Modell in der Systemanwei
 ohne es könnte es keine Abfrage formulieren, die trifft.
 
 **Administration** (`/admin`) — nur mit Rolle. Größenklassen und Pläne bearbeiten, den
-Modellkatalog und Anbieter-Keys pflegen, Nutzern Pläne zuweisen, Verbrauch einsehen.
+Modellkatalog und Anbieter-Keys pflegen, Nutzer einladen, Nutzern Pläne zuweisen,
+Verbrauch einsehen.
 
 ---
 
@@ -300,8 +301,51 @@ Die Startwerte:
 Alle Werte sind im Admin-Bereich zur Laufzeit änderbar; sie stehen deshalb in Tabellen und
 nicht im Code. Eine Zuweisung greift sofort, eine Änderung an der Plan-Definition
 innerhalb einer Minute — der Nutzerkontext liegt so lange im Zwischenspeicher. Zur Auswahl
-stehen die aktiven Modelle des Katalogs (nächster Abschnitt); ein Plan lässt sich nur mit
-einem vorhandenen, aktiven Modell speichern.
+stehen die aktiven Modelle des Katalogs (Abschnitt [KI-Modelle pflegen](#ki-modelle-pflegen));
+ein Plan lässt sich nur mit einem vorhandenen, aktiven Modell speichern.
+
+---
+
+## Nutzer einladen
+
+Der Abschnitt **Einladungen** im Admin-Bereich holt Personen gezielt in die App. Der Admin
+trägt eine E-Mail-Adresse ein und wählt den Plan, den die Person nach der Registrierung
+haben soll (vorausgewählt ist der Standardplan). Clerk verschickt daraufhin eine E-Mail
+mit einem Link, der zur Registrierungsseite (`/sign-up`) führt; die Adresse ist dort
+bereits eingetragen und bestätigt.
+
+Der Ablauf im Einzelnen:
+
+1. **Einladen.** Die Adresse wird normalisiert (getrimmt, kleingeschrieben) und der Plan
+   gegen die vorhandenen Pläne geprüft. Liegt für die Adresse schon eine offene
+   Einladung oder ein Konto vor, lehnt Clerk ab — die Meldung sagt, was zu tun ist.
+2. **Link als Rückfallebene.** Nach dem Anlegen zeigt die Karte den Einladungslink zum
+   Kopieren. Es ist derselbe Link wie in der E-Mail; er hilft, wenn die Mail im
+   Spam-Ordner landet oder gar nicht ankommt.
+3. **Plan übernehmen.** Der gewählte Plan reist als `publicMetadata.planId` mit der
+   Einladung. Bei der Registrierung kopiert Clerk diese Metadaten in das Nutzerkonto,
+   und der Webhook (`user.created`) legt die Nutzerzeile mit genau diesem Plan an.
+   Existiert der Plan inzwischen nicht mehr, gilt der Standardplan. Der Fallback, der
+   die Nutzerzeile ohne Webhook beim ersten Zugriff nachzieht, liest dasselbe Feld —
+   die Vorgabe geht also auch dann nicht verloren, wenn die erste Seite des neuen
+   Nutzers schneller ist als die Zustellung des Webhooks.
+4. **Gültigkeit.** Eine Einladung gilt **14 Tage**. Danach verfällt der Link; die Person
+   muss neu eingeladen werden.
+5. **Widerrufen.** Offene Einladungen stehen in der Tabelle mit Plan, Erstelldatum und
+   Ablauf. *Widerrufen* macht den Link unbrauchbar — hindert die Person aber nicht an
+   einer normalen Registrierung, solange diese offen ist (siehe unten).
+
+**Nur Eingeladene zulassen.** Standardmäßig kann sich bei Clerk jeder registrieren; die
+Einladung ist dann nur eine Abkürzung mit Plan-Vorgabe. Soll die App ausschließlich
+Eingeladenen offenstehen, im Clerk-Dashboard unter **Configure → Restrictions** den
+Sign-up-Modus auf **Restricted** stellen. Die Registrierungsseite bleibt dann für alle
+anderen gesperrt, Einladungslinks funktionieren weiter.
+
+Was noch im Clerk-Dashboard liegt: Absender und Text der Einladungs-E-Mail unter
+**Customization → Emails** (Vorlage *Invitation*); in Produktionsinstanzen verschickt Clerk
+nur über eine verifizierte eigene Domain. Die Liste offener Einladungen kommt bei jedem
+Aufruf des Admin-Bereichs direkt von Clerk; ist Clerk nicht erreichbar, bleibt der Rest
+der Konsole bedienbar und die Karte zeigt einen Hinweis.
 
 ---
 
@@ -424,13 +468,13 @@ Speicher.
 app/
   page.tsx                        Chat
   sammlungen/                     eigene Sammlungen, Detailansicht mit Upload
-  admin/                          Größenklassen, Pläne, KI-Modelle, Nutzer, Verbrauch
+  admin/                          Größenklassen, Pläne, KI-Modelle, Einladungen, Nutzer, Verbrauch
   sign-in/ · sign-up/             Clerk
   api/chat/                       Retrieval, Werkzeugmodus, Antwort-Streaming (NDJSON)
   api/chats/                      Verlauf
   api/collections/                Sammlungen, Upload-Anmeldung
   api/documents/                  Verarbeitung, Löschen je Typ, Download
-  api/admin/                      Stammdaten, Rollen, Modellkatalog, Anbieter-Keys, Diagnose
+  api/admin/                      Stammdaten, Rollen, Modellkatalog, Anbieter-Keys, Einladungen, Diagnose
   api/upload/                     Token für den Direkt-Upload zu Vercel Blob
   api/webhooks/clerk/             Nutzerdaten spiegeln
   api/cron/aufraeumen/            stündlicher Aufräumlauf
@@ -461,6 +505,7 @@ lib/
   admin.ts · models.ts            Stammdaten, Modellkatalog-Pflege, Kostenrechnung, Modellhebung
   modellkatalog.ts                Katalog aus Postgres mit Zwischenspeicher, Rückfall auf Standard
   provider-keys.ts · crypto.ts    Anbieter-Keys verschlüsselt speichern, maskieren, laden
+  einladungen.ts                  Clerk-Einladungen anlegen, auflisten, widerrufen; Plan aus der Einladung
   anbieter-modelle.ts             Modell-Listen von Anthropic/OpenAI, Preise aus dem Gateway-Katalog
   aufraeumen.ts                   Überreste des laufenden Betriebs
 tests/                            Vitest (npm test)

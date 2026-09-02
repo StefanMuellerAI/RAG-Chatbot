@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
+import EinladungenKarte from "@/components/EinladungenKarte";
 import ModelleKarte from "@/components/ModelleKarte";
 import type {
   KatalogEintrag,
@@ -10,11 +11,12 @@ import type {
   VerbrauchUebersicht,
 } from "@/lib/admin";
 import type { SizeClass } from "@/lib/db/schema";
+import type { Einladung } from "@/lib/einladungen";
 import type { ModelInfo } from "@/lib/models";
 import type { KeyStatusUebersicht } from "@/lib/provider-keys";
 
 /**
- * Administration: Groessenklassen, Plaene, KI-Modelle, Nutzer, Verbrauch.
+ * Administration: Groessenklassen, Plaene, KI-Modelle, Einladungen, Nutzer, Verbrauch.
  *
  * Bewusst tabellarisch und ohne Dialoge: Der Admin vergleicht hier Werte
  * zwischen den Klassen ("wie viel mehr ist L als M?"), und dafuer muessen sie
@@ -34,6 +36,8 @@ type Eigenschaften = {
   katalog: KatalogEintrag[];
   keyStatus: KeyStatusUebersicht;
   secretKonfiguriert: boolean;
+  /** Offene Clerk-Einladungen; null, wenn Clerk sie nicht liefern konnte. */
+  einladungen: Einladung[] | null;
   suche: string;
 };
 
@@ -46,6 +50,7 @@ export default function AdminKonsole({
   katalog,
   keyStatus,
   secretKonfiguriert,
+  einladungen,
   suche,
 }: Eigenschaften) {
   const router = useRouter();
@@ -111,6 +116,8 @@ export default function AdminKonsole({
         gesperrt={laueft}
         sende={sende}
       />
+
+      <EinladungenKarte einladungen={einladungen} plaene={plaene} gesperrt={laueft} sende={sende} />
 
       <NutzerKarte
         seite={nutzer}

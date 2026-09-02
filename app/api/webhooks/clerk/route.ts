@@ -5,6 +5,7 @@ import { start } from "workflow/api";
 import { getDb } from "@/lib/db";
 import { seedStammdaten } from "@/lib/db/seed";
 import { collections, plans, users, webhookDeliveries } from "@/lib/db/schema";
+import { planAusEinladung } from "@/lib/einladungen";
 import { raeumeNutzerAb } from "@/workflows/aufraeumen";
 
 export const runtime = "nodejs";
@@ -77,6 +78,8 @@ type ClerkNutzer = {
   primary_email_address_id?: string | null;
   first_name?: string | null;
   last_name?: string | null;
+  /** Bei Registrierung ueber eine Einladung: deren `publicMetadata`, u. a. `planId`. */
+  public_metadata?: Record<string, unknown> | null;
 };
 
 async function nutzerSpeichern(daten: ClerkNutzer): Promise<void> {
@@ -90,11 +93,13 @@ async function nutzerSpeichern(daten: ClerkNutzer): Promise<void> {
 
   const name = [daten.first_name, daten.last_name].filter(Boolean).join(" ") || null;
 
-  const standard = await standardplan();
+  // Kam der Nutzer ueber eine Einladung, hat der Admin dort einen Plan
+  // vorgegeben. Nur wenn der (noch) existiert, gilt er — sonst der Standard.
+  const planId = (await planAusEinladung(daten.public_metadata)) ?? (await standardplan());
 
   await db
     .insert(users)
-    .values({ clerkUserId: daten.id, email, name, planId: standard })
+    .values({ clerkUserId: daten.id, email, name, planId })
     // Bei `user.updated` existiert die Zeile schon. Der Plan wird dabei
     // ausdruecklich NICHT angefasst: er ist eine Entscheidung des Admins und
     // hat in Clerk keine Entsprechung, die ihn ueberschreiben duerfte.

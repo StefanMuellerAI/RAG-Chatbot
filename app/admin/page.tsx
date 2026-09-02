@@ -10,6 +10,7 @@ import {
 } from "@/lib/admin";
 import { requireKontextFuerSeite } from "@/lib/auth/user";
 import { seedStammdaten } from "@/lib/db/seed";
+import { ladeEinladungen } from "@/lib/einladungen";
 import { missingFor, providerKeySecretKonfiguriert } from "@/lib/env";
 import { ladeKeyStatus } from "@/lib/provider-keys";
 
@@ -50,16 +51,23 @@ export default async function AdminSeite({
 
   const secretKonfiguriert = providerKeySecretKonfiguriert();
 
-  const [groessenklassen, plaene, nutzer, verbrauch, katalog, keyStatus] = await Promise.all([
-    ladeGroessenklassen(),
-    ladePlaene(),
-    ladeNutzer(suche, Number.isFinite(seite) ? seite : 1),
-    ladeVerbrauch(),
-    ladeModellKatalog(),
-    // Ohne PROVIDER_KEY_SECRET liesse sich kein Chiffrat pruefen; die Karte
-    // zeigt dann den Hinweis statt eines Fehlers.
-    secretKonfiguriert ? ladeKeyStatus() : Promise.resolve({}),
-  ]);
+  const [groessenklassen, plaene, nutzer, verbrauch, katalog, keyStatus, einladungen] =
+    await Promise.all([
+      ladeGroessenklassen(),
+      ladePlaene(),
+      ladeNutzer(suche, Number.isFinite(seite) ? seite : 1),
+      ladeVerbrauch(),
+      ladeModellKatalog(),
+      // Ohne PROVIDER_KEY_SECRET liesse sich kein Chiffrat pruefen; die Karte
+      // zeigt dann den Hinweis statt eines Fehlers.
+      secretKonfiguriert ? ladeKeyStatus() : Promise.resolve({}),
+      // Die Einladungen kommen von Clerk, nicht aus Postgres. Ist Clerk gerade
+      // nicht erreichbar, soll der Rest der Konsole trotzdem bedienbar bleiben.
+      ladeEinladungen().catch((error: unknown) => {
+        console.error("Einladungen konnten nicht geladen werden.", error);
+        return null;
+      }),
+    ]);
 
   return (
     <AdminKonsole
@@ -73,6 +81,7 @@ export default async function AdminSeite({
       katalog={katalog}
       keyStatus={keyStatus}
       secretKonfiguriert={secretKonfiguriert}
+      einladungen={einladungen}
       suche={suche}
     />
   );
