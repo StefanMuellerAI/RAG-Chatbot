@@ -788,6 +788,111 @@ td select {
   vertical-align: 1px;
 }
 
+/* --- Abfragen unter einer Antwort ----------------------------------------- */
+
+/* Werkzeugaufrufe (Suche, SQL, Cypher). Gleicher Abstand und gleiche Trennlinie
+   wie die Fundstellen, damit beide Bloecke unter der Antwort als eine Ebene
+   wirken. */
+.abfragen {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--grau-200);
+  font-size: 13px;
+  white-space: normal;
+}
+
+.abfragen-titel {
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.abfrage {
+  border: 1px solid var(--grau-200);
+  margin-bottom: 6px;
+  background: var(--weiss);
+}
+
+.abfrage > summary {
+  cursor: pointer;
+  padding: 7px 10px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  list-style: none;
+}
+
+.abfrage > summary::-webkit-details-marker {
+  display: none;
+}
+
+.abfrage > summary:hover {
+  color: var(--rot-dunkel);
+}
+
+/* Die Typ-Marke der Sammlungskarten, hier ohne den Abstand nach links. */
+.abfrage > summary .typ-marke {
+  margin-left: 0;
+  flex: none;
+}
+
+.abfrage-sammlung {
+  font-weight: 700;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.abfrage-meta {
+  margin-left: auto;
+  flex: none;
+  color: var(--grau-600);
+}
+
+.abfrage-text {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--grau-100);
+  border-top: 1px solid var(--grau-200);
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.abfrage-fehler {
+  padding: 8px 12px;
+  color: var(--rot-dunkel);
+  border-top: 1px solid var(--grau-200);
+}
+
+.abfrage-leer {
+  padding: 8px 12px;
+  color: var(--grau-600);
+  border-top: 1px solid var(--grau-200);
+}
+
+.abfrage .tabelle-huelle {
+  border-top: 1px solid var(--grau-200);
+}
+
+/* Dichter als die Verwaltungstabellen: eine Vorschau von 20 Zeilen soll die
+   Blase nicht sprengen. Zellen laufen einzeilig aus statt umzubrechen. */
+table.vorschau {
+  font-size: 12.5px;
+}
+
+table.vorschau th,
+table.vorschau td {
+  padding: 5px 8px;
+  white-space: nowrap;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  overflow-wrap: normal;
+}
+
 .chat-eingabe {
   display: flex;
   gap: 10px;
@@ -1280,6 +1385,14 @@ fieldset.auswahl .feld-zusatz {
   .quellen-dateien {
     flex-basis: 100%;
     padding-left: 15px;
+  }
+
+  .abfrage > summary {
+    flex-wrap: wrap;
+  }
+
+  .abfrage-sammlung {
+    white-space: normal;
   }
 
   .reiter-inner {

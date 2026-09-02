@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import MarkdownText from "@/components/MarkdownText";
 import type { Nachricht, Quelle } from "@/lib/chatVerlauf";
+import type { ToolStep } from "@/lib/tools-types";
 
 type Eigenschaften = {
   nachrichten: Nachricht[];
@@ -68,8 +69,16 @@ export default function ChatPanel({ nachrichten, laeuft, onSenden }: Eigenschaft
                   nachricht.content
                 )
               ) : i === nachrichten.length - 1 && laeuft ? (
-                <span className="tippt">Recherchiere in den Dokumenten &hellip;</span>
+                <span className="tippt">
+                  {nachricht.steps?.length
+                    ? "Werte Abfragen aus …"
+                    : "Recherchiere in den Dokumenten …"}
+                </span>
               ) : null}
+
+              {nachricht.steps && nachricht.steps.length > 0 && (
+                <Abfragen steps={nachricht.steps} />
+              )}
 
               {nachricht.sources && nachricht.sources.length > 0 && nachricht.content && (
                 <Fundstellen quellen={nachricht.sources} />
@@ -149,6 +158,122 @@ function Fundstellen({ quellen }: { quellen: Quelle[] }) {
       </ol>
     </details>
   );
+}
+
+const WERKZEUG_LABEL: Record<ToolStep["tool"], string> = {
+  dokumente_durchsuchen: "Suche",
+  sql_ausfuehren: "SQL",
+  cypher_ausfuehren: "Cypher",
+};
+
+const WERKZEUG_TYP: Record<ToolStep["tool"], string> = {
+  dokumente_durchsuchen: "vector",
+  sql_ausfuehren: "sql",
+  cypher_ausfuehren: "graph",
+};
+
+/**
+ * Die Werkzeugaufrufe einer Antwort: was das Modell abgefragt hat und was
+ * zurueckkam.
+ *
+ * Steht zwischen Antwort und Fundstellen, weil es die Antwort erklaert: Bei
+ * SQL und Cypher ist die Abfrage selbst der Beleg — wer der Zahl nicht traut,
+ * liest die Abfrage und die ersten Zeilen des Ergebnisses. Ein einzelner
+ * Schritt und jeder Fehler sind aufgeklappt; bei mehreren Schritten waere die
+ * Blase sonst laenger als die Antwort.
+ */
+function Abfragen({ steps }: { steps: ToolStep[] }) {
+  return (
+    <div className="abfragen">
+      <div className="abfragen-titel">Abfragen ({steps.length})</div>
+      {steps.map((step, i) => (
+        <details key={i} className="abfrage" open={steps.length === 1 || Boolean(step.error)}>
+          <summary>
+            <span className={`typ-marke typ-${WERKZEUG_TYP[step.tool]}`}>
+              {WERKZEUG_LABEL[step.tool]}
+            </span>
+            <span className="abfrage-sammlung">{step.collectionName}</span>
+            <span className="abfrage-meta">{schrittStatus(step)}</span>
+          </summary>
+          <pre className="abfrage-text">{step.query}</pre>
+          {step.error && <div className="abfrage-fehler">{step.error}</div>}
+          {!step.error && step.tool !== "dokumente_durchsuchen" && (
+            <Vorschau columns={step.columns ?? []} rows={step.preview ?? []} />
+          )}
+        </details>
+      ))}
+    </div>
+  );
+}
+
+function schrittStatus(step: ToolStep): string {
+  if (step.error) return "Fehler";
+  if (step.rowCount === undefined) return "";
+
+  const einheit = step.tool === "dokumente_durchsuchen" ? "Treffer" : "Zeilen";
+  return `${step.rowCount} ${einheit}${step.truncated ? " (gekuerzt)" : ""}`;
+}
+
+/**
+ * Ergebnisvorschau fuer SQL (Zeilen als Arrays) und Cypher (Zeilen als
+ * Objekte, Spaltennamen als Schluessel).
+ */
+function Vorschau({ columns, rows }: { columns: string[]; rows: unknown[] }) {
+  if (rows.length === 0) return <div className="abfrage-leer">Kein Ergebnis.</div>;
+
+  const zellen = (row: unknown): unknown[] =>
+    Array.isArray(row) ? row : columns.map((column) => (row as Record<string, unknown>)[column]);
+
+  return (
+    <div className="tabelle-huelle">
+      <table className="vorschau">
+        {columns.length > 0 && (
+          <thead>
+            <tr>
+              {columns.map((column) => (
+                <th key={column}>{column}</th>
+              ))}
+            </tr>
+          </thead>
+        )}
+        <tbody>
+          {rows.map((row, i) => (
+            <tr key={i}>
+              {zellen(row).map((zelle, j) => (
+                <td key={j}>{zelleAlsText(zelle)}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** Knoten und Kanten aus Cypher-Ergebnissen kompakt, alles andere woertlich. */
+function zelleAlsText(value: unknown): string {
+  if (value === null || value === undefined) return "∅";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+
+  const record = value as {
+    type?: string;
+    labels?: string[];
+    relationshipType?: string;
+    properties?: Record<string, unknown>;
+  };
+  if (record.type === "node") {
+    return `(${(record.labels ?? []).join(":")} ${kurzJson(record.properties)})`;
+  }
+  if (record.type === "edge") {
+    return `-[:${record.relationshipType} ${kurzJson(record.properties)}]-`;
+  }
+  return kurzJson(value);
+}
+
+function kurzJson(value: unknown): string {
+  const text = JSON.stringify(value ?? {});
+  return text.length > 120 ? `${text.slice(0, 120)}…` : text;
 }
 
 function eindeutig(werte: (string | undefined)[]): string[] {

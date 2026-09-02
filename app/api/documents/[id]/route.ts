@@ -16,7 +16,7 @@ export const maxDuration = 120;
 
 type Kontextparameter = { params: Promise<{ id: string }> };
 
-/** So lange darf das Entfernen einer Tabelle die Sammlung hoechstens sperren. */
+/** So lange darf das Entfernen einer Tabelle oder eines Skripts die Sammlung hoechstens sperren. */
 const SPERRE_SEKUNDEN = 120;
 
 /**
@@ -43,44 +43,50 @@ export async function DELETE(_request: Request, kontextparameter: Kontextparamet
     // das Dokument in der Uebersicht sichtbar und im Chat unauffindbar.
     // Andersherum waeren die Abschnitte verwaist und ueber die Oberflaeche nicht
     // mehr loeschbar — sie wuerden weiter in Antworten zitiert.
-    if (sammlung.kind === "sql") {
-      // Dieselbe Sperre wie der Ablauf beim Einspielen: Die SQLite-Datei wird
-      // als Ganzes gelesen und zurueckgeschrieben, und ein gleichzeitiger
-      // Upload wuerde das Entfernen sonst still ueberschreiben.
+    if (sammlung.kind === "sql" || sammlung.kind === "graph") {
+      // Dieselbe Sperre wie der Ablauf beim Einspielen. Die SQLite-Datei wird
+      // als Ganzes gelesen und zurueckgeschrieben; der Graph wird geleert und
+      // aus den uebrigen Skripten neu aufgebaut. In beiden Faellen wuerde ein
+      // gleichzeitiger Upload das Entfernen still ueberschreiben — oder der
+      // Neuaufbau den laufenden Import wegraeumen.
       const schluessel = sperrSchluessel(sammlung.id);
       const inhaber = `loeschen:${satz.id}`;
 
       if (!(await erwirbSperre(schluessel, inhaber, SPERRE_SEKUNDEN))) {
         throw new ValidationError(
-          "In dieser Sammlung wird gerade eine Tabelle geschrieben. Bitte in wenigen Sekunden erneut versuchen.",
+          sammlung.kind === "sql"
+            ? "In dieser Sammlung wird gerade eine Tabelle geschrieben. Bitte in wenigen Sekunden erneut versuchen."
+            : "In dieser Sammlung wird gerade ein Skript eingespielt. Bitte in wenigen Sekunden erneut versuchen.",
         );
       }
 
       try {
+        // Die uebrigen Saetze erst innerhalb der Sperre lesen: Sonst koennte
+        // ein Import, der gerade fertig wird, im Neuaufbau fehlen.
+        const uebrige =
+          sammlung.kind === "graph"
+            ? (await ladeDokumenteDerSammlung(kontext.userId, sammlung.id)).filter(
+                (dokument) => dokument.id !== satz.id && dokument.status === "fertig",
+              )
+            : [];
+
         await entferneDokumentJeTyp({
-          kind: "sql",
+          kind: sammlung.kind,
           userId: kontext.userId,
           collectionId: sammlung.id,
           satz,
-          uebrige: [],
+          uebrige,
         });
       } finally {
         await gibSperreFrei(schluessel, inhaber);
       }
     } else {
-      const uebrige =
-        sammlung.kind === "graph"
-          ? (await ladeDokumenteDerSammlung(kontext.userId, sammlung.id)).filter(
-              (dokument) => dokument.id !== satz.id && dokument.status === "fertig",
-            )
-          : [];
-
       await entferneDokumentJeTyp({
         kind: sammlung.kind,
         userId: kontext.userId,
         collectionId: sammlung.id,
         satz,
-        uebrige,
+        uebrige: [],
       });
     }
 

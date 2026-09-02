@@ -197,7 +197,7 @@ async function extrahiereUndSchreibe(
   return { seiten, abschnitte: abschnitte.length };
 }
 
-/** So lange darf ein Upload die SQLite-Datei einer Sammlung hoechstens sperren. */
+/** So lange darf ein Upload die SQLite-Datei bzw. den Graphen einer Sammlung hoechstens sperren. */
 const SPERRE_SEKUNDEN = 120;
 
 /**
@@ -286,25 +286,7 @@ async function verarbeiteTabelle(
   console.log(`[ingest ${docId}] CSV "${vorbereitung.filename}" als Tabelle`);
 
   const schluessel = sperrSchluessel(vorbereitung.collectionId);
-
-  let gesperrt: boolean;
-  try {
-    gesperrt = await erwirbSperre(schluessel, docId, SPERRE_SEKUNDEN);
-  } catch (error) {
-    if (error instanceof MissingConfigError) {
-      throw new FatalError(
-        `Tabellen-Sammlungen brauchen Redis fuer die Schreibsperre. ${error.message}`,
-      );
-    }
-    throw new RetryableError(fehlerMeldung(error), { retryAfter: "30s" });
-  }
-
-  if (!gesperrt) {
-    throw new RetryableError(
-      "In dieser Sammlung wird gerade eine andere Tabelle geschrieben.",
-      { retryAfter: "15s" },
-    );
-  }
+  await sperreSammlung(schluessel, docId, "Tabellen", "eine andere Tabelle geschrieben");
 
   try {
     const vorhanden = await ladeDokumenteDerSammlung(
@@ -352,11 +334,48 @@ async function verarbeiteTabelle(
 }
 
 /**
+ * Sperre je Sammlung fuer Schreibvorgaenge, die sich nicht ueberlappen duerfen.
+ *
+ * Ist sie belegt, wartet dieser Ablauf und versucht es erneut. Ohne Redis
+ * scheitert der Schritt mit klarer Meldung, statt ohne Sperre weiterzulaufen —
+ * eine Sperre, die nicht sperrt, waere schlimmer als ein Abbruch.
+ */
+async function sperreSammlung(
+  schluessel: string,
+  inhaber: string,
+  typ: string,
+  wasLaeuft: string,
+): Promise<void> {
+  let gesperrt: boolean;
+  try {
+    gesperrt = await erwirbSperre(schluessel, inhaber, SPERRE_SEKUNDEN);
+  } catch (error) {
+    if (error instanceof MissingConfigError) {
+      throw new FatalError(
+        `${typ}-Sammlungen brauchen Redis fuer die Schreibsperre. ${error.message}`,
+      );
+    }
+    throw new RetryableError(fehlerMeldung(error), { retryAfter: "30s" });
+  }
+
+  if (!gesperrt) {
+    throw new RetryableError(`In dieser Sammlung wird gerade ${wasLaeuft}.`, {
+      retryAfter: "15s",
+    });
+  }
+}
+
+/**
  * Cypher-Skript in den Graphen der Sammlung einspielen.
  *
  * Schlaegt der Import fehl, baut lib/ingest.ts den Graphen aus den uebrigen
  * fertigen Skripten neu auf, bevor der Fehler hier ankommt. Der Zustand ist
  * danach derselbe wie vor dem Schritt — ein Wiederholen ist damit gefahrlos.
+ *
+ * Dieselbe Sperre wie bei Tabellen: Ein Neuaufbau (nach Fehler oder beim
+ * Loeschen eines Skripts) leert den Graphen und spielt die uebrigen Skripte
+ * neu ein. Liefe parallel ein Import, wuerde der Neuaufbau ihn wegraeumen —
+ * oder ihn als "uebrig" mitzaehlen, obwohl er noch nicht fertig ist.
  */
 async function verarbeiteGraph(
   docId: string,
@@ -365,6 +384,9 @@ async function verarbeiteGraph(
   "use step";
 
   console.log(`[ingest ${docId}] Cypher-Skript "${vorbereitung.filename}" in den Graphen`);
+
+  const schluessel = sperrSchluessel(vorbereitung.collectionId);
+  await sperreSammlung(schluessel, docId, "Graph", "ein anderes Skript eingespielt");
 
   try {
     const vorhanden = await ladeDokumenteDerSammlung(
@@ -388,6 +410,8 @@ async function verarbeiteGraph(
     return { seiten: ergebnis.pageCount, abschnitte: ergebnis.units };
   } catch (error) {
     alsAblauffehler(error);
+  } finally {
+    await gibSperreFrei(schluessel, docId);
   }
 }
 

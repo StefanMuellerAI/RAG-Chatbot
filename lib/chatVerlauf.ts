@@ -18,6 +18,8 @@
  * mehrere Megabyte fuer etwas, das niemand liest.
  */
 
+import type { ToolStep } from "./tools-types";
+
 export type Quelle = {
   n: number;
   filename: string;
@@ -31,6 +33,8 @@ export type Nachricht = {
   role: "user" | "assistant";
   content: string;
   sources?: Quelle[];
+  /** Werkzeugaufrufe (Suche, SQL, Cypher), die zu dieser Antwort gefuehrt haben. */
+  steps?: ToolStep[];
   fehler?: boolean;
 };
 

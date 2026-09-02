@@ -16,6 +16,7 @@ import {
   type Nachricht,
   type Quelle,
 } from "@/lib/chatVerlauf";
+import type { ToolStep } from "@/lib/tools-types";
 
 /**
  * Haelt Seitenleiste und Chatfenster zusammen: liest den Verlauf vom Server,
@@ -116,6 +117,13 @@ export default function ChatBereich() {
 
           if (ereignis.type === "sources") {
             uebernehmen({ ...antwort, sources: ereignis.sources as Quelle[] });
+          } else if (ereignis.type === "step") {
+            // Jeder Werkzeugaufruf sofort in die laufende Antwort: Der Nutzer
+            // sieht, was gerade abgefragt wird, bevor das erste Wort kommt.
+            uebernehmen({
+              ...antwort,
+              steps: [...(antwort.steps ?? []), ereignis.step as ToolStep],
+            });
           } else if (ereignis.type === "text") {
             uebernehmen({ ...antwort, content: antwort.content + String(ereignis.delta) });
           } else if (ereignis.type === "done") {
