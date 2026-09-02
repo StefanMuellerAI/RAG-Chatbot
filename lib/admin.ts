@@ -1,16 +1,27 @@
-import { and, count, desc, eq, gte, ilike, or, sql, sum } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, ilike, or, sql, sum } from "drizzle-orm";
 import { getDb } from "./db";
 import {
   collections,
   documents,
+  models,
   plans,
   sizeClasses,
   usageEvents,
   users,
 } from "./db/schema";
-import type { Plan, SizeClass } from "./db/schema";
+import type { ModelRow, Plan, SizeClass } from "./db/schema";
 import { ValidationError } from "./errors";
-import { isKnownModel } from "./models";
+import { verwirfModellkatalog } from "./modellkatalog";
+import {
+  ANBIETER_LABEL,
+  KENNUNG_MAX_ZEICHEN,
+  KENNUNG_MUSTER,
+  LABEL_MAX_ZEICHEN,
+  istAnbieter,
+  istKeyAnbieter,
+  zerlegeKennung,
+  type Anbieter,
+} from "./models";
 import { kontextSchluessel, verwirfZwischenspeicher } from "./ratelimit";
 
 /**
@@ -107,15 +118,22 @@ export async function speicherePlan(eingabe: PlanEingabe): Promise<void> {
     throw new ValidationError("Die Bezeichnung darf nicht leer sein.");
   }
 
-  // Eine unbekannte Modellkennung wuerde erst beim ersten Modellaufruf
-  // auffallen - also beim Nutzer und nicht beim Admin, der sie eingetragen hat.
-  if (!isKnownModel(eingabe.modelId)) {
+  const db = getDb();
+
+  // Eine unbekannte oder abgeschaltete Modellkennung wuerde erst beim ersten
+  // Modellaufruf auffallen - also beim Nutzer und nicht beim Admin, der sie
+  // eingetragen hat.
+  const modell = await db.query.models.findFirst({ where: eq(models.id, eingabe.modelId) });
+  if (!modell) {
     throw new ValidationError(
-      `"${eingabe.modelId}" ist keine bekannte Modellkennung. Zulaessig sind die im Auswahlfeld angebotenen Modelle.`,
+      `"${eingabe.modelId}" steht nicht im Modellkatalog. Zulaessig sind die im Auswahlfeld angebotenen Modelle.`,
     );
   }
-
-  const db = getDb();
+  if (!modell.enabled) {
+    throw new ValidationError(
+      `Das Modell "${eingabe.modelId}" ist im Katalog nicht aktiv. Bitte zuerst aktivieren oder ein anderes waehlen.`,
+    );
+  }
 
   const klasse = await db.query.sizeClasses.findFirst({
     where: eq(sizeClasses.id, eingabe.maxSizeClassId),
@@ -182,6 +200,154 @@ export async function loeschePlan(planId: string): Promise<void> {
   }
 
   await db.delete(plans).where(eq(plans.id, planId));
+}
+
+// --- Modellkatalog ----------------------------------------------------------
+
+export type KatalogEintrag = Omit<ModelRow, "createdAt" | "updatedAt"> & {
+  /** Plaene, die dieses Modell nutzen — entscheidet, ob es geloescht werden darf. */
+  plaene: string[];
+};
+
+/** Alle Katalogeintraege, mit den Plaenen, die sie nutzen. Ohne Zwischenspeicher. */
+export async function ladeModellKatalog(): Promise<KatalogEintrag[]> {
+  const db = getDb();
+
+  const [zeilen, planZeilen] = await Promise.all([
+    db.select().from(models).orderBy(asc(models.sortOrder), asc(models.id)),
+    db.select({ id: plans.id, modelId: plans.modelId }).from(plans),
+  ]);
+
+  return zeilen.map((zeile) => ({
+    id: zeile.id,
+    provider: zeile.provider,
+    label: zeile.label,
+    inputPerMillion: zeile.inputPerMillion,
+    outputPerMillion: zeile.outputPerMillion,
+    cacheReadPerMillion: zeile.cacheReadPerMillion,
+    enabled: zeile.enabled,
+    sortOrder: zeile.sortOrder,
+    plaene: planZeilen.filter((plan) => plan.modelId === zeile.id).map((plan) => plan.id),
+  }));
+}
+
+export type ModellEingabe = {
+  id: string;
+  provider: Anbieter;
+  label: string;
+  inputPerMillion: number;
+  outputPerMillion: number;
+  cacheReadPerMillion: number;
+  enabled: boolean;
+  sortOrder: number;
+};
+
+/** Prueft eine Kennung und liefert sie getrimmt zurueck. */
+export function pruefeKennung(id: unknown): string {
+  const wert = typeof id === "string" ? id.trim() : "";
+  if (!wert || wert.length > KENNUNG_MAX_ZEICHEN || !KENNUNG_MUSTER.test(wert)) {
+    throw new ValidationError(
+      'Die Kennung muss die Form "anbieter/modell" haben, z. B. "anthropic/claude-sonnet-4-5" ' +
+        "oder \"google/gemini-2.5-flash\" — Praefix klein, ohne Leerzeichen.",
+    );
+  }
+  return wert;
+}
+
+export async function speichereModell(eingabe: ModellEingabe): Promise<void> {
+  const id = pruefeKennung(eingabe.id);
+
+  if (!istAnbieter(eingabe.provider)) {
+    throw new ValidationError("Unbekannter Anbieter. Zulaessig sind AI Gateway, Anthropic und OpenAI.");
+  }
+
+  // Bei direkter Anbindung geht die native Kennung an den Anbieter. Ein
+  // "google/…"-Modell direkt an Anthropic zu schicken kann nur scheitern —
+  // und zwar erst beim Nutzer.
+  if (istKeyAnbieter(eingabe.provider) && zerlegeKennung(id).praefix !== eingabe.provider) {
+    throw new ValidationError(
+      `Fuer die direkte Anbindung an ${ANBIETER_LABEL[eingabe.provider]} muss die Kennung mit "${eingabe.provider}/" beginnen.`,
+    );
+  }
+
+  const label = eingabe.label.trim();
+  if (!label) throw new ValidationError("Die Bezeichnung darf nicht leer sein.");
+  if (label.length > LABEL_MAX_ZEICHEN) {
+    throw new ValidationError(`Die Bezeichnung darf hoechstens ${LABEL_MAX_ZEICHEN} Zeichen haben.`);
+  }
+
+  pruefePreis(eingabe.inputPerMillion, "Eingabepreis");
+  pruefePreis(eingabe.outputPerMillion, "Ausgabepreis");
+  pruefePreis(eingabe.cacheReadPerMillion, "Cache-Preis");
+  pruefeGanzzahl(eingabe.sortOrder, 0, 9_999, "Sortierung");
+
+  // Ohne Preise wuerde jede Antwort mit 0 $ verbucht und die Verbrauchsuebersicht
+  // laege still falsch. Deshalb erst aktiv, wenn beide Preise eingetragen sind.
+  if (eingabe.enabled && (eingabe.inputPerMillion <= 0 || eingabe.outputPerMillion <= 0)) {
+    throw new ValidationError(
+      "Bitte Eingabe- und Ausgabepreis eintragen, bevor das Modell aktiv gesetzt wird — sonst wird der Verbrauch mit 0 $ verbucht.",
+    );
+  }
+
+  const db = getDb();
+
+  // Ein Modell, das ein Plan nutzt, darf nicht abgeschaltet werden: Der Plan
+  // wuerde still auf das Standardmodell fallen, ohne dass es jemand sieht.
+  if (!eingabe.enabled) {
+    const nutzer = await db
+      .select({ id: plans.id })
+      .from(plans)
+      .where(eq(plans.modelId, id));
+    if (nutzer.length > 0) {
+      throw new ValidationError(
+        `Das Modell wird von ${nutzer.length === 1 ? "dem Plan" : "den Plaenen"} ${nutzer
+          .map((plan) => `"${plan.id}"`)
+          .join(", ")} genutzt. Bitte dort zuerst ein anderes Modell waehlen.`,
+      );
+    }
+  }
+
+  const werte = {
+    provider: eingabe.provider,
+    label,
+    inputPerMillion: eingabe.inputPerMillion,
+    outputPerMillion: eingabe.outputPerMillion,
+    cacheReadPerMillion: eingabe.cacheReadPerMillion,
+    enabled: eingabe.enabled,
+    sortOrder: eingabe.sortOrder,
+    updatedAt: new Date(),
+  };
+
+  await db
+    .insert(models)
+    .values({ id, ...werte })
+    .onConflictDoUpdate({ target: models.id, set: werte });
+
+  await verwirfModellkatalog();
+}
+
+export async function loescheModell(id: string): Promise<void> {
+  const db = getDb();
+
+  const nutzer = await db.select({ id: plans.id }).from(plans).where(eq(plans.modelId, id));
+  if (nutzer.length > 0) {
+    throw new ValidationError(
+      `Das Modell wird von ${nutzer.length === 1 ? "dem Plan" : "den Plaenen"} ${nutzer
+        .map((plan) => `"${plan.id}"`)
+        .join(", ")} genutzt. Bitte dort zuerst ein anderes Modell waehlen.`,
+    );
+  }
+
+  await db.delete(models).where(eq(models.id, id));
+  await verwirfModellkatalog();
+}
+
+function pruefePreis(wert: number, bezeichnung: string): void {
+  if (!Number.isFinite(wert) || wert < 0 || wert > 10_000) {
+    throw new ValidationError(
+      `${bezeichnung}: erwartet wird ein Betrag in US-Dollar je 1 Mio. Token zwischen 0 und 10.000.`,
+    );
+  }
 }
 
 // --- Nutzer -----------------------------------------------------------------

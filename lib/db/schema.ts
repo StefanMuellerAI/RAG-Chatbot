@@ -2,6 +2,7 @@ import { relations } from "drizzle-orm";
 import {
   boolean,
   date,
+  doublePrecision,
   index,
   integer,
   jsonb,
@@ -11,6 +12,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import type { CollectionKind, CollectionSchema } from "../collection-kinds";
+import type { Anbieter, KeyAnbieter } from "../models";
 import type { ToolStep } from "../tools-types";
 
 /**
@@ -59,7 +61,13 @@ export const plans = pgTable("plans", {
    * koennte sonst das Monatsbudget des Modellanbieters aufbrauchen.
    */
   maxQuestionsPerDay: integer("max_questions_per_day").notNull(),
-  /** Modellkennung fuer das AI Gateway, z. B. "google/gemini-2.5-flash-lite". */
+  /**
+   * Modellkennung aus dem Katalog (models.id), z. B. "google/gemini-2.5-flash-lite".
+   * Bewusst ohne Fremdschluessel: Ein Modell darf aus dem Katalog verschwinden,
+   * ohne dass der Plan mit ihm faellt — der Chat faellt dann auf das
+   * Standardmodell zurueck. Dass ein Plan nur ein vorhandenes, aktives Modell
+   * erhaelt, prueft speicherePlan in lib/admin.ts.
+   */
   modelId: text("model_id").notNull(),
   /** Genau ein Plan traegt true — den bekommen neue Registrierungen. */
   isDefault: boolean("is_default").default(false).notNull(),
@@ -235,6 +243,46 @@ export const webhookDeliveries = pgTable("webhook_deliveries", {
   receivedAt: timestamp("received_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
+/**
+ * API-Keys der Modellanbieter, vom Admin hinterlegt.
+ *
+ * Der Klartext liegt nie in der Datenbank: `encrypted` ist ein AES-256-GCM-
+ * Chiffrat (lib/crypto.ts), dessen Schluessel aus PROVIDER_KEY_SECRET
+ * abgeleitet wird. `masked` ist das, was die Oberflaeche zeigen darf
+ * ("sk-ant-…7f3a") — vorberechnet, damit die Statusanzeige nicht entschluesseln muss.
+ */
+export const providerKeys = pgTable("provider_keys", {
+  provider: text("provider").$type<KeyAnbieter>().primaryKey(),
+  encrypted: text("encrypted").notNull(),
+  masked: text("masked").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+/**
+ * Modellkatalog. Ersetzt die frueher fest kodierte Liste in lib/models.ts.
+ *
+ * `id` hat die Form "<praefix>/<native-id>", z. B. "anthropic/claude-sonnet-4-5"
+ * oder "google/gemini-2.5-flash". `provider` sagt, WOHIN der Aufruf geht:
+ * "anthropic" oder "openai" direkt an den Anbieter (mit hinterlegtem Key),
+ * "gateway" ueber das Vercel AI Gateway. Die Preise sind die Grundlage der
+ * Kostenrechnung in usage_events — als double precision, weil ein float4 aus
+ * 0,01 $ ein 0,00999999… macht und damit die Rundung auf Mikro-Dollar kippt.
+ */
+export const models = pgTable("models", {
+  id: text("id").primaryKey(),
+  provider: text("provider").$type<Anbieter>().notNull(),
+  label: text("label").notNull(),
+  /** US-Dollar je 1 Mio. Token. */
+  inputPerMillion: doublePrecision("input_per_million").notNull(),
+  outputPerMillion: doublePrecision("output_per_million").notNull(),
+  cacheReadPerMillion: doublePrecision("cache_read_per_million").notNull(),
+  /** Nur aktive Modelle stehen im Auswahlfeld der Plaene. */
+  enabled: boolean("enabled").default(true).notNull(),
+  sortOrder: integer("sort_order").default(0).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
 // --- Beziehungen ------------------------------------------------------------
 
 export const usersRelations = relations(users, ({ one, many }) => ({
@@ -282,3 +330,5 @@ export type Collection = typeof collections.$inferSelect;
 export type DocumentRecord = typeof documents.$inferSelect;
 export type Chat = typeof chats.$inferSelect;
 export type Message = typeof messages.$inferSelect;
+export type ProviderKeyRow = typeof providerKeys.$inferSelect;
+export type ModelRow = typeof models.$inferSelect;

@@ -15,6 +15,13 @@
       "when": 1788325846812,
       "tag": "0001_windy_hannibal_king",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788331390478,
+      "tag": "0002_modelle_und_anbieter_keys",
+      "breakpoints": true
     }
   ]
 }

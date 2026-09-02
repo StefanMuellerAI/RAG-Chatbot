@@ -14,7 +14,8 @@ Eine Sammlung hat einen von drei Typen (siehe [Drei Arten von Sammlungen](#drei-
   Cypher für Fragen nach Beziehungen und Wegen.
 
 - **Anmeldung**: Clerk mit Registrierung, Nutzerkonten und Rollen
-- **Antworten**: Claude über das Vercel AI Gateway, Modell je Plan
+- **Antworten**: Modell je Plan aus einem im Admin gepflegten Katalog — über das Vercel AI
+  Gateway oder, mit eigenem Key, direkt bei Anthropic bzw. OpenAI
 - **Vektorsuche**: Pinecone Serverless, ein Namespace je Sammlung, Embedding im Dienst
 - **Tabellen**: SQLite-Datei je Sammlung in Vercel Blob, abgefragt in-process mit sql.js
 - **Graphen**: FalkorDB, ein Graph je Sammlung (optional, über `FALKORDB_URL`)
@@ -72,11 +73,13 @@ npm install
 
 ```bash
 npm run db:push    # Tabellen erzeugen
-npm run db:seed    # Größenklassen S/M/L/XL und Pläne anlegen
+npm run db:seed    # Größenklassen S/M/L/XL, Pläne und Modellkatalog anlegen
 ```
 
 Der Seed ist beliebig oft aufrufbar; bestehende Zeilen bleiben unberührt, damit
-Admin-Anpassungen erhalten bleiben.
+Admin-Anpassungen erhalten bleiben. Wer die Datenbank aus einer früheren Fassung
+übernimmt, spielt die Migrationen unter `drizzle/` ein (`db:push` gleicht das Schema ab);
+`0002` legt die Tabellen `models` und `provider_keys` an.
 
 ### 3. Pinecone-Index anlegen
 
@@ -124,7 +127,20 @@ Ohne diese Variable ist der Typ **Graph** beim Anlegen einer Sammlung ausgegraut
 Dokumente und Tabellen funktionieren unabhängig davon. Die Anwendung baut die
 Verbindung erst im Request auf, ein fehlender Wert bricht also keinen Build.
 
-### 7. Lokal starten
+### 7. Eigene Anbieter-Keys (optional)
+
+Wer Modelle von Anthropic oder OpenAI direkt statt über das Gateway ansprechen will,
+setzt ein Geheimnis für die Verschlüsselung der Keys und trägt die Keys danach im
+Admin-Bereich ein (siehe [KI-Modelle pflegen](#ki-modelle-pflegen)):
+
+```bash
+PROVIDER_KEY_SECRET=$(openssl rand -base64 32)
+```
+
+Ein Wechsel dieses Werts macht alle hinterlegten Keys unlesbar; sie müssen dann neu
+eingegeben werden.
+
+### 8. Lokal starten
 
 ```bash
 npm run dev
@@ -168,11 +184,13 @@ Verlauf wieder.
 Zwei Eigenheiten des Werkzeugmodus, die man kennen sollte:
 
 - **Modellhebung.** Pläne mit Gemini 2.5 Flash Lite werden im Werkzeugmodus auf Gemini
-  2.5 Flash gehoben; alle anderen Modelle bleiben, wie der Plan sie vorgibt. Grund:
-  Flash Lite liefert nach einem Werkzeugergebnis regelmäßig leeren Text statt einer
-  Antwort ([vercel/ai#13017](https://github.com/vercel/ai/issues/13017)). Das kostet
-  je Token etwa das Drei- bis Sechsfache (Eingabe 0,10 → 0,30 $, Ausgabe 0,40 → 2,50 $
-  je Mio.). Verbucht wird das tatsächlich genutzte Modell, nicht das des Plans.
+  2.5 Flash gehoben; alle anderen Modelle — auch alle direkt angebundenen — bleiben, wie
+  der Plan sie vorgibt. Grund: Flash Lite liefert nach einem Werkzeugergebnis regelmäßig
+  leeren Text statt einer Antwort ([vercel/ai#13017](https://github.com/vercel/ai/issues/13017)).
+  Das kostet je Token etwa das Drei- bis Sechsfache (Eingabe 0,10 → 0,30 $, Ausgabe
+  0,40 → 2,50 $ je Mio.). Verbucht wird das tatsächlich genutzte Modell, nicht das des
+  Plans. Die Hebung ist fest kodiert (`lib/models.ts`) und betrifft ausschließlich diese
+  eine Kennung; Gemini 2.5 Flash sollte deshalb im Katalog bleiben.
 - **Nachtrag bei leerem Abschlusstext.** Endet ein Lauf nach Werkzeugergebnissen ohne
   ein Wort Antwort — auch dann, wenn die Schrittgrenze mitten in den Abfragen greift —,
   folgt ein weiterer Modellaufruf mit dem bisherigen Verlauf und der Bitte, die
@@ -197,8 +215,8 @@ Spalten, Typen, Zeilenzahl und Beispielwerten bzw. Labels, Beziehungstypen und
 Eigenschaften des Graphen. Dasselbe Schema bekommt das Modell in der Systemanweisung —
 ohne es könnte es keine Abfrage formulieren, die trifft.
 
-**Administration** (`/admin`) — nur mit Rolle. Größenklassen und Pläne bearbeiten, Nutzern
-Pläne zuweisen, Verbrauch einsehen.
+**Administration** (`/admin`) — nur mit Rolle. Größenklassen und Pläne bearbeiten, den
+Modellkatalog und Anbieter-Keys pflegen, Nutzern Pläne zuweisen, Verbrauch einsehen.
 
 ---
 
@@ -274,14 +292,71 @@ Die Startwerte:
 
 | Plan | bis Klasse | Sammlungen | Fragen/Tag | Modell |
 |---|---|---|---|---|
-| S | S | 3 | 200 | Haiku 4.5 |
-| M | M | 10 | 1.000 | Haiku 4.5 |
-| L | L | 25 | 5.000 | Sonnet 5 |
-| XL | XL | 100 | 25.000 | Opus 5 |
+| S | S | 3 | 200 | Gemini 2.5 Flash Lite |
+| M | M | 10 | 1.000 | Gemini 2.5 Flash Lite |
+| L | L | 25 | 5.000 | Gemini 2.5 Flash |
+| XL | XL | 100 | 25.000 | GPT-5 mini |
 
 Alle Werte sind im Admin-Bereich zur Laufzeit änderbar; sie stehen deshalb in Tabellen und
 nicht im Code. Eine Zuweisung greift sofort, eine Änderung an der Plan-Definition
-innerhalb einer Minute — der Nutzerkontext liegt so lange im Zwischenspeicher.
+innerhalb einer Minute — der Nutzerkontext liegt so lange im Zwischenspeicher. Zur Auswahl
+stehen die aktiven Modelle des Katalogs (nächster Abschnitt); ein Plan lässt sich nur mit
+einem vorhandenen, aktiven Modell speichern.
+
+---
+
+## KI-Modelle pflegen
+
+Der Abschnitt **KI-Modelle** im Admin-Bereich ersetzt die früher fest kodierte
+Modellliste. Er besteht aus zwei Teilen.
+
+**Anbieter-Keys.** Je Anbieter (Anthropic, OpenAI) kann ein eigener API-Key hinterlegt
+werden. Er wird mit AES-256-GCM verschlüsselt in `provider_keys` abgelegt; der Schlüssel
+dazu wird per HKDF aus `PROVIDER_KEY_SECRET` abgeleitet. Die Oberfläche zeigt nur eine
+Maske (`sk-ant-…7f3a`) und den Zeitpunkt der letzten Änderung; der Klartext verlässt den
+Server nie — nicht in Antworten, nicht in Logs, nicht in Fehlermeldungen. „Verbindung
+testen" schickt einen Mini-Aufruf an den Anbieter, wahlweise mit dem gerade eingegebenen,
+noch nicht gespeicherten Key. Fehlt `PROVIDER_KEY_SECRET`, zeigt die Karte das an, und
+Keys lassen sich nicht speichern; der Katalog funktioniert dann mit Gateway-Modellen.
+
+**Modellkatalog** (Tabelle `models`). Jeder Eintrag hat eine Kennung der Form
+`<präfix>/<native-id>` (z. B. `anthropic/claude-sonnet-4-5`, `google/gemini-2.5-flash`),
+einen Anbieter, eine Bezeichnung, drei Preise in US-Dollar je 1 Mio. Token (Eingabe,
+Ausgabe, Cache-Treffer), eine Sortierung und die Marke **aktiv**. Nur aktive Modelle
+stehen den Plänen zur Auswahl; ohne Eingabe- und Ausgabepreis lässt sich ein Modell nicht
+aktiv setzen, weil der Verbrauch sonst mit 0 $ verbucht würde. Ein Modell, das ein Plan
+nutzt, kann weder gelöscht noch deaktiviert werden.
+
+Neue Einträge kommen auf zwei Wegen: als **eigene Kennung** von Hand oder über **Modelle
+vom Anbieter laden**. Letzteres holt mit dem hinterlegten Key die Modell-Liste von
+Anthropic (`GET /v1/models`) bzw. OpenAI (`GET /v1/models`, gefiltert auf Chat-Modelle),
+oder die Sprachmodelle des öffentlichen Gateway-Katalogs. Die Preise werden dabei aus
+`GET https://ai-gateway.vercel.sh/v1/models` vorbelegt — dort stehen sie in US-Dollar je
+Token als Zeichenkette (`"input": "0.000003"`), die App rechnet auf je 1 Mio. Token um.
+Kennungen werden tolerant zugeordnet (Anthropic liefert `claude-sonnet-4-5-20250929`, der
+Gateway-Katalog führt `claude-sonnet-4.5`). Fehlt ein Treffer, bleibt der Preis 0 und das
+Modell wird inaktiv aufgenommen, bis jemand die Preise einträgt.
+
+**Routing.** Der Anbieter eines Katalogeintrags entscheidet, wohin der Aufruf geht:
+
+| Anbieter im Katalog | Key hinterlegt | Weg |
+|---|---|---|
+| AI Gateway | — | `gateway("<kennung>")` |
+| Anthropic / OpenAI | ja | direkt per `@ai-sdk/anthropic` bzw. `@ai-sdk/openai` mit der nativen Kennung hinter dem `/` |
+| Anthropic / OpenAI | nein | Gateway, als Rückfall |
+
+Die Spalte **Anbindung** in der Tabelle zeigt den tatsächlichen Weg. Bei direkter
+Anbindung muss die Kennung mit dem Anbieterpräfix beginnen (`anthropic/…`); die Kosten
+werden in beiden Fällen mit den Katalogpreisen verbucht. Der Katalog liegt eine Minute im
+Zwischenspeicher (Redis, wie der Nutzerkontext) und wird nach jeder Admin-Änderung
+verworfen; der entschlüsselte Key wird je Instanz eine Minute im Prozess gehalten — nicht
+in Redis, denn dort gehört kein Klartext hin. Ein neuer oder gelöschter Key greift auf
+anderen Instanzen deshalb erst nach bis zu einer Minute.
+
+Die drei Startmodelle (Gemini 2.5 Flash Lite, Gemini 2.5 Flash, GPT-5 mini) legt der Seed
+mit ihren bisherigen Preisen als Gateway-Einträge an. Trägt ein Plan eine Kennung, die
+nicht mehr im Katalog steht, antwortet der Chat mit dem Standardmodell
+(`google/gemini-2.5-flash-lite`).
 
 ---
 
@@ -317,7 +392,7 @@ npm run pruefe            # Chunks, Kontingente und Environment-Erkennung
 npm run pruefe:chunks     # die drei Zerlegungsstrategien
 npm run pruefe:kontingente # Grenzen der Pläne und Größenklassen
 npm run pruefe:env        # Aliase und OIDC der Environment-Variablen
-npm test                  # Vitest: CSV, Cypher-Skripte, SQL-Sperre, Werkzeuge, Katalog, Chunker
+npm test                  # Vitest: CSV, Cypher-Skripte, SQL-Sperre, Werkzeuge, Katalog, Chunker, Modelle, Keys
 npm run typecheck
 npm run lint
 ```
@@ -335,7 +410,11 @@ Mit den Sammlungstypen kam Vitest dazu (`tests/`). Dort liegt, was sich ohne Die
 prüfen lässt: das CSV-Lesen samt Typerkennung und deutscher Zahlen, das Zerlegen von
 Cypher-Skripten, die Lese-Sperre für SQL (was durchkommt und was nicht), die
 Werkzeug-Allowlist, der Katalog in der Systemanweisung und der Chunker. sql.js läuft
-dabei gegen eine In-Memory-Datenbank, Blob und FalkorDB sind gemockt.
+dabei gegen eine In-Memory-Datenbank, Blob und FalkorDB sind gemockt. Mit dem
+Modellkatalog kamen die Verschlüsselung der Anbieter-Keys, die Kostenrechnung mit
+Katalogpreisen, die Routing-Entscheidung, die Umrechnung der Gateway-Preise und die
+tolerante Kennungs-Zuordnung dazu; die Key-Verwaltung läuft gegen eine Tabelle im
+Speicher.
 
 ---
 
@@ -345,13 +424,13 @@ dabei gegen eine In-Memory-Datenbank, Blob und FalkorDB sind gemockt.
 app/
   page.tsx                        Chat
   sammlungen/                     eigene Sammlungen, Detailansicht mit Upload
-  admin/                          Größenklassen, Pläne, Nutzer, Verbrauch
+  admin/                          Größenklassen, Pläne, KI-Modelle, Nutzer, Verbrauch
   sign-in/ · sign-up/             Clerk
   api/chat/                       Retrieval, Werkzeugmodus, Antwort-Streaming (NDJSON)
   api/chats/                      Verlauf
   api/collections/                Sammlungen, Upload-Anmeldung
   api/documents/                  Verarbeitung, Löschen je Typ, Download
-  api/admin/                      Stammdaten, Rollen, Diagnose (sql.js, FalkorDB, Umgebung)
+  api/admin/                      Stammdaten, Rollen, Modellkatalog, Anbieter-Keys, Diagnose
   api/upload/                     Token für den Direkt-Upload zu Vercel Blob
   api/webhooks/clerk/             Nutzerdaten spiegeln
   api/cron/aufraeumen/            stündlicher Aufräumlauf
@@ -373,13 +452,16 @@ lib/
   graphstore.ts                   FalkorDB: importieren, beschreiben, lesend abfragen
   csv.ts · cypher-script.ts       CSV → Tabelle, Skript → Statements, Grenzen
   ingest.ts                       Einspielen und Entfernen je Typ (ohne Request, ohne Sperre)
-  ai.ts                           Modell, Systemanweisung, Katalog, Suchwerkzeug
+  ai.ts                           Modellzugriff (direkt oder Gateway), Systemanweisung, Katalog, Suchwerkzeug
   tools.ts · tools-types.ts       Werkzeuge sql_ausfuehren, cypher_ausfuehren, Schritt-Ereignisse
   presets.ts · chunk.ts           die drei Verarbeitungsarten
   extract.ts                      PDF · DOCX · XLSX → Text und Seitenzahl
   quota.ts · ratelimit.ts         Grenzen, Drosselung, Schreibsperre (SET NX EX)
   chats.ts · chatVerlauf.ts       Verlauf, Server und Client-Fassade
-  admin.ts · models.ts            Stammdaten, Modellpreise, Modellhebung im Werkzeugmodus
+  admin.ts · models.ts            Stammdaten, Modellkatalog-Pflege, Kostenrechnung, Modellhebung
+  modellkatalog.ts                Katalog aus Postgres mit Zwischenspeicher, Rückfall auf Standard
+  provider-keys.ts · crypto.ts    Anbieter-Keys verschlüsselt speichern, maskieren, laden
+  anbieter-modelle.ts             Modell-Listen von Anthropic/OpenAI, Preise aus dem Gateway-Katalog
   aufraeumen.ts                   Überreste des laufenden Betriebs
 tests/                            Vitest (npm test)
 ```
@@ -475,9 +557,10 @@ in die 429er-Zone des Anbieters — und dort trifft es alle gleichzeitig.
 GET /api/admin/diagnose        (als Admin angemeldet)
 ```
 
-Antwortet mit drei Dingen, die sich sonst erst beim ersten Nutzer zeigen: ob sql.js samt
-WASM-Datei geladen werden konnte (mit SQLite-Version), ob `FALKORDB_URL` gesetzt ist, und
-welche Umgebungsvariablen die Instanz sieht — nur Namen, keine Werte.
+Antwortet mit vier Dingen, die sich sonst erst beim ersten Nutzer zeigen: ob sql.js samt
+WASM-Datei geladen werden konnte (mit SQLite-Version), ob `FALKORDB_URL` gesetzt ist, ob
+`PROVIDER_KEY_SECRET` gesetzt ist (`providerKeySecretKonfiguriert`), und welche
+Umgebungsvariablen die Instanz sieht — nur Namen, keine Werte.
 
 Der erste Punkt ist der heikle. sql.js liest seine WASM-Datei zur Laufzeit per `fs`, und
 das File Tracing von Vercel sieht diesen Zugriff nicht. `next.config.ts` nimmt die Datei

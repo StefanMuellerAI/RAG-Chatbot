@@ -13,7 +13,8 @@ import {
 import { requireKontext } from "@/lib/auth/user";
 import { ladeSammlungen } from "@/lib/collections";
 import { ValidationError } from "@/lib/errors";
-import { DEFAULT_MODEL_ID, isKnownModel, modellFuerWerkzeuge } from "@/lib/models";
+import { findeModell } from "@/lib/modellkatalog";
+import { modellFuerWerkzeuge } from "@/lib/models";
 import { gibFrageZurueck, pruefeFragekontingent } from "@/lib/ratelimit";
 import { baueCypherWerkzeug, baueSqlWerkzeug, toStep } from "@/lib/tools";
 import { verbucheFrage } from "@/lib/verbrauch";
@@ -104,9 +105,9 @@ export async function POST(request: Request) {
       ]);
     }
 
-    const planModelId = isKnownModel(kontext.plan.modelId)
-      ? kontext.plan.modelId
-      : DEFAULT_MODEL_ID;
+    // Aus dem Katalog; eine Kennung, die es dort nicht mehr gibt, faellt auf
+    // das Standardmodell zurueck (lib/modellkatalog.ts).
+    const planModelId = (await findeModell(kontext.plan.modelId)).id;
 
     const sammler = new Fundstellensammler();
 
@@ -187,10 +188,13 @@ export async function POST(request: Request) {
       }));
     }
 
+    // Direkt zum Anbieter, wenn ein Key hinterlegt ist, sonst Gateway (lib/ai.ts).
+    const sprachmodell = await modell(modelId);
+
     const ergebnis = streamText({
-      model: modell(modelId),
-      // Anthropic-Prompt-Cache nur, wenn der Plan noch ein Claude-Modell
-      // traegt. Gemini und OpenAI ignorieren die Marke nicht immer still.
+      model: sprachmodell,
+      // Anthropic-Prompt-Cache nur bei Claude-Modellen. Gemini und OpenAI
+      // ignorieren die Marke nicht immer still.
       instructions: {
         role: "system",
         content: anweisung,
@@ -305,7 +309,7 @@ export async function POST(request: Request) {
            */
           if (werkzeuge && !textGesehen && schritte > 0 && !fehlerGesehen && offen) {
             const nachtrag = streamText({
-              model: modell(modelId),
+              model: sprachmodell,
               instructions: anweisung,
               messages: [
                 ...nachrichten,
@@ -423,8 +427,18 @@ function ndjsonAntwort(ereignisse: unknown[]): Response {
 
 function lesbarerFehler(error: unknown): string {
   const meldung = error instanceof Error ? error.message : String(error);
+  const status = (error as { statusCode?: number } | undefined)?.statusCode;
 
-  if (/429|rate.?limit|too many requests/i.test(meldung)) {
+  // Abgelehnter Key oder unbekanntes Modell sind Zustaende, die nur die
+  // Administration beheben kann — und die Meldung darf keinen Key enthalten.
+  if (status === 401 || status === 403) {
+    return "Der Modellanbieter hat die Zugangsdaten abgelehnt. Bitte die Administration informieren.";
+  }
+  if (status === 404) {
+    return "Der Modellanbieter kennt das eingestellte Modell nicht. Bitte die Administration informieren.";
+  }
+
+  if (status === 429 || /429|rate.?limit|too many requests/i.test(meldung)) {
     return "Der Modellanbieter ist derzeit ausgelastet. Bitte in einem Moment erneut versuchen.";
   }
 

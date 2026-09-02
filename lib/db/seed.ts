@@ -1,10 +1,10 @@
 import { eq } from "drizzle-orm";
-import { MODELL_UMSTELLUNG } from "../models";
+import { MODELL_UMSTELLUNG, STANDARD_MODELLE } from "../models";
 import { getDb } from "./index";
-import { plans, sizeClasses } from "./schema";
+import { models, plans, sizeClasses } from "./schema";
 
 /**
- * Stammdaten: die vier Groessenklassen und die vier Plaene.
+ * Stammdaten: die vier Groessenklassen, die vier Plaene und der Modellkatalog.
  *
  * Bewusst `onConflictDoNothing`: der Seed legt den Anfangszustand an, danach
  * gehoeren die Werte dem Admin. Ein erneuter Aufruf darf seine Anpassungen
@@ -108,6 +108,25 @@ export async function seedStammdaten(): Promise<void> {
   // Groessenklassen zuerst: die Plaene verweisen darauf.
   await db.insert(sizeClasses).values([...GROESSENKLASSEN]).onConflictDoNothing();
   await db.insert(plans).values([...PLAENE]).onConflictDoNothing();
+
+  // Der Modellkatalog beginnt mit den drei Modellen, mit denen die Anwendung
+  // bisher fest lief. Danach pflegt ihn der Admin; Preise und Aktiv-Marke, die
+  // er geaendert hat, bleiben durch onConflictDoNothing erhalten.
+  await db
+    .insert(models)
+    .values(
+      STANDARD_MODELLE.map((modell) => ({
+        id: modell.id,
+        provider: modell.provider,
+        label: modell.label,
+        inputPerMillion: modell.inputPerMillion,
+        outputPerMillion: modell.outputPerMillion,
+        cacheReadPerMillion: modell.cacheReadPerMillion,
+        enabled: modell.enabled,
+        sortOrder: modell.sortOrder,
+      })),
+    )
+    .onConflictDoNothing();
 
   // Bestehende Plaene behalten durch onConflictDoNothing ihre Modellkennung.
   // Anthropic ist im AI-Gateway-Free-Tier gesperrt — ohne diese Umstellung
