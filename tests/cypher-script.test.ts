@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { splitStatements } from "@/lib/cypher-script";
+import { istSchemaStatement, splitStatements, statementsZumImport } from "@/lib/cypher-script";
 import { ValidationError } from "@/lib/errors";
 import { prepareReadOnlyCypher } from "@/lib/graphstore";
 
@@ -27,6 +27,47 @@ describe("splitStatements", () => {
   it("lehnt leere Skripte und offene Strings ab", () => {
     expect(() => splitStatements("// nur Kommentar")).toThrow(ValidationError);
     expect(() => splitStatements("CREATE (n {t: 'offen})")).toThrow(ValidationError);
+  });
+});
+
+describe("istSchemaStatement", () => {
+  it("erkennt Neo4j-Constraints und -Indexe, laesst Datensaetze stehen", () => {
+    expect(
+      istSchemaStatement(
+        "CREATE CONSTRAINT film_titel IF NOT EXISTS FOR (f:Film) REQUIRE f.titel IS UNIQUE",
+      ),
+    ).toBe(true);
+    expect(istSchemaStatement("CREATE CONSTRAINT ON (f:Film) ASSERT f.titel IS UNIQUE")).toBe(true);
+    expect(istSchemaStatement("DROP CONSTRAINT film_titel IF EXISTS")).toBe(true);
+    expect(
+      istSchemaStatement("CREATE INDEX film_titel IF NOT EXISTS FOR (f:Film) ON (f.titel)"),
+    ).toBe(true);
+    expect(istSchemaStatement("CREATE RANGE INDEX jahr FOR (f:Film) ON (f.jahr)")).toBe(true);
+    expect(istSchemaStatement("CREATE UNIQUE (a)-[:KENNT]->(b)")).toBe(false);
+    expect(istSchemaStatement("CREATE (n:Constraint {name: 'x'})")).toBe(false);
+    expect(istSchemaStatement("MERGE (f:Film {titel: 'Dune'})")).toBe(false);
+  });
+});
+
+describe("statementsZumImport", () => {
+  it("entfernt Schema-Statements und behaelt CREATE/MERGE", () => {
+    const statements = statementsZumImport(`
+      CREATE CONSTRAINT film_titel IF NOT EXISTS FOR (f:Film) REQUIRE f.titel IS UNIQUE;
+      CREATE (f:Film {titel: 'Dune'});
+      MERGE (r:Regie {name: 'Villeneuve'});
+    `);
+    expect(statements).toEqual([
+      "CREATE (f:Film {titel: 'Dune'})",
+      "MERGE (r:Regie {name: 'Villeneuve'})",
+    ]);
+  });
+
+  it("lehnt Skripte ab, die nur aus Schema-Statements bestehen", () => {
+    expect(() =>
+      statementsZumImport(
+        "CREATE CONSTRAINT film_titel IF NOT EXISTS FOR (f:Film) REQUIRE f.titel IS UNIQUE;",
+      ),
+    ).toThrow(/keine CREATE-\/MERGE-Statements/);
   });
 });
 

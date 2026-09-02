@@ -77,7 +77,8 @@ const TEXTE: Record<CollectionKind, Texte> = {
     titel: "Graph aus Cypher-Skript aufbauen",
     hinweis:
       "Ein Skript mit CREATE-/MERGE-Statements (Neo4j-Stil, durch Semikolon getrennt) " +
-      "wird in den Graphen dieser Sammlung eingespielt. Mehrere Skripte ergaenzen sich. " +
+      "wird in den Graphen dieser Sammlung eingespielt. CREATE CONSTRAINT und CREATE INDEX " +
+      "werden uebersprungen — FalkorDB kennt sie nicht als Cypher. Mehrere Skripte ergaenzen sich. " +
       "Fuers Kontingent zaehlen 3.000 Zeichen als eine Seite.",
     grenze: `Endungen ${KIND_EXTENSIONS.graph.join(", ")} · max. 5 MB und 5.000 Statements je Datei`,
     leer: "Noch kein Skript. Die KI kann in dieser Sammlung derzeit kein Cypher ausfuehren.",

@@ -4,10 +4,41 @@ import { ValidationError } from "./errors";
  * Zerlegt ein Cypher-Skript (Neo4j-Stil, Statements durch `;` getrennt) in
  * einzelne Statements. Semikolons in String-Literalen und Kommentare werden
  * beruecksichtigt.
+ *
+ * Neo4j-Exporte beginnen oft mit CREATE CONSTRAINT / CREATE INDEX. FalkorDB
+ * legt Constraints nur per GRAPH.CONSTRAINT an, nicht als Cypher — solche
+ * Schema-Statements werden deshalb vor dem Import entfernt.
  */
 
 export const CYPHER_MAX_BYTES = 5 * 1024 * 1024;
 export const CYPHER_MAX_STATEMENTS = 5_000;
+
+/**
+ * CREATE/DROP CONSTRAINT und CREATE/DROP INDEX samt Neo4j-Varianten
+ * (RANGE/TEXT/POINT/FULLTEXT/LOOKUP/VECTOR, IF NOT EXISTS, benannte Constraints).
+ * CREATE UNIQUE (a)-[:R]->(b) und CREATE (n:Constraint) bleiben Daten.
+ */
+const SCHEMA_STATEMENT =
+  /^(?:CREATE|DROP)\s+(?:(?:UNIQUE|RANGE|TEXT|POINT|FULLTEXT|LOOKUP|VECTOR)\s+)*(?:CONSTRAINT|INDEX)\b/i;
+
+export function istSchemaStatement(statement: string): boolean {
+  return SCHEMA_STATEMENT.test(statement.trim());
+}
+
+/**
+ * Statements, die FalkorDB als Cypher ausfuehren kann: Schema-DDL von Neo4j
+ * wird weggelassen. Ein Skript nur aus Constraints/Indexen ist kein Graph.
+ */
+export function statementsZumImport(script: string): string[] {
+  const daten = splitStatements(script).filter((satz) => !istSchemaStatement(satz));
+  if (daten.length === 0) {
+    throw new ValidationError(
+      "Das Cypher-Skript enthaelt keine CREATE-/MERGE-Statements fuer Knoten oder Kanten. " +
+        "Schema-Befehle wie CREATE CONSTRAINT und CREATE INDEX versteht FalkorDB nicht als Cypher.",
+    );
+  }
+  return daten;
+}
 
 export function splitStatements(script: string): string[] {
   if (script.length > CYPHER_MAX_BYTES) {
