@@ -85,20 +85,25 @@ export async function ladeKeyStatus(): Promise<KeyStatusUebersicht> {
   const zeilen = await ladeKeyZeilen();
   const status: KeyStatusUebersicht = {};
 
-  for (const zeile of zeilen) {
-    if (!(KEY_ANBIETER as readonly string[]).includes(zeile.provider)) continue;
-    let lesbar = true;
-    try {
-      await decryptSecret(zeile.encrypted, geheimnis());
-    } catch {
-      lesbar = false;
-    }
+  const bekannt = zeilen.filter((zeile) =>
+    (KEY_ANBIETER as readonly string[]).includes(zeile.provider),
+  );
+  const lesbarkeit = await Promise.all(
+    bekannt.map((zeile) =>
+      decryptSecret(zeile.encrypted, geheimnis()).then(
+        () => true,
+        () => false,
+      ),
+    ),
+  );
+
+  bekannt.forEach((zeile, index) => {
     status[zeile.provider] = {
       masked: zeile.masked,
       updatedAt: zeile.updatedAt.toISOString(),
-      lesbar,
+      lesbar: lesbarkeit[index],
     };
-  }
+  });
 
   return status;
 }

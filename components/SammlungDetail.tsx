@@ -3,7 +3,9 @@
 import { upload } from "@vercel/blob/client";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useOptimistic, useRef, useState, useTransition } from "react";
+import { aktualisiereSammlungAktion } from "@/app/sammlungen/actions";
+import { useBestaetigung } from "@/components/BestaetigungsDialog";
 import SchemaCard from "@/components/SchemaCard";
 import {
   KIND_EXTENSIONS,
@@ -146,6 +148,34 @@ export default function SammlungDetail({ sammlung, dokumente, preset }: Eigensch
   const [bestaetigung, setBestaetigung] = useState("");
   const [loeschtSammlung, setLoeschtSammlung] = useState(false);
   const [bearbeitet, setBearbeitet] = useState(false);
+  const { bestaetige, dialog } = useBestaetigung();
+
+  // Name und Beschreibung sofort so zeigen, wie sie gespeichert werden; die
+  // Action bringt die Seite danach ohnehin frisch mit. Scheitert sie, faellt
+  // useOptimistic am Ende der Transition von selbst auf die Props zurueck.
+  const [angaben, zeigeAngabenSofort] = useOptimistic(
+    { name: sammlung.name, description: sammlung.description },
+    (_bisher, neu: { name: string; description: string }) => neu,
+  );
+  const [speichertAngaben, starteSpeichern] = useTransition();
+
+  function speichereAngaben(name: string, beschreibung: string) {
+    setFehler(null);
+    setBearbeitet(false);
+    starteSpeichern(async () => {
+      zeigeAngabenSofort({ name, description: beschreibung });
+      try {
+        const ergebnis = await aktualisiereSammlungAktion(sammlung.id, { name, beschreibung });
+        if (!ergebnis.ok) {
+          setFehler(ergebnis.fehler);
+          setBearbeitet(true);
+        }
+      } catch (error) {
+        setFehler(error instanceof Error ? error.message : "Unbekannter Fehler.");
+        setBearbeitet(true);
+      }
+    });
+  }
 
   const laufendeAbfrage = useRef(false);
 
@@ -295,7 +325,12 @@ export default function SammlungDetail({ sammlung, dokumente, preset }: Eigensch
   }
 
   async function loescheDokument(dokument: DocumentRecord) {
-    if (!window.confirm(`"${dokument.filename}" aus der Sammlung entfernen?`)) return;
+    const ja = await bestaetige({
+      titel: `"${dokument.filename}" entfernen?`,
+      text: `Das Dokument verschwindet samt seiner ${einheit} aus der Sammlung. Die Datei laesst sich danach erneut hochladen.`,
+      bestaetigen: "Entfernen",
+    });
+    if (!ja) return;
     setFehler(null);
 
     try {
@@ -350,31 +385,33 @@ export default function SammlungDetail({ sammlung, dokumente, preset }: Eigensch
       {fehler && <div className="meldung">{fehler}</div>}
 
       <p className="brotkrume">
-        <Link href="/sammlungen">Sammlungen</Link> · {sammlung.name}
+        <Link href="/sammlungen">Sammlungen</Link> · {angaben.name}
       </p>
 
       <div className="karte">
         <h1 className="karte-titel">
-          {sammlung.name} <span className="marke">{klasse.id}</span>
+          {angaben.name} <span className="marke">{klasse.id}</span>
           <span className={`typ-marke typ-${kind}`}>{KIND_LABEL[kind]}</span>
         </h1>
 
         {bearbeitet ? (
           <Angaben
-            sammlung={sammlung}
-            onFertig={() => {
-              setBearbeitet(false);
-              router.refresh();
-            }}
-            onFehler={setFehler}
+            name={angaben.name}
+            beschreibung={angaben.description}
+            onSpeichern={speichereAngaben}
+            onAbbrechen={() => setBearbeitet(false)}
           />
         ) : (
           <>
             <p className="hinweis-text" style={{ marginBottom: 10 }}>
-              {sammlung.description || "Keine Beschreibung hinterlegt."}
+              {angaben.description || "Keine Beschreibung hinterlegt."}
             </p>
-            <button className="knopf-schlicht" onClick={() => setBearbeitet(true)}>
-              Name und Beschreibung aendern
+            <button
+              className="knopf-schlicht"
+              disabled={speichertAngaben}
+              onClick={() => setBearbeitet(true)}
+            >
+              {speichertAngaben ? "Wird gespeichert …" : "Name und Beschreibung aendern"}
             </button>
           </>
         )}
@@ -557,6 +594,8 @@ export default function SammlungDetail({ sammlung, dokumente, preset }: Eigensch
           {loeschtSammlung ? "Wird geloescht …" : "Sammlung unwiderruflich loeschen"}
         </button>
       </div>
+
+      {dialog}
     </>
   );
 }
@@ -583,39 +622,23 @@ function Zustand({ dokument, fertig }: { dokument: DocumentRecord; fertig: strin
   );
 }
 
+/**
+ * Formular fuer Name und Beschreibung. Speichern uebernimmt der Aufrufer —
+ * er schliesst das Formular sofort und zeigt die Werte optimistisch an.
+ */
 function Angaben({
-  sammlung,
-  onFertig,
-  onFehler,
+  name: anfangsName,
+  beschreibung: anfangsBeschreibung,
+  onSpeichern,
+  onAbbrechen,
 }: {
-  sammlung: SammlungMitKlasse;
-  onFertig: () => void;
-  onFehler: (meldung: string) => void;
+  name: string;
+  beschreibung: string;
+  onSpeichern: (name: string, beschreibung: string) => void;
+  onAbbrechen: () => void;
 }) {
-  const [name, setName] = useState(sammlung.name);
-  const [beschreibung, setBeschreibung] = useState(sammlung.description);
-  const [speichert, setSpeichert] = useState(false);
-
-  async function speichere() {
-    setSpeichert(true);
-
-    try {
-      const antwort = await fetch(`/api/collections/${sammlung.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, beschreibung }),
-      });
-
-      const daten = await antwort.json().catch(() => ({}));
-      if (!antwort.ok) throw new Error(daten.error ?? `Status ${antwort.status}`);
-
-      onFertig();
-    } catch (error) {
-      onFehler(error instanceof Error ? error.message : "Unbekannter Fehler.");
-    } finally {
-      setSpeichert(false);
-    }
-  }
+  const [name, setName] = useState(anfangsName);
+  const [beschreibung, setBeschreibung] = useState(anfangsBeschreibung);
 
   return (
     <div style={{ marginTop: 12 }}>
@@ -647,10 +670,14 @@ function Angaben({
       </div>
 
       <div className="knopfzeile">
-        <button className="knopf" disabled={speichert} onClick={() => void speichere()}>
+        <button
+          className="knopf"
+          disabled={name.trim().length === 0}
+          onClick={() => onSpeichern(name, beschreibung)}
+        >
           Speichern
         </button>
-        <button className="knopf knopf-sekundaer" onClick={onFertig}>
+        <button className="knopf knopf-sekundaer" onClick={onAbbrechen}>
           Abbrechen
         </button>
       </div>

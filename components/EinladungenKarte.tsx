@@ -1,8 +1,9 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
+import { useBestaetigung } from "@/components/BestaetigungsDialog";
 import type { PlanMitKlasse } from "@/lib/admin";
+import type { AktionsErgebnis } from "@/lib/aktionen";
 import type { Einladung } from "@/lib/einladungen";
 
 /**
@@ -19,53 +20,48 @@ type Eigenschaften = {
   einladungen: Einladung[] | null;
   plaene: PlanMitKlasse[];
   gesperrt: boolean;
-  sende: (
-    pfad: string,
-    methode: "PUT" | "PATCH" | "DELETE",
-    koerper?: unknown,
-  ) => Promise<boolean>;
+  /** Die Action liefert die Einladung samt Link — die Karte zeigt ihn danach an. */
+  onEinladen: (email: string, planId: string) => Promise<AktionsErgebnis<Einladung>>;
+  onWiderrufen: (id: string) => Promise<boolean>;
 };
 
-export default function EinladungenKarte({ einladungen, plaene, gesperrt, sende }: Eigenschaften) {
-  const router = useRouter();
-  const [aktualisiert, starte] = useTransition();
+export default function EinladungenKarte({
+  einladungen,
+  plaene,
+  gesperrt,
+  onEinladen,
+  onWiderrufen,
+}: Eigenschaften) {
+  const [sendet, starte] = useTransition();
+  const { bestaetige, dialog } = useBestaetigung();
 
   const standard = plaene.find((plan) => plan.isDefault)?.id ?? plaene[0]?.id ?? "";
   const [email, setEmail] = useState("");
   const [planId, setPlanId] = useState(standard);
-  const [sendet, setSendet] = useState(false);
   const [fehler, setFehler] = useState<string | null>(null);
   const [verschickt, setVerschickt] = useState<Einladung | null>(null);
 
-  const beschaeftigt = gesperrt || sendet || aktualisiert;
+  const beschaeftigt = gesperrt || sendet;
 
-  async function einladen() {
-    setSendet(true);
+  function einladen() {
     setFehler(null);
     setVerschickt(null);
 
-    try {
-      const antwort = await fetch("/api/admin/einladungen", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, planId }),
-      });
-      const daten = (await antwort.json().catch(() => ({}))) as {
-        einladung?: Einladung;
-        error?: string;
-      };
-      if (!antwort.ok || !daten.einladung) {
-        throw new Error(daten.error ?? `Status ${antwort.status}`);
+    // Die Action bringt die neu gerenderte Liste gleich mit; die Transition
+    // haelt `sendet`, bis beides eingespielt ist.
+    starte(async () => {
+      try {
+        const ergebnis = await onEinladen(email, planId);
+        if (!ergebnis.ok) {
+          setFehler(ergebnis.fehler);
+          return;
+        }
+        setVerschickt(ergebnis.daten);
+        setEmail("");
+      } catch (error) {
+        setFehler(error instanceof Error ? error.message : "Unbekannter Fehler.");
       }
-
-      setVerschickt(daten.einladung);
-      setEmail("");
-      starte(() => router.refresh());
-    } catch (error) {
-      setFehler(error instanceof Error ? error.message : "Unbekannter Fehler.");
-    } finally {
-      setSendet(false);
-    }
+    });
   }
 
   function planLabel(id: string | null): string {
@@ -93,7 +89,7 @@ export default function EinladungenKarte({ einladungen, plaene, gesperrt, sende 
         style={{ alignItems: "center", marginBottom: 14 }}
         onSubmit={(e) => {
           e.preventDefault();
-          void einladen();
+          einladen();
         }}
       >
         <input
@@ -171,13 +167,13 @@ export default function EinladungenKarte({ einladungen, plaene, gesperrt, sende 
                     <button
                       className="knopf-schlicht"
                       disabled={beschaeftigt}
-                      onClick={() => {
-                        if (window.confirm(`Einladung an ${einladung.email} widerrufen?`)) {
-                          void sende(
-                            `/api/admin/einladungen/${encodeURIComponent(einladung.id)}`,
-                            "DELETE",
-                          );
-                        }
+                      onClick={async () => {
+                        const ja = await bestaetige({
+                          titel: `Einladung an ${einladung.email} widerrufen?`,
+                          text: "Der Link aus der E-Mail wird damit unbrauchbar. Eine neue Einladung laesst sich jederzeit verschicken.",
+                          bestaetigen: "Widerrufen",
+                        });
+                        if (ja) void onWiderrufen(einladung.id);
                       }}
                     >
                       Widerrufen
@@ -197,6 +193,8 @@ export default function EinladungenKarte({ einladungen, plaene, gesperrt, sende 
           </table>
         </div>
       )}
+
+      {dialog}
     </div>
   );
 }

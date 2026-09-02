@@ -162,12 +162,12 @@ export async function aktualisiereSammlung(
   collectionId: string,
   eingabe: { name: unknown; beschreibung: unknown },
 ): Promise<void> {
-  // Wirft, wenn die Sammlung nicht dem Nutzer gehoert.
-  await ladeSammlung(userId, collectionId);
-
   const { name, beschreibung } = pruefeSammlungsText(eingabe.name, eingabe.beschreibung);
 
-  await getDb()
+  // Eigentum und Aenderung in einem Statement: Die Bedingung auf userId
+  // ersetzt das vorherige Lesen, RETURNING verraet, ob eine Zeile getroffen
+  // wurde. Spart einen Datenbank-Roundtrip je Speichern.
+  const [geaendert] = await getDb()
     .update(collections)
     .set({
       name,
@@ -177,7 +177,10 @@ export async function aktualisiereSammlung(
       descriptionSource: "user",
       updatedAt: new Date(),
     })
-    .where(and(eq(collections.id, collectionId), eq(collections.userId, userId)));
+    .where(and(eq(collections.id, collectionId), eq(collections.userId, userId)))
+    .returning({ id: collections.id });
+
+  if (!geaendert) throw new NotFoundError("Die Sammlung");
 }
 
 /**

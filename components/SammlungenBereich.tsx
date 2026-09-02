@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
+import { erstelleSammlungAktion } from "@/app/sammlungen/actions";
 import {
   COLLECTION_KINDS,
   KIND_DESCRIPTION,
@@ -37,31 +37,29 @@ export default function SammlungenBereich({
   graphVerfuegbar,
   plan,
 }: Eigenschaften) {
-  const router = useRouter();
   const [laueft, starte] = useTransition();
   const [formularOffen, setFormularOffen] = useState(false);
   const [fehler, setFehler] = useState<string | null>(null);
 
   const voll = sammlungen.length >= plan.maxCollections;
 
-  async function anlegen(eingabe: NeueSammlung) {
+  // Ein Roundtrip: Die Action legt an und bringt die neu gerenderte Liste
+  // gleich mit. `laueft` deckt genau diese eine Fahrt ab.
+  function anlegen(eingabe: NeueSammlung) {
     setFehler(null);
 
-    try {
-      const antwort = await fetch("/api/collections", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(eingabe),
-      });
-
-      const daten = await antwort.json().catch(() => ({}));
-      if (!antwort.ok) throw new Error(daten.error ?? `Status ${antwort.status}`);
-
-      setFormularOffen(false);
-      starte(() => router.refresh());
-    } catch (error) {
-      setFehler(error instanceof Error ? error.message : "Unbekannter Fehler.");
-    }
+    starte(async () => {
+      try {
+        const ergebnis = await erstelleSammlungAktion(eingabe);
+        if (!ergebnis.ok) {
+          setFehler(ergebnis.fehler);
+          return;
+        }
+        setFormularOffen(false);
+      } catch (error) {
+        setFehler(error instanceof Error ? error.message : "Unbekannter Fehler.");
+      }
+    });
   }
 
   return (
@@ -174,7 +172,7 @@ function Anlegeformular({
   graphVerfuegbar: boolean;
   gesperrt: boolean;
   onAbbrechen: () => void;
-  onAnlegen: (eingabe: NeueSammlung) => Promise<void>;
+  onAnlegen: (eingabe: NeueSammlung) => void;
 }) {
   const [name, setName] = useState("");
   const [beschreibung, setBeschreibung] = useState("");
@@ -327,11 +325,9 @@ function Anlegeformular({
         <button
           className="knopf"
           disabled={!bereit}
-          onClick={() =>
-            void onAnlegen({ name, beschreibung, kind, preset, sizeClassId })
-          }
+          onClick={() => onAnlegen({ name, beschreibung, kind, preset, sizeClassId })}
         >
-          Sammlung anlegen
+          {gesperrt ? "Wird angelegt …" : "Sammlung anlegen"}
         </button>
         <button className="knopf knopf-sekundaer" onClick={onAbbrechen}>
           Abbrechen

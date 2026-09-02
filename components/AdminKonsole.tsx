@@ -1,15 +1,30 @@
 "use client";
 
-import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useOptimistic, useState, useTransition } from "react";
+import {
+  aendereNutzerAktion,
+  erstelleEinladungAktion,
+  loeschePlanAktion,
+  loescheModellAktion,
+  loescheProviderKeyAktion,
+  speichereGroessenklasseAktion,
+  speichereModellAktion,
+  speicherePlanAktion,
+  speichereProviderKeyAktion,
+  widerrufeEinladungAktion,
+} from "@/app/admin/actions";
+import { useBestaetigung } from "@/components/BestaetigungsDialog";
 import EinladungenKarte from "@/components/EinladungenKarte";
 import ModelleKarte from "@/components/ModelleKarte";
 import type {
   KatalogEintrag,
+  NutzerAenderung,
   NutzerSeite,
+  NutzerZeile,
   PlanMitKlasse,
   VerbrauchUebersicht,
 } from "@/lib/admin";
+import type { AktionsErgebnis } from "@/lib/aktionen";
 import type { SizeClass } from "@/lib/db/schema";
 import type { Einladung } from "@/lib/einladungen";
 import type { ModelInfo } from "@/lib/models";
@@ -18,10 +33,19 @@ import type { KeyStatusUebersicht } from "@/lib/provider-keys";
 /**
  * Administration: Groessenklassen, Plaene, KI-Modelle, Einladungen, Nutzer, Verbrauch.
  *
- * Bewusst tabellarisch und ohne Dialoge: Der Admin vergleicht hier Werte
- * zwischen den Klassen ("wie viel mehr ist L als M?"), und dafuer muessen sie
- * gleichzeitig sichtbar sein. Ein Bearbeitungsdialog wuerde genau das verdecken.
+ * Bewusst tabellarisch und ohne Bearbeitungsdialoge: Der Admin vergleicht hier
+ * Werte zwischen den Klassen ("wie viel mehr ist L als M?"), und dafuer muessen
+ * sie gleichzeitig sichtbar sein. Ein Bearbeitungsdialog wuerde genau das
+ * verdecken. Nur Loeschbestaetigungen laufen ueber einen Dialog.
+ *
+ * Speichern geht ueber Server Actions (app/admin/actions.ts): Ein Roundtrip
+ * schreibt und liefert die neu gerenderte Seite zurueck. Frueher waren es zwei
+ * — fetch gegen die API, dann router.refresh() — und dazwischen stand die
+ * Konsole eine Sekunde lang gesperrt.
  */
+
+/** Fuehrt eine Action aus und liefert true bei Erfolg — Karten schliessen damit ihre Formulare. */
+export type Ausfuehren = <T>(aktion: () => Promise<AktionsErgebnis<T>>) => Promise<boolean>;
 
 const EIN_MB = 1024 * 1024;
 
@@ -53,37 +77,30 @@ export default function AdminKonsole({
   einladungen,
   suche,
 }: Eigenschaften) {
-  const router = useRouter();
   const [laueft, starte] = useTransition();
   const [fehler, setFehler] = useState<string | null>(null);
   const [hinweis, setHinweis] = useState<string | null>(null);
 
-  async function sende(
-    pfad: string,
-    methode: "PUT" | "PATCH" | "DELETE",
-    koerper?: unknown,
-  ): Promise<boolean> {
+  // Innerhalb der Transition, damit React das mitgelieferte RSC-Payload als
+  // Teil derselben Aktualisierung einspielt und `laueft` genau den einen
+  // Roundtrip abdeckt.
+  const fuehreAus: Ausfuehren = (aktion) => {
     setFehler(null);
     setHinweis(null);
-
-    try {
-      const antwort = await fetch(pfad, {
-        method: methode,
-        headers: koerper ? { "Content-Type": "application/json" } : undefined,
-        body: koerper ? JSON.stringify(koerper) : undefined,
+    return new Promise((loese) => {
+      starte(async () => {
+        try {
+          const ergebnis = await aktion();
+          if (ergebnis.ok) setHinweis("Gespeichert.");
+          else setFehler(ergebnis.fehler);
+          loese(ergebnis.ok);
+        } catch (error) {
+          setFehler(error instanceof Error ? error.message : "Unbekannter Fehler.");
+          loese(false);
+        }
       });
-
-      const daten = await antwort.json().catch(() => ({}));
-      if (!antwort.ok) throw new Error(daten.error ?? `Status ${antwort.status}`);
-
-      setHinweis("Gespeichert.");
-      starte(() => router.refresh());
-      return true;
-    } catch (error) {
-      setFehler(error instanceof Error ? error.message : "Unbekannter Fehler.");
-      return false;
-    }
-  }
+    });
+  };
 
   return (
     <>
@@ -95,7 +112,7 @@ export default function AdminKonsole({
       <GroessenklassenKarte
         klassen={groessenklassen}
         gesperrt={laueft}
-        onSpeichern={(werte) => sende("/api/admin/size-classes", "PUT", werte)}
+        onSpeichern={(werte) => fuehreAus(() => speichereGroessenklasseAktion(werte))}
       />
 
       <PlaeneKarte
@@ -103,10 +120,8 @@ export default function AdminKonsole({
         klassen={groessenklassen}
         modelle={modelle}
         gesperrt={laueft}
-        onSpeichern={(werte) => sende("/api/admin/plans", "PUT", werte)}
-        onLoeschen={(id) =>
-          sende(`/api/admin/plans?id=${encodeURIComponent(id)}`, "DELETE")
-        }
+        onSpeichern={(werte) => fuehreAus(() => speicherePlanAktion(werte))}
+        onLoeschen={(id) => fuehreAus(() => loeschePlanAktion(id))}
       />
 
       <ModelleKarte
@@ -114,17 +129,27 @@ export default function AdminKonsole({
         keyStatus={keyStatus}
         secretKonfiguriert={secretKonfiguriert}
         gesperrt={laueft}
-        sende={sende}
+        onKeySpeichern={(provider, key) =>
+          fuehreAus(() => speichereProviderKeyAktion({ provider, key }))
+        }
+        onKeyLoeschen={(provider) => fuehreAus(() => loescheProviderKeyAktion(provider))}
+        onModellSpeichern={(werte) => fuehreAus(() => speichereModellAktion(werte))}
+        onModellLoeschen={(id) => fuehreAus(() => loescheModellAktion(id))}
       />
 
-      <EinladungenKarte einladungen={einladungen} plaene={plaene} gesperrt={laueft} sende={sende} />
+      <EinladungenKarte
+        einladungen={einladungen}
+        plaene={plaene}
+        gesperrt={laueft}
+        onEinladen={(email, planId) => erstelleEinladungAktion({ email, planId })}
+        onWiderrufen={(id) => fuehreAus(() => widerrufeEinladungAktion(id))}
+      />
 
       <NutzerKarte
         seite={nutzer}
         plaene={plaene}
         suche={suche}
-        gesperrt={laueft}
-        onAendern={(werte) => sende("/api/admin/users", "PATCH", werte)}
+        onAendern={(werte) => fuehreAus(() => aendereNutzerAktion(werte))}
       />
 
       <VielnutzerKarte verbrauch={verbrauch} />
@@ -425,6 +450,7 @@ function PlaeneKarte({
 }) {
   const [entwuerfe, setEntwuerfe] = useState<Record<string, PlanFormular>>({});
   const [neuer, setNeuer] = useState<PlanFormular | null>(null);
+  const { bestaetige, dialog } = useBestaetigung();
 
   function aendere(id: string, teil: Partial<PlanFormular>) {
     setEntwuerfe((bisher) => {
@@ -532,10 +558,13 @@ function PlaeneKarte({
                     <button
                       className="knopf-schlicht"
                       disabled={gesperrt || plan.isDefault}
-                      onClick={() => {
-                        if (window.confirm(`Plan "${plan.id}" loeschen?`)) {
-                          void onLoeschen(plan.id);
-                        }
+                      onClick={async () => {
+                        const ja = await bestaetige({
+                          titel: `Plan "${plan.id}" loeschen?`,
+                          text: "Der Plan wird entfernt. Nutzer, die ihn noch haben, muessen vorher einen anderen Plan bekommen.",
+                          bestaetigen: "Loeschen",
+                        });
+                        if (ja) void onLoeschen(plan.id);
                       }}
                     >
                       Loeschen
@@ -634,6 +663,8 @@ function PlaeneKarte({
           Weiterer Plan
         </button>
       )}
+
+      {dialog}
     </div>
   );
 }
@@ -644,20 +675,41 @@ function NutzerKarte({
   seite,
   plaene,
   suche,
-  gesperrt,
   onAendern,
 }: {
   seite: NutzerSeite;
   plaene: PlanMitKlasse[];
   suche: string;
-  gesperrt: boolean;
-  onAendern: (werte: {
-    clerkUserId: string;
-    planId?: string;
-    isAdmin?: boolean;
-  }) => Promise<boolean>;
+  onAendern: (werte: NutzerAenderung) => Promise<boolean>;
 }) {
   const [begriff, setBegriff] = useState(suche);
+  const [, starte] = useTransition();
+
+  // Select und Checkbox sind aus den Props gesteuert. Ohne diesen Schritt
+  // spraengen sie nach dem Klick auf den alten Wert zurueck, bis die Antwort
+  // da ist. useOptimistic zeigt den neuen Wert sofort und faellt nach Ende der
+  // Transition von selbst auf die Props zurueck — bei Erfolg tragen die den
+  // Wert dann selbst, bei einem Fehler steht wieder der alte da.
+  const [zeilen, zeigeSofort] = useOptimistic(
+    seite.zeilen,
+    (bisher: NutzerZeile[], aenderung: NutzerAenderung) =>
+      bisher.map((zeile) =>
+        zeile.clerkUserId === aenderung.clerkUserId
+          ? {
+              ...zeile,
+              ...(aenderung.planId !== undefined ? { planId: aenderung.planId } : {}),
+              ...(aenderung.isAdmin !== undefined ? { isAdmin: aenderung.isAdmin } : {}),
+            }
+          : zeile,
+      ),
+  );
+
+  function aendere(aenderung: NutzerAenderung) {
+    starte(async () => {
+      zeigeSofort(aenderung);
+      await onAendern(aenderung);
+    });
+  }
 
   function suchen(neuerBegriff: string) {
     const ziel = new URL(window.location.href);
@@ -711,7 +763,7 @@ function NutzerKarte({
             </tr>
           </thead>
           <tbody>
-            {seite.zeilen.map((zeile) => (
+            {zeilen.map((zeile) => (
               <tr key={zeile.clerkUserId}>
                 <td>
                   <div>{zeile.email ?? "(keine E-Mail)"}</div>
@@ -720,12 +772,8 @@ function NutzerKarte({
                 <td>
                   <select
                     value={zeile.planId}
-                    disabled={gesperrt}
                     onChange={(e) =>
-                      void onAendern({
-                        clerkUserId: zeile.clerkUserId,
-                        planId: e.target.value,
-                      })
+                      aendere({ clerkUserId: zeile.clerkUserId, planId: e.target.value })
                     }
                   >
                     {plaene.map((plan) => (
@@ -742,20 +790,16 @@ function NutzerKarte({
                   <input
                     type="checkbox"
                     checked={zeile.isAdmin}
-                    disabled={gesperrt}
                     aria-label={`Administrationsrechte fuer ${zeile.email ?? zeile.clerkUserId}`}
                     onChange={(e) =>
-                      void onAendern({
-                        clerkUserId: zeile.clerkUserId,
-                        isAdmin: e.target.checked,
-                      })
+                      aendere({ clerkUserId: zeile.clerkUserId, isAdmin: e.target.checked })
                     }
                   />
                 </td>
               </tr>
             ))}
 
-            {seite.zeilen.length === 0 && (
+            {zeilen.length === 0 && (
               <tr>
                 <td colSpan={6} className="hinweis-text" style={{ margin: 0 }}>
                   Keine Konten gefunden.

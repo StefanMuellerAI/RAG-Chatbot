@@ -1,6 +1,6 @@
-import { errorResponse, readJson } from "@/lib/api";
+import { errorResponse } from "@/lib/api";
 import { requireKontext } from "@/lib/auth/user";
-import { aktualisiereSammlung, ladeSammlung, loescheSammlung } from "@/lib/collections";
+import { ladeSammlung, loescheSammlung } from "@/lib/collections";
 import { ladeDokumenteDerSammlung } from "@/lib/documents";
 
 export const runtime = "nodejs";
@@ -15,8 +15,10 @@ export async function GET(_request: Request, kontextparameter: Kontextparameter)
     const kontext = await requireKontext();
     const { id } = await kontextparameter.params;
 
-    const sammlung = await ladeSammlung(kontext.userId, id);
-    const dokumente = await ladeDokumenteDerSammlung(kontext.userId, id);
+    const [sammlung, dokumente] = await Promise.all([
+      ladeSammlung(kontext.userId, id),
+      ladeDokumenteDerSammlung(kontext.userId, id),
+    ]);
 
     return Response.json({ sammlung, dokumente });
   } catch (error) {
@@ -24,19 +26,9 @@ export async function GET(_request: Request, kontextparameter: Kontextparameter)
   }
 }
 
-export async function PATCH(request: Request, kontextparameter: Kontextparameter) {
-  try {
-    const kontext = await requireKontext();
-    const { id } = await kontextparameter.params;
-    const eingabe = await readJson<{ name: unknown; beschreibung: unknown }>(request);
-
-    await aktualisiereSammlung(kontext.userId, id, eingabe);
-    return Response.json({ ok: true });
-  } catch (error) {
-    return errorResponse(error);
-  }
-}
-
+// Name und Beschreibung aendern laeuft ueber die Server Action in
+// app/sammlungen/actions.ts. Das Loeschen bleibt hier: Es dauert lange und
+// fuehrt danach auf die Uebersicht, ein Neu-Rendern dieser Seite braucht es nicht.
 export async function DELETE(_request: Request, kontextparameter: Kontextparameter) {
   try {
     const kontext = await requireKontext();

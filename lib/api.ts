@@ -2,6 +2,12 @@ import { NotAdminError, NotSignedInError } from "./auth/user";
 import { MissingConfigError } from "./env";
 import { NotFoundError, QuotaError, RateLimitError, ValidationError } from "./errors";
 
+export type Fehlerbild = {
+  status: number;
+  body: { error: string; code: string } & Record<string, unknown>;
+  headers?: Record<string, string>;
+};
+
 /**
  * Einheitliche Abbildung von Fehlern auf HTTP-Antworten.
  *
@@ -9,10 +15,22 @@ import { NotFoundError, QuotaError, RateLimitError, ValidationError } from "./er
  * der Client am Ende Statuscodes vorfindet, auf die er nicht vorbereitet ist.
  */
 export function errorResponse(error: unknown, userId?: string): Response {
-  const { status, body, headers } = zuordnen(error);
+  const bild = beschreibeFehler(error);
+  protokolliere(bild, error, "einer API-Route", userId);
+  return Response.json(bild.body, { status: bild.status, headers: bild.headers });
+}
 
+/**
+ * Fehler ins Log — dieselbe Regel fuer Routen und Server Actions.
+ */
+export function protokolliere(
+  { status, body }: Fehlerbild,
+  error: unknown,
+  ort: string,
+  userId?: string,
+): void {
   if (status >= 500) {
-    console.error("Unerwarteter Fehler in einer API-Route:", error);
+    console.error(`Unerwarteter Fehler in ${ort}:`, error);
   } else if (status === 429 || status === 409) {
     /**
      * Abweisungen strukturiert loggen.
@@ -32,15 +50,14 @@ export function errorResponse(error: unknown, userId?: string): Response {
       }),
     );
   }
-
-  return Response.json(body, { status, headers });
 }
 
-function zuordnen(error: unknown): {
-  status: number;
-  body: Record<string, unknown>;
-  headers?: Record<string, string>;
-} {
+/**
+ * Ordnet einen Fehler Status, Meldung und Code zu. Exportiert, damit Server
+ * Actions dieselben Meldungen liefern wie die Routen — nur als Rueckgabewert
+ * statt als HTTP-Antwort.
+ */
+export function beschreibeFehler(error: unknown): Fehlerbild {
   if (error instanceof NotSignedInError) {
     return { status: 401, body: { error: error.message, code: "nicht_angemeldet" } };
   }

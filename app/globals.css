@@ -389,6 +389,38 @@ td select {
   background: var(--grau-100);
 }
 
+/* --- Bestaetigungsdialog --------------------------------------------------- */
+
+/* Natives <dialog>; showModal() legt es in die Top-Layer, ::backdrop dunkelt ab. */
+.dialog {
+  border: 1px solid var(--grau-300);
+  border-top: 4px solid var(--rot);
+  padding: 0;
+  width: min(440px, calc(100vw - 32px));
+  background: var(--weiss);
+  color: var(--schwarz);
+  font-family: var(--schrift);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+}
+
+.dialog::backdrop {
+  background: rgba(26, 26, 26, 0.45);
+}
+
+.dialog-inhalt {
+  padding: 22px;
+}
+
+.dialog-inhalt p {
+  margin: 0 0 18px;
+  font-size: 14px;
+  color: var(--grau-600);
+}
+
+.dialog-aktionen {
+  justify-content: flex-end;
+}
+
 /* --- Chat-Historie -------------------------------------------------------- */
 
 .chat-bereich {
