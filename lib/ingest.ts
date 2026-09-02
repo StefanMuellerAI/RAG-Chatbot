@@ -6,7 +6,7 @@ import {
 } from "./collection-kinds";
 import { setzeSammlungsSchema } from "./collections";
 import { parseCsv, tableNameFromFilename } from "./csv";
-import { splitStatements } from "./cypher-script";
+import { statementsZumImport } from "./cypher-script";
 import type { DocumentRecord } from "./db/schema";
 import { leseDatei } from "./documents";
 import { ValidationError } from "./errors";
@@ -175,7 +175,7 @@ function skriptAusPuffer(buffer: ArrayBuffer): string {
  */
 export async function ingestGraph(eingabe: GraphEingabe): Promise<IngestErgebnis> {
   const skript = skriptAusPuffer(eingabe.buffer);
-  const statements = splitStatements(skript);
+  const statements = statementsZumImport(skript);
   const pageCount = seitenAusZeichen(skript.length);
 
   eingabe.vorSchreiben?.(pageCount);
@@ -217,7 +217,7 @@ export async function rebuildGraph(
     if (!strom) continue;
 
     const skript = skriptAusPuffer(await new Response(strom).arrayBuffer());
-    await importStatements(collectionId, splitStatements(skript));
+    await importStatements(collectionId, statementsZumImport(skript));
     eingespielt += 1;
   }
 

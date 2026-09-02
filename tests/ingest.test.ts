@@ -296,6 +296,39 @@ describe("Graph-Sammlung", () => {
     );
   });
 
+  it("ueberspringt Neo4j-CREATE-CONSTRAINT und spielt die Datensaetze ein", async () => {
+    const ergebnis = await ingestGraph({
+      userId: USER,
+      collectionId: SAMMLUNG,
+      buffer: enc(
+        "CREATE CONSTRAINT film_titel IF NOT EXISTS FOR (f:Film) REQUIRE f.titel IS UNIQUE;\n" +
+          "CREATE (f:Film {titel: 'Dune'});\n",
+      ),
+      uebrige: [],
+    });
+
+    expect(ergebnis.units).toBe(1);
+    expect(graphstore.importStatements).toHaveBeenCalledWith(SAMMLUNG, [
+      "CREATE (f:Film {titel: 'Dune'})",
+    ]);
+  });
+
+  it("lehnt ein Skript ab, das nur aus CREATE CONSTRAINT besteht", async () => {
+    await expect(
+      ingestGraph({
+        userId: USER,
+        collectionId: SAMMLUNG,
+        buffer: enc(
+          "CREATE CONSTRAINT film_titel IF NOT EXISTS FOR (f:Film) REQUIRE f.titel IS UNIQUE;",
+        ),
+        uebrige: [],
+      }),
+    ).rejects.toThrow(/keine CREATE-\/MERGE-Statements/);
+
+    expect(graphstore.importStatements).not.toHaveBeenCalled();
+    expect(graphstore.deleteGraph).not.toHaveBeenCalled();
+  });
+
   it("baut den Graphen nach einem fehlgeschlagenen Import aus den uebrigen Skripten neu auf", async () => {
     const aeltester = satz({
       id: "s1",
