@@ -39,7 +39,7 @@ export default async function ChatSeite() {
         </p>
       )}
 
-      <ChatBereich />
+      <ChatBereich typen={[...new Set(sammlungen.map((sammlung) => sammlung.kind))]} />
     </>
   );
 }

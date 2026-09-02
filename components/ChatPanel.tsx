@@ -3,11 +3,14 @@
 import { useEffect, useRef, useState } from "react";
 import MarkdownText from "@/components/MarkdownText";
 import type { Nachricht, Quelle } from "@/lib/chatVerlauf";
+import type { CollectionKind } from "@/lib/collection-kinds";
 import type { ToolStep } from "@/lib/tools-types";
 
 type Eigenschaften = {
   nachrichten: Nachricht[];
   laeuft: boolean;
+  /** Sammlungstypen des Nutzers, nur fuer den Hinweistext im leeren Chat. */
+  typen?: CollectionKind[];
   onSenden: (frage: string) => void;
 };
 
@@ -15,7 +18,7 @@ type Eigenschaften = {
  * Reine Darstellung des Gespraechs. Verlauf und Streaming liegen bei
  * `ChatBereich` — diese Komponente zeigt nur, was sie bekommt.
  */
-export default function ChatPanel({ nachrichten, laeuft, onSenden }: Eigenschaften) {
+export default function ChatPanel({ nachrichten, laeuft, typen = [], onSenden }: Eigenschaften) {
   const [eingabe, setEingabe] = useState("");
   const endeRef = useRef<HTMLDivElement>(null);
 
@@ -41,10 +44,7 @@ export default function ChatPanel({ nachrichten, laeuft, onSenden }: Eigenschaft
           {nachrichten.length === 0 && (
             <div className="chat-leer">
               <h2>Was moechten Sie wissen?</h2>
-              <p>
-                Fragen Sie etwas zu den eingepflegten Dokumenten. Jede Antwort nennt die
-                Fundstellen, auf die sie sich stuetzt.
-              </p>
+              <p>{leertext(typen)}</p>
             </div>
           )}
 
@@ -118,6 +118,39 @@ export default function ChatPanel({ nachrichten, laeuft, onSenden }: Eigenschaft
       </div>
     </div>
   );
+}
+
+/**
+ * Hinweistext im leeren Chat, passend zu den Sammlungstypen des Nutzers.
+ *
+ * Wer nur Dokumente hat, liest den bisherigen Satz. Sobald Tabellen oder
+ * Graphen dabei sind, soll klar sein, dass die KI nicht nur sucht, sondern
+ * Abfragen schreibt — und dass diese unter der Antwort zu sehen sind.
+ */
+function leertext(typen: CollectionKind[]): string {
+  const hatSql = typen.includes("sql");
+  const hatGraph = typen.includes("graph");
+  if (!hatSql && !hatGraph) {
+    return (
+      "Fragen Sie etwas zu den eingepflegten Dokumenten. Jede Antwort nennt die " +
+      "Fundstellen, auf die sie sich stuetzt."
+    );
+  }
+
+  const hatVector = typen.includes("vector");
+  const dinge = aufzaehlung([hatVector && "Dokumenten", hatSql && "Tabellen", hatGraph && "Graphen"]);
+  const wege = aufzaehlung([hatVector && "Suche", hatSql && "SQL", hatGraph && "Cypher"]);
+  return (
+    `Stellen Sie Fragen zu Ihren ${dinge}; die KI waehlt ${wege} und zeigt jede ` +
+    "Abfrage unter der Antwort."
+  );
+}
+
+/** "A", "A und B", "A, B und C" — nur die wahren Eintraege. */
+function aufzaehlung(eintraege: (string | false)[]): string {
+  const woerter = eintraege.filter((eintrag): eintrag is string => Boolean(eintrag));
+  if (woerter.length <= 1) return woerter.join("");
+  return `${woerter.slice(0, -1).join(", ")} und ${woerter[woerter.length - 1]}`;
 }
 
 /**

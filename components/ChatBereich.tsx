@@ -16,13 +16,17 @@ import {
   type Nachricht,
   type Quelle,
 } from "@/lib/chatVerlauf";
+import type { CollectionKind } from "@/lib/collection-kinds";
 import type { ToolStep } from "@/lib/tools-types";
 
 /**
  * Haelt Seitenleiste und Chatfenster zusammen: liest den Verlauf vom Server,
  * kennt den aktiven Chat und fuehrt die laufende Antwort.
+ *
+ * `typen` sind die Sammlungstypen des Nutzers — nur fuer den Hinweistext im
+ * leeren Chat; die Wahl der Werkzeuge trifft der Server.
  */
-export default function ChatBereich() {
+export default function ChatBereich({ typen = [] }: { typen?: CollectionKind[] }) {
   const { chats, aktiveId, geladen, fehler } = useSyncExternalStore(
     subscribe,
     getSnapshot,
@@ -215,7 +219,7 @@ export default function ChatBereich() {
             {fehler}
           </div>
         )}
-        <ChatPanel nachrichten={angezeigt} laeuft={laeuft} onSenden={senden} />
+        <ChatPanel nachrichten={angezeigt} laeuft={laeuft} typen={typen} onSenden={senden} />
       </div>
     </div>
   );
