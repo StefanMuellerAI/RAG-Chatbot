@@ -1,5 +1,6 @@
 import { gateway, tool } from "ai";
 import { z } from "zod";
+import { KIND_LABEL, type CollectionSchema } from "./collection-kinds";
 import { ladeEigeneSammlungen, type SammlungMitKlasse } from "./collections";
 import { findPreset } from "./presets";
 import { MIN_SCORE, sucheInSammlung, type Hit } from "./vector";
@@ -33,26 +34,129 @@ Zur Suche:
 - Findest du nichts, versuche hoechstens einen weiteren Aufruf mit anderen Begriffen. Danach sage, dass die Sammlungen dazu nichts enthalten.`;
 
 /**
+ * Zusatzregeln fuer Tabellen- und Graph-Sammlungen.
+ *
+ * Sie kommen nur in die Systemanweisung, wenn der Nutzer solche Sammlungen
+ * hat: Fuer reine Dokumentensammlungen bleibt der Text oben unveraendert, und
+ * das Modell wird nicht mit Regeln fuer Werkzeuge belastet, die es gar nicht
+ * bekommt.
+ */
+const REGELN_SQL = `Zu Tabellen-Sammlungen (Werkzeug sql_ausfuehren):
+- SQLite-Dialekt. Genau ein SELECT (auch mit WITH), ohne Semikolon, ohne weitere Statements.
+- Aggregiere und filtere in SQL, statt viele Zeilen zu lesen. Ergebnisse sind auf 200 Zeilen begrenzt — bei mehr Daten gruppieren oder LIMIT und ORDER BY einsetzen.
+- Nutze Tabellen- und Spaltennamen exakt so, wie sie im Katalog stehen (in doppelten Anfuehrungszeichen, falls noetig).`;
+
+const REGELN_CYPHER = `Zu Graph-Sammlungen (Werkzeug cypher_ausfuehren):
+- openCypher, wie FalkorDB es versteht. Genau ein MATCH/RETURN-Statement, ohne Semikolon.
+- Wenn du Kanten zaehlst, referenziere den Beziehungs-Alias in RETURN oder WHERE.
+- Keine Aggregation innerhalb von Pattern-Comprehensions.
+- Keine Schreiboperationen (CREATE, MERGE, SET, DELETE, REMOVE).`;
+
+const REGELN_WERKZEUGE = `Zu SQL und Cypher allgemein:
+- Schlaegt eine Abfrage fehl, lies die Fehlermeldung, korrigiere die Abfrage und versuche es hoechstens zweimal erneut.
+- Nenne in der Antwort, aus welcher Sammlung die Zahlen stammen. Gib sie so wieder, wie sie zurueckkamen; die Belegnummern in eckigen Klammern gelten nur fuer Auszuege aus Dokumenten.`;
+
+/**
+ * Systemanweisung fuer den Werkzeugmodus, abhaengig davon, welche Typen von
+ * Sammlungen im Spiel sind. Ohne sql- oder graph-Sammlungen ist das Ergebnis
+ * exakt SYSTEM_ANWEISUNG.
+ */
+export function baueSystemanweisung(sammlungen: SammlungMitKlasse[]): string {
+  const hatSql = sammlungen.some((sammlung) => sammlung.kind === "sql");
+  const hatGraph = sammlungen.some((sammlung) => sammlung.kind === "graph");
+
+  if (!hatSql && !hatGraph) return SYSTEM_ANWEISUNG;
+
+  const bloecke = [SYSTEM_ANWEISUNG];
+  if (sammlungen.length === 1) {
+    bloecke.push(
+      "Es gibt genau eine Sammlung; sie ist im Werkzeug fest eingestellt, eine ID ist nicht noetig.",
+    );
+  }
+  if (hatSql) bloecke.push(REGELN_SQL);
+  if (hatGraph) bloecke.push(REGELN_CYPHER);
+  bloecke.push(REGELN_WERKZEUGE);
+
+  return bloecke.join("\n\n");
+}
+
+/** Mehr Schema-Text je Sammlung wuerde den Prompt bei vielen Tabellen sprengen. */
+const SCHEMA_MAX_ZEICHEN = 1_500;
+
+/**
  * Katalog der Sammlungen fuer die Systemanweisung.
  *
  * Dieser Text entscheidet ueber die Qualitaet der Auswahl: Das Modell sieht
  * ausschliesslich Name und Beschreibung, nicht den Inhalt. Eine Sammlung ohne
  * Beschreibung ist fuer die Auswahl praktisch unsichtbar — deshalb wird sie
  * nach der ersten Ingestion automatisch vorgeschlagen.
+ *
+ * Tabellen- und Graph-Sammlungen bringen zusaetzlich ihr Schema mit: Ohne
+ * Tabellen, Spalten und Beispielwerte bzw. Labels und Beziehungstypen kann
+ * das Modell keine Abfrage formulieren, die trifft.
  */
 export function baueKatalog(sammlungen: SammlungMitKlasse[]): string {
   const zeilen = sammlungen.map((sammlung) => {
-    const preset = findPreset(sammlung.preset);
     const beschreibung = sammlung.description || "(keine Beschreibung hinterlegt)";
+    const kopf =
+      `- id: ${sammlung.id}\n` + `  Name: ${sammlung.name}\n` + `  Inhalt: ${beschreibung}\n`;
+
+    if (sammlung.kind === "vector") {
+      const preset = findPreset(sammlung.preset);
+      return kopf + `  Art: ${preset.label} · ${sammlung.documentCount} Dokumente`;
+    }
+
+    const werkzeug = sammlung.kind === "sql" ? "sql_ausfuehren" : "cypher_ausfuehren";
+    const schema = beschreibeSchema(sammlung.kind, sammlung.schema)
+      .map((zeile) => `  ${zeile}`)
+      .join("\n");
+
     return (
-      `- id: ${sammlung.id}\n` +
-      `  Name: ${sammlung.name}\n` +
-      `  Inhalt: ${beschreibung}\n` +
-      `  Art: ${preset.label} · ${sammlung.documentCount} Dokumente`
+      kopf +
+      `  Art: ${KIND_LABEL[sammlung.kind]} (Werkzeug ${werkzeug}) · ${sammlung.documentCount} Dateien\n` +
+      kuerze(schema, SCHEMA_MAX_ZEICHEN)
     );
   });
 
   return `Verfuegbare Sammlungen:\n\n${zeilen.join("\n")}`;
+}
+
+/** Schema einer Tabellen- oder Graph-Sammlung als Zeilen fuer den Katalog. */
+function beschreibeSchema(
+  kind: "sql" | "graph",
+  schema: CollectionSchema | null | undefined,
+): string[] {
+  if (kind === "sql") {
+    if (!schema || schema.kind !== "sql" || schema.tables.length === 0) {
+      return ["Noch keine Tabellen."];
+    }
+    return schema.tables.map((tabelle) => {
+      const spalten = tabelle.columns
+        .map((spalte) => {
+          const beispiele = tabelle.samples?.[spalte.name];
+          return (
+            `${spalte.name} ${spalte.type}` +
+            (beispiele && beispiele.length > 0 ? ` (z. B. ${beispiele.join(", ")})` : "")
+          );
+        })
+        .join("; ");
+      return `Tabelle "${tabelle.name}" (${tabelle.rows.toLocaleString("de-DE")} Zeilen): ${spalten}`;
+    });
+  }
+
+  if (!schema || schema.kind !== "graph" || schema.nodes === 0) {
+    return ["Graph ist noch leer."];
+  }
+  return [
+    `Graph: ${schema.nodes.toLocaleString("de-DE")} Knoten, ${schema.relationships.toLocaleString("de-DE")} Kanten`,
+    `Labels: ${schema.labels.join(", ") || "—"}`,
+    `Beziehungstypen: ${schema.relationshipTypes.join(", ") || "—"}`,
+    `Eigenschaften: ${schema.propertyKeys.join(", ") || "—"}`,
+  ];
+}
+
+function kuerze(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max).trimEnd()}…` : text;
 }
 
 /** Eine Fundstelle, wie sie unter der Antwort erscheint. */

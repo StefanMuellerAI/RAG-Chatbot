@@ -1,9 +1,13 @@
 import { errorResponse, readJson } from "@/lib/api";
 import { requireKontext } from "@/lib/auth/user";
+import type { CollectionKind } from "@/lib/collection-kinds";
 import { ladeSammlung } from "@/lib/collections";
+import { CSV_MAX_BYTES } from "@/lib/csv";
+import { CYPHER_MAX_BYTES } from "@/lib/cypher-script";
 import { blobPfad, ladeDokumenteDerSammlung, legeDokumentAn } from "@/lib/documents";
 import { ValidationError } from "@/lib/errors";
 import { UnsupportedFileError, detectKind } from "@/lib/extract";
+import { assertAllowedExtension } from "@/lib/ingest";
 import { pruefeNeuesDokument } from "@/lib/quota";
 
 export const runtime = "nodejs";
@@ -50,19 +54,25 @@ export async function POST(request: Request, kontextparameter: Kontextparameter)
       throw new ValidationError("Die Dateigroesse fehlt oder ist unplausibel.");
     }
 
-    // Format zuerst: eine .doc-Datei soll gar nicht erst hochgeladen werden,
-    // nur um danach an der Extraktion zu scheitern.
-    try {
-      detectKind(dateiname, eingabe.contentType);
-    } catch (error) {
-      if (error instanceof UnsupportedFileError) {
-        throw new ValidationError(error.message);
+    // Die Sammlung zuerst: Welche Formate zulaessig sind, haengt von ihrem Typ ab.
+    const sammlung = await ladeSammlung(kontext.userId, id);
+
+    // Format vor dem Kontingent: eine .doc-Datei soll gar nicht erst
+    // hochgeladen werden, nur um danach an der Extraktion zu scheitern.
+    assertAllowedExtension(sammlung.kind, dateiname);
+    if (sammlung.kind === "vector") {
+      try {
+        detectKind(dateiname, eingabe.contentType);
+      } catch (error) {
+        if (error instanceof UnsupportedFileError) {
+          throw new ValidationError(error.message);
+        }
+        throw error;
       }
-      throw error;
     }
 
-    const sammlung = await ladeSammlung(kontext.userId, id);
     pruefeNeuesDokument(sammlung, sammlung.sizeClass, groesse);
+    pruefeTypgrenze(sammlung.kind, groesse);
 
     const docId = crypto.randomUUID();
     const pfad = blobPfad(kontext.userId, id, docId, dateiname);
@@ -72,7 +82,9 @@ export async function POST(request: Request, kontextparameter: Kontextparameter)
       collectionId: id,
       userId: kontext.userId,
       filename: dateiname,
-      contentType: eingabe.contentType ?? "application/octet-stream",
+      // `||` statt `??`: ein leerer String vom Browser soll ebenfalls auf den
+      // Standardwert fallen und nicht als Inhaltstyp gespeichert werden.
+      contentType: eingabe.contentType || "application/octet-stream",
       blobPath: pfad,
       sizeBytes: groesse,
     });
@@ -80,6 +92,24 @@ export async function POST(request: Request, kontextparameter: Kontextparameter)
     return Response.json({ dokument, blobPfad: pfad }, { status: 201 });
   } catch (error) {
     return errorResponse(error);
+  }
+}
+
+/**
+ * Obergrenzen der Verarbeitung je Typ — zusaetzlich zur Dateigrenze der
+ * Groessenklasse. Eine 60-MB-CSV passt vielleicht in die Klasse, aber nicht
+ * in den Speicher, in dem sql.js sie zu einer Tabelle macht.
+ */
+function pruefeTypgrenze(kind: CollectionKind, groesse: number): void {
+  const grenze =
+    kind === "sql" ? CSV_MAX_BYTES : kind === "graph" ? CYPHER_MAX_BYTES : undefined;
+
+  if (grenze !== undefined && groesse > grenze) {
+    throw new ValidationError(
+      `Die Datei ist ${(groesse / (1024 * 1024)).toFixed(1)} MB gross; ` +
+        `${kind === "sql" ? "CSV-Dateien" : "Cypher-Skripte"} duerfen hoechstens ` +
+        `${grenze / (1024 * 1024)} MB haben.`,
+    );
   }
 }
 

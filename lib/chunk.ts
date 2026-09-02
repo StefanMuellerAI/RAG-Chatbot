@@ -229,17 +229,33 @@ function findeSchnitt(
     if (marke > frueheGrenze) return { ende: marke, strukturell: true };
   }
 
-  const absatz = text.lastIndexOf("\n\n", hartesEnde);
-  if (absatz > frueheste) return { ende: absatz, strukturell: false };
+  // Nur im Fenster [frueheste, hartesEnde) suchen. `lastIndexOf` auf dem
+  // ganzen Text laeuft ohne Fundstelle bis zum Textanfang zurueck — bei
+  // grossen Tabellenblaettern ohne Absaetze wird das quadratisch.
+  const fenster = text.slice(frueheste, hartesEnde);
 
+  const absatz = fenster.lastIndexOf("\n\n");
+  if (absatz >= 0) return { ende: frueheste + absatz, strukturell: false };
+
+  // Unter den Satzzeichen gewinnt der spaeteste Treffer, nicht die erste
+  // Marke der Liste — sonst schnitte ein frueher Punkt vor einem spaeten
+  // Fragezeichen den Abschnitt unnoetig kurz.
+  let satz = -1;
   for (const marke of [". ", ".\n", "! ", "? ", "; "]) {
-    const stelle = text.lastIndexOf(marke, hartesEnde);
-    if (stelle > frueheste) return { ende: stelle + marke.length, strukturell: false };
+    const stelle = fenster.lastIndexOf(marke);
+    if (stelle >= 0) satz = Math.max(satz, stelle + marke.length);
   }
+  if (satz >= 0) return { ende: frueheste + satz, strukturell: false };
 
-  const leerzeichen = text.lastIndexOf(" ", hartesEnde);
+  // Zeilenumbruch vor Leerzeichen: Tabellenzeilen aus XLSX-Blaettern, die im
+  // Fliesstext-Preset landen, enthalten selten Satzzeichen, sollen aber nicht
+  // mitten in der Zeile getrennt werden.
+  const zeile = fenster.lastIndexOf("\n");
+  if (zeile >= 0) return { ende: frueheste + zeile + 1, strukturell: false };
+
+  const leerzeichen = fenster.lastIndexOf(" ");
   return {
-    ende: leerzeichen > frueheste ? leerzeichen : hartesEnde,
+    ende: leerzeichen >= 0 ? frueheste + leerzeichen : hartesEnde,
     strukturell: false,
   };
 }

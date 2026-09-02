@@ -6,17 +6,24 @@ import { setzeAutoBeschreibung } from "@/lib/collections";
 import { getDb } from "@/lib/db";
 import { collections, documents, sizeClasses } from "@/lib/db/schema";
 import type { PresetId } from "@/lib/db/schema";
+import type { CollectionKind } from "@/lib/collection-kinds";
 import {
+  entferneDokumentSatz,
+  ladeDokumenteDerSammlung,
   leseDatei,
+  loescheDatei,
   schliesseDokumentAb,
   setzeDokumentStatus,
 } from "@/lib/documents";
-import { QuotaError, fehlerMeldung } from "@/lib/errors";
+import { MissingConfigError } from "@/lib/env";
+import { QuotaError, ValidationError, fehlerMeldung } from "@/lib/errors";
 import { extractBlocks } from "@/lib/extract";
 import { chunkBlocks } from "@/lib/chunk";
+import { ersetzteDokumente, ingestGraph, ingestSql } from "@/lib/ingest";
 import { DEFAULT_MODEL_ID } from "@/lib/models";
 import { findPreset } from "@/lib/presets";
 import { pruefeSeitenzahl } from "@/lib/quota";
+import { erwirbSperre, gibSperreFrei, sperrSchluessel } from "@/lib/ratelimit";
 import { upsertChunks } from "@/lib/vector";
 import { verbucheIngestion } from "@/lib/verbrauch";
 
@@ -41,6 +48,8 @@ type Vorbereitung = {
   contentType: string;
   blobPath: string;
   preset: PresetId;
+  /** Sammlungstyp — entscheidet, welcher Verarbeitungsschritt laeuft. */
+  kind: CollectionKind;
   /** Grenzen der Groessenklasse — die Seitenpruefung braucht sie im Schritt. */
   sizeClassId: string;
   maxPagesPerDocument: number;
@@ -87,6 +96,7 @@ async function bereiteVor(docId: string): Promise<Vorbereitung> {
     contentType: zeile.dokument.contentType,
     blobPath: zeile.dokument.blobPath,
     preset: zeile.sammlung.preset,
+    kind: zeile.sammlung.kind,
     sizeClassId: zeile.klasse.id,
     maxPagesPerDocument: zeile.klasse.maxPagesPerDocument,
     maxTotalPages: zeile.klasse.maxTotalPages,
@@ -187,6 +197,224 @@ async function extrahiereUndSchreibe(
   return { seiten, abschnitte: abschnitte.length };
 }
 
+/** So lange darf ein Upload die SQLite-Datei bzw. den Graphen einer Sammlung hoechstens sperren. */
+const SPERRE_SEKUNDEN = 120;
+
+/**
+ * Seitenpruefung fuer die geschaetzten Seiten einer CSV oder eines Skripts.
+ *
+ * Als Rueckruf, weil lib/ingest.ts sie zwischen Lesen und Schreiben aufruft:
+ * Die Zeilenzahl steht erst nach dem Lesen fest, und geschrieben werden darf
+ * erst, wenn sie durch ist.
+ */
+function seitenpruefung(
+  vorbereitung: Vorbereitung,
+  seitenBisher: number,
+): (seiten: number) => void {
+  return (seiten) => {
+    try {
+      pruefeSeitenzahl(
+        { name: vorbereitung.sammlungsName, pageCount: seitenBisher },
+        {
+          id: vorbereitung.sizeClassId,
+          maxPagesPerDocument: vorbereitung.maxPagesPerDocument,
+          maxTotalPages: vorbereitung.maxTotalPages,
+        },
+        seiten,
+      );
+    } catch (error) {
+      // Eine gerissene Grenze behebt sich durch Wiederholen nicht.
+      if (error instanceof QuotaError) throw new FatalError(error.message);
+      throw error;
+    }
+  };
+}
+
+/**
+ * Ordnet einen Fehler der Verarbeitung ein: Was sich durch Warten behebt,
+ * wird wiederholt; alles andere beendet den Ablauf mit der Meldung.
+ */
+function alsAblauffehler(error: unknown): never {
+  if (error instanceof FatalError || error instanceof RetryableError) throw error;
+
+  const meldung = fehlerMeldung(error);
+
+  // Ungueltige Eingaben und fehlende Konfiguration aendern sich nicht von selbst.
+  if (error instanceof ValidationError || error instanceof MissingConfigError) {
+    throw new FatalError(meldung);
+  }
+
+  if (/429|ueberlastet|rate limit|timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|Verbindung/i.test(meldung)) {
+    throw new RetryableError(meldung, { retryAfter: "30s" });
+  }
+
+  throw new FatalError(meldung);
+}
+
+async function ladePuffer(vorbereitung: Vorbereitung): Promise<ArrayBuffer> {
+  const strom = await leseDatei(vorbereitung.blobPath);
+  if (!strom) {
+    throw new FatalError(
+      "Die hochgeladene Datei wurde nicht gefunden. Bitte erneut hochladen.",
+    );
+  }
+  return new Response(strom).arrayBuffer();
+}
+
+/**
+ * CSV als Tabelle in die SQLite-Datei der Sammlung schreiben.
+ *
+ * Die Datei wird als Ganzes gelesen, veraendert und zurueckgeschrieben. Zwei
+ * Uploads in dieselbe Sammlung duerfen das nicht gleichzeitig tun — der zweite
+ * wuerde die Tabelle des ersten ueberschreiben. Deshalb die Sperre in Redis
+ * (SET NX EX): Ist sie belegt, wartet dieser Ablauf und versucht es erneut.
+ * Ohne Redis scheitert der Schritt mit klarer Meldung, statt ohne Sperre
+ * weiterzulaufen.
+ *
+ * Eine Datei je Tabelle: Ein frueherer Upload mit demselben Tabellennamen
+ * weicht — Datei und Satz — damit die Uebersicht nicht zwei Dateien fuer eine
+ * Tabelle zeigt und die Zaehler der Sammlung stimmen. Das geschieht innerhalb
+ * derselben Sperre und ist wiederholbar: Ein zweiter Durchlauf findet die
+ * Saetze nicht mehr vor.
+ */
+async function verarbeiteTabelle(
+  docId: string,
+  vorbereitung: Vorbereitung,
+): Promise<{ seiten: number; abschnitte: number }> {
+  "use step";
+
+  console.log(`[ingest ${docId}] CSV "${vorbereitung.filename}" als Tabelle`);
+
+  const schluessel = sperrSchluessel(vorbereitung.collectionId);
+  await sperreSammlung(schluessel, docId, "Tabellen", "eine andere Tabelle geschrieben");
+
+  try {
+    const vorhanden = await ladeDokumenteDerSammlung(
+      vorbereitung.userId,
+      vorbereitung.collectionId,
+    );
+    const ersetzt = ersetzteDokumente(vorhanden, vorbereitung.filename, docId);
+
+    // Die Seiten der ersetzten Datei zaehlen fuer die Pruefung nicht mehr mit —
+    // sie werden gleich zurueckgebucht.
+    const seitenBisher = Math.max(
+      vorbereitung.seitenBisher - ersetzt.reduce((summe, satz) => summe + satz.pageCount, 0),
+      0,
+    );
+
+    const ergebnis = await ingestSql({
+      userId: vorbereitung.userId,
+      collectionId: vorbereitung.collectionId,
+      buffer: await ladePuffer(vorbereitung),
+      filename: vorbereitung.filename,
+      vorSchreiben: seitenpruefung(vorbereitung, seitenBisher),
+    });
+
+    for (const satz of ersetzt) {
+      console.log(
+        `[ingest ${docId}] ersetzt "${satz.filename}" (Tabelle ${ergebnis.replacedTable})`,
+      );
+      await loescheDatei(satz.blobPath).catch(() => {
+        // Die Datei kann bereits fehlen; der Satz muss trotzdem weichen.
+      });
+      await entferneDokumentSatz(satz);
+    }
+
+    console.log(
+      `[ingest ${docId}] ${ergebnis.units} Zeilen in Tabelle ${ergebnis.replacedTable}, ` +
+        `${ergebnis.pageCount} Seiten gerechnet`,
+    );
+
+    return { seiten: ergebnis.pageCount, abschnitte: ergebnis.units };
+  } catch (error) {
+    alsAblauffehler(error);
+  } finally {
+    await gibSperreFrei(schluessel, docId);
+  }
+}
+
+/**
+ * Sperre je Sammlung fuer Schreibvorgaenge, die sich nicht ueberlappen duerfen.
+ *
+ * Ist sie belegt, wartet dieser Ablauf und versucht es erneut. Ohne Redis
+ * scheitert der Schritt mit klarer Meldung, statt ohne Sperre weiterzulaufen —
+ * eine Sperre, die nicht sperrt, waere schlimmer als ein Abbruch.
+ */
+async function sperreSammlung(
+  schluessel: string,
+  inhaber: string,
+  typ: string,
+  wasLaeuft: string,
+): Promise<void> {
+  let gesperrt: boolean;
+  try {
+    gesperrt = await erwirbSperre(schluessel, inhaber, SPERRE_SEKUNDEN);
+  } catch (error) {
+    if (error instanceof MissingConfigError) {
+      throw new FatalError(
+        `${typ}-Sammlungen brauchen Redis fuer die Schreibsperre. ${error.message}`,
+      );
+    }
+    throw new RetryableError(fehlerMeldung(error), { retryAfter: "30s" });
+  }
+
+  if (!gesperrt) {
+    throw new RetryableError(`In dieser Sammlung wird gerade ${wasLaeuft}.`, {
+      retryAfter: "15s",
+    });
+  }
+}
+
+/**
+ * Cypher-Skript in den Graphen der Sammlung einspielen.
+ *
+ * Schlaegt der Import fehl, baut lib/ingest.ts den Graphen aus den uebrigen
+ * fertigen Skripten neu auf, bevor der Fehler hier ankommt. Der Zustand ist
+ * danach derselbe wie vor dem Schritt — ein Wiederholen ist damit gefahrlos.
+ *
+ * Dieselbe Sperre wie bei Tabellen: Ein Neuaufbau (nach Fehler oder beim
+ * Loeschen eines Skripts) leert den Graphen und spielt die uebrigen Skripte
+ * neu ein. Liefe parallel ein Import, wuerde der Neuaufbau ihn wegraeumen —
+ * oder ihn als "uebrig" mitzaehlen, obwohl er noch nicht fertig ist.
+ */
+async function verarbeiteGraph(
+  docId: string,
+  vorbereitung: Vorbereitung,
+): Promise<{ seiten: number; abschnitte: number }> {
+  "use step";
+
+  console.log(`[ingest ${docId}] Cypher-Skript "${vorbereitung.filename}" in den Graphen`);
+
+  const schluessel = sperrSchluessel(vorbereitung.collectionId);
+  await sperreSammlung(schluessel, docId, "Graph", "ein anderes Skript eingespielt");
+
+  try {
+    const vorhanden = await ladeDokumenteDerSammlung(
+      vorbereitung.userId,
+      vorbereitung.collectionId,
+    );
+    const uebrige = vorhanden.filter((satz) => satz.id !== docId && satz.status === "fertig");
+
+    const ergebnis = await ingestGraph({
+      userId: vorbereitung.userId,
+      collectionId: vorbereitung.collectionId,
+      buffer: await ladePuffer(vorbereitung),
+      uebrige,
+      vorSchreiben: seitenpruefung(vorbereitung, vorbereitung.seitenBisher),
+    });
+
+    console.log(
+      `[ingest ${docId}] ${ergebnis.units} Statements, ${ergebnis.pageCount} Seiten gerechnet`,
+    );
+
+    return { seiten: ergebnis.pageCount, abschnitte: ergebnis.units };
+  } catch (error) {
+    alsAblauffehler(error);
+  } finally {
+    await gibSperreFrei(schluessel, docId);
+  }
+}
+
 async function schliesseAb(
   docId: string,
   vorbereitung: Vorbereitung,
@@ -274,7 +502,16 @@ export async function verarbeiteDokument(docId: string): Promise<void> {
 
   try {
     const vorbereitung = await bereiteVor(docId);
-    const ergebnis = await extrahiereUndSchreibe(docId, vorbereitung);
+
+    // Je Sammlungstyp ein eigener Schritt; der Weg fuer Dokumente bleibt, wie
+    // er war.
+    const ergebnis =
+      vorbereitung.kind === "sql"
+        ? await verarbeiteTabelle(docId, vorbereitung)
+        : vorbereitung.kind === "graph"
+          ? await verarbeiteGraph(docId, vorbereitung)
+          : await extrahiereUndSchreibe(docId, vorbereitung);
+
     await schliesseAb(docId, vorbereitung, ergebnis);
     await ergaenzeBeschreibung(vorbereitung.collectionId);
   } catch (error) {

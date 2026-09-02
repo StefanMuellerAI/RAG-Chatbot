@@ -93,6 +93,8 @@ function statisch(name: string): string | undefined {
       return nichtLeer(process.env.CRON_SECRET);
     case "GLOBAL_QUESTIONS_PER_MINUTE":
       return nichtLeer(process.env.GLOBAL_QUESTIONS_PER_MINUTE);
+    case "FALKORDB_URL":
+      return nichtLeer(process.env.FALKORDB_URL);
     default:
       return undefined;
   }
@@ -142,6 +144,14 @@ export function requireEnv<const T extends readonly string[]>(
 /** Liest eine optionale Variable, ohne zu werfen. */
 export function optionalEnv(name: string): string | undefined {
   return read(name);
+}
+
+/**
+ * Ist FalkorDB angebunden? Ohne FALKORDB_URL bleibt der Sammlungstyp "graph"
+ * deaktiviert — alles andere laeuft unveraendert weiter.
+ */
+export function graphConfigured(): boolean {
+  return read("FALKORDB_URL") !== undefined;
 }
 
 /**
@@ -230,6 +240,7 @@ const DIAGNOSE_KEYS = [
   "CLERK_SECRET_KEY",
   "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY",
   "CLERK_WEBHOOK_SIGNING_SECRET",
+  "FALKORDB_URL",
 ] as const;
 
 export type EnvDiagnose = {

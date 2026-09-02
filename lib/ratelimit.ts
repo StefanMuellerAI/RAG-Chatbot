@@ -208,6 +208,59 @@ export function kontextSchluessel(userId: string): string {
   return `wa:kontext:${userId}`;
 }
 
+// --- Sperren ------------------------------------------------------------------
+
+/**
+ * Kurzlebige Sperre je Ressource (SET NX EX).
+ *
+ * Gebraucht fuer die SQLite-Datei einer Tabellen-Sammlung: Sie wird als Ganzes
+ * gelesen, veraendert und zurueckgeschrieben. Zwei gleichzeitige Uploads in
+ * dieselbe Sammlung wuerden sich ohne Sperre gegenseitig ueberschreiben — der
+ * zweite Schreibvorgang liesse die Tabelle des ersten verschwinden.
+ *
+ * Anders als der Zwischenspeicher oben faellt diese Funktion NICHT still auf
+ * "ohne Redis" zurueck: Eine Sperre, die nicht sperrt, ist schlimmer als ein
+ * klarer Fehler. Fehlt Redis, wirft `requireEnv` eine MissingConfigError.
+ *
+ * @returns true, wenn die Sperre erworben wurde; false, wenn sie belegt ist.
+ */
+export async function erwirbSperre(
+  schluessel: string,
+  inhaber: string,
+  lebensdauerSekunden: number,
+): Promise<boolean> {
+  const ergebnis = await getRedis().set(schluessel, inhaber, {
+    nx: true,
+    ex: lebensdauerSekunden,
+  });
+  return ergebnis === "OK";
+}
+
+/**
+ * Gibt eine Sperre frei — aber nur die eigene.
+ *
+ * Vergleich und Loeschen in einem Skript, damit eine abgelaufene und
+ * inzwischen von jemand anderem erworbene Sperre nicht versehentlich
+ * freigegeben wird.
+ */
+export async function gibSperreFrei(schluessel: string, inhaber: string): Promise<void> {
+  try {
+    await getRedis().eval(
+      "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end return 0",
+      [schluessel],
+      [inhaber],
+    );
+  } catch (error) {
+    // Die Sperre verfaellt ohnehin nach ihrer Lebensdauer. Ein Fehler hier
+    // darf den bereits gelungenen Schreibvorgang nicht zum Fehler machen.
+    console.warn(`Sperre ${schluessel} konnte nicht freigegeben werden.`, error);
+  }
+}
+
+export function sperrSchluessel(collectionId: string): string {
+  return `wa:lock:${collectionId}`;
+}
+
 function tagesschluessel(): string {
   return new Date().toISOString().slice(0, 10);
 }

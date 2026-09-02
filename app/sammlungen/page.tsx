@@ -3,7 +3,7 @@ import NichtBereit from "@/components/NichtBereit";
 import SammlungenBereich from "@/components/SammlungenBereich";
 import { requireKontextFuerSeite } from "@/lib/auth/user";
 import { erlaubteGroessenklassen, ladeSammlungen } from "@/lib/collections";
-import { missingFor } from "@/lib/env";
+import { graphConfigured, missingFor } from "@/lib/env";
 import { PRESETS } from "@/lib/presets";
 
 export const dynamic = "force-dynamic";
@@ -26,6 +26,7 @@ export default async function SammlungenSeite() {
       sammlungen={sammlungen}
       klassen={klassen}
       presets={[...PRESETS]}
+      graphVerfuegbar={graphConfigured()}
       plan={{
         label: kontext.plan.label,
         maxCollections: kontext.plan.maxCollections,

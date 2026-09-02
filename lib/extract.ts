@@ -93,8 +93,12 @@ async function extractPdf(buffer: ArrayBuffer): Promise<Extraktion> {
   return { bloecke, seiten: text.length };
 }
 
-/** Zeichen, die einer Textseite entsprechen — fuer Formate ohne Seitenbegriff. */
-const ZEICHEN_JE_SEITE = 3_000;
+/**
+ * Zeichen, die einer Textseite entsprechen — fuer Formate ohne Seitenbegriff.
+ * Exportiert, weil Cypher-Skripte (lib/ingest.ts) nach demselben Mass
+ * geschaetzt werden.
+ */
+export const ZEICHEN_JE_SEITE = 3_000;
 
 async function extractDocx(buffer: ArrayBuffer): Promise<Extraktion> {
   const mammoth = (await import("mammoth")).default;
@@ -111,8 +115,8 @@ async function extractDocx(buffer: ArrayBuffer): Promise<Extraktion> {
   };
 }
 
-/** Tabellenzeilen, die einer Seite entsprechen. */
-const ZEILEN_JE_SEITE = 50;
+/** Tabellenzeilen, die einer Seite entsprechen. Gilt ebenso fuer CSV-Zeilen. */
+export const ZEILEN_JE_SEITE = 50;
 
 async function extractXlsx(buffer: ArrayBuffer): Promise<Extraktion> {
   const ExcelJS = (await import("exceljs")).default;

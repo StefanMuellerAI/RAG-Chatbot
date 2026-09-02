@@ -3,6 +3,7 @@ import { getDb } from "./db";
 import { chats, messages } from "./db/schema";
 import type { StoredSource } from "./db/schema";
 import { NotFoundError, ValidationError } from "./errors";
+import type { ToolStep } from "./tools-types";
 
 /**
  * Chat-Verlauf in Postgres.
@@ -24,8 +25,22 @@ export type VerlaufNachricht = {
   role: "user" | "assistant";
   content: string;
   sources?: StoredSource[];
+  /** Werkzeugaufrufe (Suche, SQL, Cypher), die zu dieser Antwort gefuehrt haben. */
+  steps?: ToolStep[];
   fehler?: boolean;
 };
+
+/**
+ * Hoechstens so viele Schritte je Nachricht. Die Vorschau je Schritt ist
+ * serverseitig auf 20 Zeilen begrenzt; die Zahl der Schritte begrenzt der
+ * Chat auf sechs — der Client koennte aber beliebig viele schicken.
+ */
+const MAX_SCHRITTE_JE_NACHRICHT = 12;
+
+function bereinigeSchritte(steps: unknown): ToolStep[] | null {
+  if (!Array.isArray(steps) || steps.length === 0) return null;
+  return steps.slice(0, MAX_SCHRITTE_JE_NACHRICHT) as ToolStep[];
+}
 
 export type VerlaufChat = {
   id: string;
@@ -67,6 +82,7 @@ export async function ladeNachrichten(
       role: messages.role,
       content: messages.content,
       sources: messages.sources,
+      steps: messages.steps,
       isError: messages.isError,
     })
     .from(messages)
@@ -77,6 +93,7 @@ export async function ladeNachrichten(
     role: zeile.role,
     content: zeile.content,
     ...(zeile.sources ? { sources: zeile.sources } : {}),
+    ...(zeile.steps && zeile.steps.length > 0 ? { steps: zeile.steps } : {}),
     ...(zeile.isError ? { fehler: true } : {}),
   }));
 }
@@ -129,6 +146,7 @@ export async function haengeNachrichtAn(
     role: nachricht.role,
     content: nachricht.content,
     sources: nachricht.sources ?? null,
+    steps: bereinigeSchritte(nachricht.steps),
     isError: nachricht.fehler ?? false,
   });
 

@@ -1,17 +1,28 @@
 # Wissensassistent — mandantenfähiger RAG-Chatbot
 
-Jeder Nutzer legt eigene Dokumentensammlungen an und stellt Fragen dazu. Die Antwort
-stützt sich ausschließlich auf seine Unterlagen und nennt ihre Fundstellen. Bei mehreren
-Sammlungen entscheidet das Modell selbst, wo es sucht.
+Jeder Nutzer legt eigene Sammlungen an und stellt Fragen dazu. Die Antwort stützt sich
+ausschließlich auf seine Unterlagen und nennt ihre Fundstellen. Bei mehreren Sammlungen
+entscheidet das Modell selbst, wo es sucht — und womit.
+
+Eine Sammlung hat einen von drei Typen (siehe [Drei Arten von Sammlungen](#drei-arten-von-sammlungen)):
+
+- **Dokumente** — PDF, DOCX und XLSX werden zerlegt und semantisch durchsucht; die
+  Antwort zitiert Fundstellen.
+- **Tabellen** — CSV-Dateien werden zu Tabellen einer SQLite-Datenbank; das Modell
+  schreibt SQL und rechnet mit den Zahlen statt sie zu schätzen.
+- **Graph** — Cypher-Skripte werden zu einem Graphen in FalkorDB; das Modell schreibt
+  Cypher für Fragen nach Beziehungen und Wegen.
 
 - **Anmeldung**: Clerk mit Registrierung, Nutzerkonten und Rollen
 - **Antworten**: Claude über das Vercel AI Gateway, Modell je Plan
 - **Vektorsuche**: Pinecone Serverless, ein Namespace je Sammlung, Embedding im Dienst
+- **Tabellen**: SQLite-Datei je Sammlung in Vercel Blob, abgefragt in-process mit sql.js
+- **Graphen**: FalkorDB, ein Graph je Sammlung (optional, über `FALKORDB_URL`)
 - **Datenbank**: Neon Postgres mit Drizzle
 - **Dateiablage**: Vercel Blob (privat, mandantenpräfigiert)
-- **Drosselung und Kontingente**: Upstash Redis
+- **Drosselung, Kontingente und Schreibsperren**: Upstash Redis
 - **Verarbeitung**: Vercel Workflow SDK
-- **Formate**: PDF, DOCX, XLSX
+- **Formate**: PDF, DOCX, XLSX · CSV · Cypher-Skripte
 - **Design**: in Anlehnung an stadt-koeln.de
 
 Ausgelegt auf rund 15.000 gleichzeitig aktive Nutzer. Was das konkret bedeutet und wo die
@@ -43,6 +54,12 @@ Wer Neon oder Redis über **Storage** im Dashboard anlegt, bekommt oft andere Na
 Aliase. Ohne Neon und ohne Redis bleibt der Chat gesperrt — Clerk, Blob und der
 Pinecone-Key allein reichen nicht. Nach dem Setzen der Variablen ist ein erneutes
 Deployment nötig.
+
+Redis ist außerdem Pflicht für **Tabellen- und Graph-Sammlungen**: Beide schreiben je
+Sammlung in *eine* Datei bzw. *einen* Graphen, und zwei gleichzeitige Uploads dürfen das
+nicht ungeordnet tun. Die Verarbeitung nimmt dafür eine Schreibsperre in Redis
+(`SET NX EX`). Fehlt Redis, bricht der Schritt mit einer klaren Meldung ab, statt ohne
+Sperre weiterzulaufen.
 
 Alle Variablen samt Zweck stehen in `.env.example`. Lokal:
 
@@ -93,11 +110,29 @@ setzen. Danach läuft die Rollenvergabe über die Nutzerliste im Admin-Bereich.
 update users set is_admin = true where email = 'ihre@adresse.de';
 ```
 
-### 6. Lokal starten
+### 6. FalkorDB anbinden (optional, nur für Graph-Sammlungen)
+
+Unter [app.falkordb.cloud](https://app.falkordb.cloud) eine Instanz anlegen — der
+Free-Tier reicht zum Ausprobieren (100 MB, von allen Graphen gemeinsam genutzt, ohne
+TLS) — und die Verbindung hinterlegen:
+
+```bash
+FALKORDB_URL=falkor://benutzer:passwort@host:port
+```
+
+Ohne diese Variable ist der Typ **Graph** beim Anlegen einer Sammlung ausgegraut;
+Dokumente und Tabellen funktionieren unabhängig davon. Die Anwendung baut die
+Verbindung erst im Request auf, ein fehlender Wert bricht also keinen Build.
+
+### 7. Lokal starten
 
 ```bash
 npm run dev
 ```
+
+Nach einem Deployment lohnt ein Aufruf von `GET /api/admin/diagnose` (als Admin
+angemeldet) — er meldet, ob sql.js samt WASM-Datei im Bundle liegt und ob FalkorDB
+konfiguriert ist; Einzelheiten unter [Betrieb](#betrieb).
 
 ---
 
@@ -107,28 +142,111 @@ npm run dev
 Antwort stehen die verwendeten Fundstellen mit Sammlung, Datei- und Seitenangabe,
 zugeklappt, damit sie den Verlauf nicht zuschieben.
 
-Bei mehreren Sammlungen wählt das Modell anhand von Name und Beschreibung selbst aus, wo
-es sucht, und darf mehrere auf einmal nehmen. Bei nur einer Sammlung entfällt dieser
-Schritt.
+Der Frageweg hängt davon ab, welche Sammlungen ein Nutzer hat:
 
-Findet die Suche nichts Passendes, wird das Modell gar nicht erst befragt — die App sagt
-dann, dass sie dazu nichts hat. Das ist Absicht: eine erfundene Antwort wäre schlimmer als
-keine.
+1. **Genau eine Dokumentensammlung** — Direktsuche wie bisher: Die Fundstellen werden
+   der Frage vorangestellt, ohne Werkzeugaufruf. Findet die Suche nichts Passendes, wird
+   das Modell gar nicht erst befragt — die App sagt dann, dass sie dazu nichts hat. Das
+   ist Absicht: eine erfundene Antwort wäre schlimmer als keine.
+2. **Genau eine Tabellen- oder Graph-Sammlung** — Werkzeugmodus mit fest gebundener
+   Sammlung und nur dem passenden Werkzeug (`sql_ausfuehren` bzw. `cypher_ausfuehren`).
+3. **Mehrere Sammlungen** — Werkzeugmodus mit den Werkzeugen der vorhandenen Typen. Das
+   Modell wählt anhand von Name, Beschreibung und Schema selbst aus, wo es sucht, und darf
+   mehrere Sammlungen auf einmal nehmen.
+
+Im Werkzeugmodus *muss* der erste Schritt ein Werkzeugaufruf sein — sonst könnte das
+Modell antworten, ohne eine Zeile gesehen zu haben. Danach darf es nachfassen: bis zu
+drei Schritte, wenn nur gesucht wird, bis zu sechs, sobald SQL oder Cypher im Spiel ist,
+damit eine am Schema gescheiterte Abfrage nach der Fehlermeldung korrigiert werden kann.
+
+Unter der Antwort steht bei SQL und Cypher ein Block **Abfragen**: je Schritt die
+Abfrage, die Sammlung, die Zeilenzahl und eine Vorschau der ersten Zeilen — bei Fehlern
+die Meldung. Die Abfrage ist dort der Beleg: Wer der Zahl nicht traut, liest die Abfrage.
+Die Schritte werden mit der Nachricht gespeichert (`messages.steps`) und erscheinen im
+Verlauf wieder.
+
+Zwei Eigenheiten des Werkzeugmodus, die man kennen sollte:
+
+- **Modellhebung.** Pläne mit Gemini 2.5 Flash Lite werden im Werkzeugmodus auf Gemini
+  2.5 Flash gehoben; alle anderen Modelle bleiben, wie der Plan sie vorgibt. Grund:
+  Flash Lite liefert nach einem Werkzeugergebnis regelmäßig leeren Text statt einer
+  Antwort ([vercel/ai#13017](https://github.com/vercel/ai/issues/13017)). Das kostet
+  je Token etwa das Drei- bis Sechsfache (Eingabe 0,10 → 0,30 $, Ausgabe 0,40 → 2,50 $
+  je Mio.). Verbucht wird das tatsächlich genutzte Modell, nicht das des Plans.
+- **Nachtrag bei leerem Abschlusstext.** Endet ein Lauf nach Werkzeugergebnissen ohne
+  ein Wort Antwort — auch dann, wenn die Schrittgrenze mitten in den Abfragen greift —,
+  folgt ein weiterer Modellaufruf mit dem bisherigen Verlauf und der Bitte, die
+  Ergebnisse zusammenzufassen; Werkzeuge sind dabei gesperrt. Beide Aufrufe landen in
+  einer Verbuchung.
 
 Antworten werden als Markdown dargestellt. Rohes HTML wird dabei bewusst **nicht**
 ausgeführt, sondern als Text angezeigt — der Antworttext ist über die hochgeladenen
 Dokumente beeinflussbar, und genau dort wäre sonst ein Einfallstor.
 
-**Sammlungen** (`/sammlungen`) — Anlegen, Dokumente einpflegen, entfernen. Beim Anlegen
-sind drei Angaben zu machen: Name, eine Beschreibung des Inhalts, und die Art der
-Unterlagen.
+**Sammlungen** (`/sammlungen`) — Anlegen, Dateien einpflegen, entfernen. Beim Anlegen
+sind vier Angaben zu machen: der Typ (Dokumente, Tabellen oder Graph), Name, eine
+Beschreibung des Inhalts, und bei Dokumentensammlungen die Art der Unterlagen. Der Typ
+lässt sich nachträglich nicht ändern.
 
 Die Beschreibung ist kein Zierfeld. Sie ist die Grundlage, auf der das Modell entscheidet,
 ob eine Sammlung zur Frage passt — eine Sammlung ohne Beschreibung ist dort praktisch
 unsichtbar. Wer keine hinterlegt, bekommt nach dem ersten Dokument einen Vorschlag.
 
+Tabellen- und Graph-Sammlungen zeigen in der Detailansicht ihr **Schema**: Tabellen mit
+Spalten, Typen, Zeilenzahl und Beispielwerten bzw. Labels, Beziehungstypen und
+Eigenschaften des Graphen. Dasselbe Schema bekommt das Modell in der Systemanweisung —
+ohne es könnte es keine Abfrage formulieren, die trifft.
+
 **Administration** (`/admin`) — nur mit Rolle. Größenklassen und Pläne bearbeiten, Nutzern
 Pläne zuweisen, Verbrauch einsehen.
+
+---
+
+## Drei Arten von Sammlungen
+
+| | Dokumente (`vector`) | Tabellen (`sql`) | Graph (`graph`) |
+|---|---|---|---|
+| **Eingabe** | PDF, DOCX, XLSX | CSV mit Kopfzeile; `;` oder `,` als Trenner, Dezimalkomma wird erkannt | `.cypher`, `.cql`, `.txt` mit `CREATE`/`MERGE`-Statements, durch `;` getrennt |
+| **Speicher** | Pinecone-Namespace je Sammlung | SQLite-Datei in Blob (`files/<userId>/<collectionId>/_db/sammlung.sqlite`), zur Laufzeit in-process mit sql.js | FalkorDB-Graph `c_<collectionId>` |
+| **Abfrage der KI** | `dokumente_durchsuchen` (semantische Suche) | `sql_ausfuehren` — SQLite-Dialekt, ein `SELECT`/`WITH` | `cypher_ausfuehren` — openCypher, `GRAPH.RO_QUERY` |
+| **Grenzen je Datei** | MB/Datei und Seiten der Größenklasse | zusätzlich 20 MB, 200.000 Zeilen, 200 Spalten; SQLite-Datei der Sammlung höchstens 50 MB | zusätzlich 5 MB, 5.000 Statements; FalkorDB-Free-Tier 100 MB für alle Graphen zusammen |
+| **Löschen einer Datei** | Abschnitte per Präfix `<docId>#` aus dem Namespace | Tabelle gedroppt, Datei zurückgeschrieben | Graph gelöscht und aus den übrigen Skripten neu aufgebaut |
+| **Seiten fürs Kontingent** | echte bzw. geschätzte Seiten (siehe [Grenzen](#grenzen)) | Zeilen ÷ 50 | Zeichen ÷ 3.000 |
+
+Zwei Dinge sind bei Tabellen und Graphen anders als bei Dokumenten:
+
+**Eine Datei je Tabelle.** Der Tabellenname entsteht aus dem Dateinamen
+(`Umsatz 2025.csv` → `umsatz_2025`). Wer dieselbe Datei erneut hochlädt, ersetzt die
+Tabelle — und der frühere Satz in der Übersicht weicht, damit die Zähler stimmen.
+Spaltennamen werden zu sicheren Bezeichnern (klein, `[a-z0-9_]`, Umlaute aufgelöst), je
+Spalte wird der engste passende Typ bestimmt (`INTEGER`, `REAL`, `TEXT`).
+
+**Ein Graph je Sammlung, Skripte in Reihenfolge.** Spätere Skripte dürfen auf Knoten
+früherer verweisen. Deshalb wird beim Löschen eines Skripts — und nach einem
+fehlgeschlagenen Import — der Graph aus den übrigen Skripten in Upload-Reihenfolge neu
+aufgebaut; ein halb eingespieltes Skript bleibt nie liegen.
+
+### Sicherheitsmodell der Werkzeuge
+
+Was das Modell an Abfragen formuliert, stammt aus einem Text, den hochgeladene Dateien
+mitbeeinflussen. Die Werkzeuge behandeln es deshalb wie Nutzereingaben:
+
+- **Allowlist je Sitzung.** Jeder Aufruf prüft die `collectionId` gegen die auf den Nutzer
+  gefilterten Sammlungen, zusätzlich gegen den Typ. Bei genau einer Sammlung ist sie fest
+  gebunden; eine trotzdem mitgeschickte ID wird ignoriert. Ablehnungen kommen als
+  Rückgabewert `{ ok: false, error }`, damit das Modell sich korrigieren kann.
+- **SQL nur lesend.** Genau ein Statement, es muss mit `SELECT` oder `WITH` beginnen, kein
+  Semikolon, keine Schreibbefehle, kein `PRAGMA`, kein `ATTACH` (Schlüsselwörter werden
+  außerhalb von Literalen und Kommentaren geprüft). Die Abfrage wird in
+  `SELECT * FROM (…) LIMIT 200` gehüllt. Und selbst wenn etwas durchkäme: Die Datenbank
+  ist eine Wegwerf-Kopie im Speicher, die nach dem Aufruf geschlossen wird.
+- **Cypher nur lesend.** `GRAPH.RO_QUERY` — der Server lehnt Schreiboperationen ab —, ein
+  Statement, 10 Sekunden Timeout, `LIMIT 200` wird ergänzt, falls es fehlt. Der Graphname
+  entsteht aus der geprüften Sammlungs-ID, eine Abfrage kann nie über Sammlungen hinweg
+  lesen.
+- **Begrenzte Schritte und Größen.** Höchstens 6 Schritte je Frage, Abfragen bis 4.000
+  Zeichen, Ergebnisse werden auf 24.000 Zeichen im Prompt gekürzt, Zellen auf 200 Zeichen;
+  in den Browser gehen höchstens 20 Vorschauzeilen.
 
 ---
 
@@ -199,17 +317,25 @@ npm run pruefe            # Chunks, Kontingente und Environment-Erkennung
 npm run pruefe:chunks     # die drei Zerlegungsstrategien
 npm run pruefe:kontingente # Grenzen der Pläne und Größenklassen
 npm run pruefe:env        # Aliase und OIDC der Environment-Variablen
+npm test                  # Vitest: CSV, Cypher-Skripte, SQL-Sperre, Werkzeuge, Katalog, Chunker
 npm run typecheck
 npm run lint
 ```
 
-Kein Testframework, weil es um zwei Sätze reiner Funktionen geht. Beide sind aber die
-Stellen, an denen ein Fehler teuer wird: Die Zerlegung entscheidet, was zitiert wird, die
-Kontingente entscheiden, was ein Nutzer anlegen darf. Ein Fehler dort fällt entweder nie
-auf, weil zu lasch, oder erst beim Nutzer, weil zu streng.
+Die `pruefe:*`-Skripte sind bewusst ohne Testframework: Es geht um zwei Sätze reiner
+Funktionen, und beide sind die Stellen, an denen ein Fehler teuer wird. Die Zerlegung
+entscheidet, was zitiert wird, die Kontingente entscheiden, was ein Nutzer anlegen darf.
+Ein Fehler dort fällt entweder nie auf, weil zu lasch, oder erst beim Nutzer, weil zu
+streng.
 
 Die Kontingentprüfung testet ausdrücklich die Grenzen selbst — genau am Limit muss es noch
 gehen, einen Schritt darüber nicht mehr.
+
+Mit den Sammlungstypen kam Vitest dazu (`tests/`). Dort liegt, was sich ohne Dienste
+prüfen lässt: das CSV-Lesen samt Typerkennung und deutscher Zahlen, das Zerlegen von
+Cypher-Skripten, die Lese-Sperre für SQL (was durchkommt und was nicht), die
+Werkzeug-Allowlist, der Katalog in der Systemanweisung und der Chunker. sql.js läuft
+dabei gegen eine In-Memory-Datenbank, Blob und FalkorDB sind gemockt.
 
 ---
 
@@ -221,30 +347,41 @@ app/
   sammlungen/                     eigene Sammlungen, Detailansicht mit Upload
   admin/                          Größenklassen, Pläne, Nutzer, Verbrauch
   sign-in/ · sign-up/             Clerk
-  api/chat/                       Retrieval, Tool-Aufruf, Antwort-Streaming (NDJSON)
+  api/chat/                       Retrieval, Werkzeugmodus, Antwort-Streaming (NDJSON)
   api/chats/                      Verlauf
   api/collections/                Sammlungen, Upload-Anmeldung
-  api/documents/                  Verarbeitung, Löschen, Download
-  api/admin/                      Stammdaten und Rollen
+  api/documents/                  Verarbeitung, Löschen je Typ, Download
+  api/admin/                      Stammdaten, Rollen, Diagnose (sql.js, FalkorDB, Umgebung)
   api/upload/                     Token für den Direkt-Upload zu Vercel Blob
   api/webhooks/clerk/             Nutzerdaten spiegeln
   api/cron/aufraeumen/            stündlicher Aufräumlauf
 proxy.ts                          stellt die Clerk-Sitzung bereit
 workflows/
-  ingest.ts                       Dokumentverarbeitung in wiederholbaren Schritten
+  ingest.ts                       Verarbeitung je Typ in wiederholbaren Schritten, Sperre je Sammlung
   aufraeumen.ts                   Abräumen nach dem Löschen eines Kontos
+components/
+  ChatBereich.tsx · ChatPanel.tsx Chat mit Fundstellen und Abfragen-Block
+  SammlungenBereich.tsx           Anlegen mit Typwahl, Upload je Typ
+  SchemaCard.tsx                  Tabellen bzw. Labels einer Sammlung
 lib/
   db/                             Drizzle-Schema, Verbindung, Seed
   auth/user.ts                    Clerk-Identität zu Plan, Rolle, Größenklasse
+  collection-kinds.ts             die drei Typen: Labels, Endungen, Schema-Typen
   collections.ts · documents.ts   Sammlungen und Dokumente, Nutzer-ID stets in der Abfrage
   vector.ts                       Pinecone: schreiben, suchen, löschen
-  ai.ts                           Modell, Systemanweisung, Suchwerkzeug
+  sqlstore.ts                     SQLite-Datei in Blob, sql.js, Lese-Sperre für SQL
+  graphstore.ts                   FalkorDB: importieren, beschreiben, lesend abfragen
+  csv.ts · cypher-script.ts       CSV → Tabelle, Skript → Statements, Grenzen
+  ingest.ts                       Einspielen und Entfernen je Typ (ohne Request, ohne Sperre)
+  ai.ts                           Modell, Systemanweisung, Katalog, Suchwerkzeug
+  tools.ts · tools-types.ts       Werkzeuge sql_ausfuehren, cypher_ausfuehren, Schritt-Ereignisse
   presets.ts · chunk.ts           die drei Verarbeitungsarten
   extract.ts                      PDF · DOCX · XLSX → Text und Seitenzahl
-  quota.ts · ratelimit.ts         Grenzen und Drosselung
+  quota.ts · ratelimit.ts         Grenzen, Drosselung, Schreibsperre (SET NX EX)
   chats.ts · chatVerlauf.ts       Verlauf, Server und Client-Fassade
-  admin.ts · models.ts            Stammdaten und Modellpreise
+  admin.ts · models.ts            Stammdaten, Modellpreise, Modellhebung im Werkzeugmodus
   aufraeumen.ts                   Überreste des laufenden Betriebs
+tests/                            Vitest (npm test)
 ```
 
 ### Entwurfsentscheidungen
@@ -269,7 +406,10 @@ aufgerufen.
 **Den Collection-IDs aus dem Tool-Aufruf wird nicht geglaubt.** Sie stammen aus einem Text,
 den hochgeladene Dokumente mitbeeinflussen, und werden gegen die Sammlungen des Aufrufers
 gefiltert, bevor Pinecone angefragt wird. Halluziniert das Modell eine fremde ID oder wird
-es per Prompt-Injection dazu verleitet, kommt sie nicht durch.
+es per Prompt-Injection dazu verleitet, kommt sie nicht durch. Für `sql_ausfuehren` und
+`cypher_ausfuehren` gilt dieselbe Allowlist, zusätzlich mit Typprüfung; die Abfrage selbst
+wird obendrein auf Lesezugriff beschränkt (siehe
+[Sicherheitsmodell der Werkzeuge](#sicherheitsmodell-der-werkzeuge)).
 
 **Ein Namespace je Sammlung statt eines Metadatenfilters.** Pinecone rechnet nach der Größe
 des *angefragten* Namespace ab — eine kleine Sammlung kostet das Minimum, egal wie viele
@@ -328,6 +468,24 @@ wenn Kontingente und Drosselung nicht greifen.
 summieren sich bei 15.000 Nutzern zu einem Vielfachen dessen, was der Modellanbieter pro
 Minute liefert. Ohne diese Obergrenze bringt schon ein normaler Montagmorgen die Anwendung
 in die 429er-Zone des Anbieters — und dort trifft es alle gleichzeitig.
+
+### Nach dem Deployment: Diagnose
+
+```
+GET /api/admin/diagnose        (als Admin angemeldet)
+```
+
+Antwortet mit drei Dingen, die sich sonst erst beim ersten Nutzer zeigen: ob sql.js samt
+WASM-Datei geladen werden konnte (mit SQLite-Version), ob `FALKORDB_URL` gesetzt ist, und
+welche Umgebungsvariablen die Instanz sieht — nur Namen, keine Werte.
+
+Der erste Punkt ist der heikle. sql.js liest seine WASM-Datei zur Laufzeit per `fs`, und
+das File Tracing von Vercel sieht diesen Zugriff nicht. `next.config.ts` nimmt die Datei
+deshalb über `outputFileTracingIncludes` ausdrücklich mit — für `/api/**` *und* für
+`/.well-known/workflow/**`, denn die Verarbeitungsschritte des Workflow SDK laufen unter
+dem zweiten Pfad. Meldet die Diagnose `sqlJs.ok: false`, fehlt genau das. Zusätzlich
+stehen `sql.js` und `falkordb` in `serverExternalPackages`, damit der Bundler sie in Ruhe
+lässt.
 
 ### Lasttest
 
@@ -398,7 +556,24 @@ Die alten Blobs bleiben unberührt und können nach einer Sichtprobe entfernt we
 - **Sammlungen sind nicht teilbar.** Jede gehört genau einem Nutzer. Team-Freigaben wären
   über Clerk-Organisationen möglich, brauchen aber das B2B-Add-on.
 - **Das Verarbeitungspreset lässt sich nachträglich nicht ändern.** Es müssten alle
-  Dokumente der Sammlung neu zerlegt werden; einfacher ist eine neue Sammlung.
+  Dokumente der Sammlung neu zerlegt werden; einfacher ist eine neue Sammlung. Dasselbe
+  gilt für den Typ einer Sammlung.
+- **Graph-Import nur über Cypher-Skripte.** Kein CSV-zu-Graph, kein GraphML, kein
+  Neo4j-Dump. FalkorDB versteht eine Teilmenge von openCypher — Prozeduren wie `apoc.*`
+  gibt es nicht, und ein Skript, das darauf baut, scheitert beim Import mit der
+  Statement-Nummer.
+- **SQL im SQLite-Dialekt.** Kein `ILIKE`, keine `::`-Casts, `strftime` statt
+  `date_trunc`. Zellen kommen aus CSV als `INTEGER`, `REAL` oder `TEXT`; Datumswerte
+  bleiben Text.
+- **Höchstens 200 Zeilen je Abfrage**, bei SQL wie bei Cypher. Wer eine ganze Tabelle
+  will, bekommt einen Ausschnitt — das Modell soll in SQL bzw. Cypher aggregieren und
+  filtern, nicht Zeilen lesen.
+- **Ohne Redis keine Tabellen- und Graph-Uploads.** Die Schreibsperre je Sammlung liegt in
+  Redis, und es gibt bewusst keinen Weg daran vorbei: Eine Sperre, die nicht sperrt, wäre
+  schlimmer als ein Abbruch.
+- **Der Werkzeugmodus kostet mehr als die Direktsuche.** Mindestens zwei
+  Modelldurchläufe statt einem, dazu die Modellhebung für Flash-Lite-Pläne; siehe
+  [Bedienung](#bedienung).
 - **Contextual Retrieval ist nicht eingebaut.** Eine LLM-generierte Kontextzeile pro
   Abschnitt verbessert die Trefferqualität deutlich, kostet bei diesem Mengenzuschnitt
   aber einen Modellaufruf pro Abschnitt.
