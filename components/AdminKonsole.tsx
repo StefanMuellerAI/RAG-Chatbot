@@ -2,12 +2,19 @@
 
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
-import type { NutzerSeite, PlanMitKlasse, VerbrauchUebersicht } from "@/lib/admin";
+import ModelleKarte from "@/components/ModelleKarte";
+import type {
+  KatalogEintrag,
+  NutzerSeite,
+  PlanMitKlasse,
+  VerbrauchUebersicht,
+} from "@/lib/admin";
 import type { SizeClass } from "@/lib/db/schema";
 import type { ModelInfo } from "@/lib/models";
+import type { KeyStatusUebersicht } from "@/lib/provider-keys";
 
 /**
- * Administration: Groessenklassen, Plaene, Nutzer, Verbrauch.
+ * Administration: Groessenklassen, Plaene, KI-Modelle, Nutzer, Verbrauch.
  *
  * Bewusst tabellarisch und ohne Dialoge: Der Admin vergleicht hier Werte
  * zwischen den Klassen ("wie viel mehr ist L als M?"), und dafuer muessen sie
@@ -21,7 +28,12 @@ type Eigenschaften = {
   plaene: PlanMitKlasse[];
   nutzer: NutzerSeite;
   verbrauch: VerbrauchUebersicht;
+  /** Aktive Katalogmodelle — die Auswahl fuer die Plaene. */
   modelle: ModelInfo[];
+  /** Der ganze Katalog fuer den Abschnitt KI-Modelle. */
+  katalog: KatalogEintrag[];
+  keyStatus: KeyStatusUebersicht;
+  secretKonfiguriert: boolean;
   suche: string;
 };
 
@@ -31,6 +43,9 @@ export default function AdminKonsole({
   nutzer,
   verbrauch,
   modelle,
+  katalog,
+  keyStatus,
+  secretKonfiguriert,
   suche,
 }: Eigenschaften) {
   const router = useRouter();
@@ -87,6 +102,14 @@ export default function AdminKonsole({
         onLoeschen={(id) =>
           sende(`/api/admin/plans?id=${encodeURIComponent(id)}`, "DELETE")
         }
+      />
+
+      <ModelleKarte
+        katalog={katalog}
+        keyStatus={keyStatus}
+        secretKonfiguriert={secretKonfiguriert}
+        gesperrt={laueft}
+        sende={sende}
       />
 
       <NutzerKarte
@@ -411,7 +434,8 @@ function PlaeneKarte({
         Ein Plan wird einem Nutzer zugewiesen. Er entscheidet, bis zu welcher
         Groessenklasse dieser Sammlungen anlegen darf, wie viele, und wie viele Fragen er
         pro Tag stellen kann. Das Tageskontingent ist die wirksamste Bremse gegen eine
-        aus dem Ruder laufende Modellrechnung.
+        aus dem Ruder laufende Modellrechnung. Zur Auswahl stehen die aktiven Modelle des
+        Katalogs (Abschnitt KI-Modelle).
       </p>
 
       <div className="tabelle-huelle">
@@ -469,6 +493,11 @@ function PlaeneKarte({
                       value={werte.modelId}
                       onChange={(e) => aendere(plan.id, { modelId: e.target.value })}
                     >
+                      {/* Traegt der Plan ein Modell, das nicht mehr aktiv ist, bleibt es
+                          sichtbar — sonst zeigte das Feld still ein anderes an. */}
+                      {!modelle.some((modell) => modell.id === werte.modelId) && (
+                        <option value={werte.modelId}>{werte.modelId} (nicht im Katalog aktiv)</option>
+                      )}
                       {modelle.map((modell) => (
                         <option key={modell.id} value={modell.id}>
                           {modell.label}

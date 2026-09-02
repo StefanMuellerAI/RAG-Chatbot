@@ -95,6 +95,8 @@ function statisch(name: string): string | undefined {
       return nichtLeer(process.env.GLOBAL_QUESTIONS_PER_MINUTE);
     case "FALKORDB_URL":
       return nichtLeer(process.env.FALKORDB_URL);
+    case "PROVIDER_KEY_SECRET":
+      return nichtLeer(process.env.PROVIDER_KEY_SECRET);
     default:
       return undefined;
   }
@@ -152,6 +154,15 @@ export function optionalEnv(name: string): string | undefined {
  */
 export function graphConfigured(): boolean {
   return read("FALKORDB_URL") !== undefined;
+}
+
+/**
+ * Koennen Anbieter-Keys gespeichert werden? Ohne PROVIDER_KEY_SECRET gibt es
+ * keinen Schluessel fuer die Verschluesselung — der Admin-Bereich zeigt dann
+ * einen Hinweis, der Modellkatalog laeuft mit Gateway-Modellen weiter.
+ */
+export function providerKeySecretKonfiguriert(): boolean {
+  return read("PROVIDER_KEY_SECRET") !== undefined;
 }
 
 /**
@@ -241,6 +252,7 @@ const DIAGNOSE_KEYS = [
   "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY",
   "CLERK_WEBHOOK_SIGNING_SECRET",
   "FALKORDB_URL",
+  "PROVIDER_KEY_SECRET",
 ] as const;
 
 export type EnvDiagnose = {

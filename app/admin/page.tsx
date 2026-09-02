@@ -3,14 +3,15 @@ import AdminKonsole from "@/components/AdminKonsole";
 import NichtBereit from "@/components/NichtBereit";
 import {
   ladeGroessenklassen,
+  ladeModellKatalog,
   ladeNutzer,
   ladePlaene,
   ladeVerbrauch,
 } from "@/lib/admin";
 import { requireKontextFuerSeite } from "@/lib/auth/user";
 import { seedStammdaten } from "@/lib/db/seed";
-import { missingFor } from "@/lib/env";
-import { MODELS } from "@/lib/models";
+import { missingFor, providerKeySecretKonfiguriert } from "@/lib/env";
+import { ladeKeyStatus } from "@/lib/provider-keys";
 
 export const dynamic = "force-dynamic";
 
@@ -47,11 +48,17 @@ export default async function AdminSeite({
   const suche = parameter.suche ?? "";
   const seite = Number(parameter.seite ?? "1");
 
-  const [groessenklassen, plaene, nutzer, verbrauch] = await Promise.all([
+  const secretKonfiguriert = providerKeySecretKonfiguriert();
+
+  const [groessenklassen, plaene, nutzer, verbrauch, katalog, keyStatus] = await Promise.all([
     ladeGroessenklassen(),
     ladePlaene(),
     ladeNutzer(suche, Number.isFinite(seite) ? seite : 1),
     ladeVerbrauch(),
+    ladeModellKatalog(),
+    // Ohne PROVIDER_KEY_SECRET liesse sich kein Chiffrat pruefen; die Karte
+    // zeigt dann den Hinweis statt eines Fehlers.
+    secretKonfiguriert ? ladeKeyStatus() : Promise.resolve({}),
   ]);
 
   return (
@@ -60,7 +67,12 @@ export default async function AdminSeite({
       plaene={plaene}
       nutzer={nutzer}
       verbrauch={verbrauch}
-      modelle={[...MODELS]}
+      // Direkt aus dem frisch geladenen Katalog, nicht aus dem Zwischenspeicher:
+      // Der Admin soll seine Aenderung sofort im Auswahlfeld sehen.
+      modelle={katalog.filter((eintrag) => eintrag.enabled)}
+      katalog={katalog}
+      keyStatus={keyStatus}
+      secretKonfiguriert={secretKonfiguriert}
       suche={suche}
     />
   );

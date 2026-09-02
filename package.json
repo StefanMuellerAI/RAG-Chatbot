@@ -25,6 +25,8 @@
     "node": ">=22"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.48",
+    "@ai-sdk/openai": "^4.0.56",
     "@ai-sdk/react": "^4.0.73",
     "@clerk/localizations": "^4.15.4",
     "@clerk/nextjs": "^7.7.9",

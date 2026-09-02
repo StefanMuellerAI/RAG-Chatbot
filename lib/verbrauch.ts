@@ -1,5 +1,6 @@
 import { getDb } from "./db";
 import { usageEvents } from "./db/schema";
+import { findeModell } from "./modellkatalog";
 import { costInMicros } from "./models";
 
 /**
@@ -28,6 +29,10 @@ export async function verbucheFrage(
   const gecacht = verbrauch?.inputTokenDetails?.cacheReadTokens ?? 0;
 
   try {
+    // Preise aus dem Katalog zum Zeitpunkt der Antwort. Eine unbekannte
+    // Kennung wird zum Preis des Standardmodells verbucht — so wie vorher.
+    const modell = await findeModell(modelId);
+
     await getDb().insert(usageEvents).values({
       userId,
       day: new Date().toISOString().slice(0, 10),
@@ -36,7 +41,7 @@ export async function verbucheFrage(
       inputTokens: input,
       outputTokens: output,
       cachedInputTokens: gecacht,
-      costMicros: costInMicros(modelId, { input, output, cached: gecacht }),
+      costMicros: costInMicros(modell, { input, output, cached: gecacht }),
     });
   } catch (error) {
     // Eine misslungene Verbuchung darf die bereits gelieferte Antwort nicht

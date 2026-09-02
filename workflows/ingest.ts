@@ -470,7 +470,7 @@ async function ergaenzeBeschreibung(collectionId: string): Promise<void> {
     const { text } = await generateText({
       // Bewusst das guenstigste Modell: Es geht um einen Satz aus einer Liste
       // von Dateinamen, nicht um eine inhaltliche Leistung.
-      model: modell(DEFAULT_MODEL_ID),
+      model: await modell(DEFAULT_MODEL_ID),
       instructions:
         "Du formulierst eine knappe Inhaltsangabe fuer eine Dokumentensammlung. " +
         "Ein Satz, hoechstens 200 Zeichen, auf Deutsch, ohne Einleitung und ohne " +

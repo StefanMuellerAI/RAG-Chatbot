@@ -1,19 +1,97 @@
-import { gateway, tool } from "ai";
+import { createAnthropic } from "@ai-sdk/anthropic";
+import { createOpenAI } from "@ai-sdk/openai";
+import { gateway, generateText, tool, type LanguageModel } from "ai";
 import { z } from "zod";
 import { KIND_LABEL, type CollectionSchema } from "./collection-kinds";
 import { ladeEigeneSammlungen, type SammlungMitKlasse } from "./collections";
+import { sucheModell } from "./modellkatalog";
+import {
+  ANBIETER_LABEL,
+  istKeyAnbieter,
+  waehleAnbindung,
+  zerlegeKennung,
+  type Anbieter,
+  type KeyAnbieter,
+} from "./models";
 import { findPreset } from "./presets";
+import { ladeKey } from "./provider-keys";
 import { MIN_SCORE, sucheInSammlung, type Hit } from "./vector";
 
 /**
  * Modellzugriff, Systemanweisung und das Werkzeug zur Sammlungsauswahl.
  */
 
-/** Alle Modellaufrufe laufen ueber das AI Gateway. */
-export function modell(modelId: string) {
-  // Auth: AI_GATEWAY_API_KEY, oder auf Vercel der OIDC-Token aus dem
-  // Request-Header `x-vercel-oidc-token` (nicht aus process.env).
-  return gateway(modelId);
+/**
+ * Das Sprachmodell zu einer Katalogkennung.
+ *
+ * Zwei Wege: Nennt der Katalogeintrag Anthropic oder OpenAI als Anbieter UND
+ * ist dafuer ein Key hinterlegt, geht der Aufruf direkt an den Anbieter — mit
+ * der nativen Kennung hinter dem ersten Schraegstrich. Alles andere laeuft
+ * ueber das AI Gateway (Auth: AI_GATEWAY_API_KEY, oder auf Vercel der
+ * OIDC-Token aus dem Request-Header `x-vercel-oidc-token`).
+ *
+ * Auch eine Kennung, die nicht im Katalog steht, geht ans Gateway — etwa das
+ * Modell der Werkzeughebung, falls ein Admin es aus dem Katalog genommen hat.
+ */
+export async function modell(modelId: string): Promise<LanguageModel> {
+  const eintrag = await sucheModell(modelId);
+  if (!eintrag || !istKeyAnbieter(eintrag.provider)) return gateway(modelId);
+
+  const apiKey = await ladeKey(eintrag.provider);
+  if (apiKey === null || waehleAnbindung(eintrag, true) === "gateway") {
+    return gateway(modelId);
+  }
+
+  return direktesModell(eintrag.provider, zerlegeKennung(modelId).nativeId, apiKey);
+}
+
+/** Direkte Anbindung ueber das AI SDK; der Key wird je Aufruf uebergeben. */
+export function direktesModell(
+  provider: KeyAnbieter,
+  nativeId: string,
+  apiKey: string,
+): LanguageModel {
+  return provider === "anthropic"
+    ? createAnthropic({ apiKey })(nativeId)
+    : createOpenAI({ apiKey })(nativeId);
+}
+
+/**
+ * Kleinstmoeglicher Aufruf, um Key und Modellkennung zu pruefen. Mit
+ * `maxRetries: 0`, damit ein abgelehnter Key sofort als solcher gemeldet wird
+ * statt nach drei Wiederholungen.
+ */
+export async function testeModell(ziel: {
+  provider: KeyAnbieter;
+  nativeId: string;
+  apiKey: string;
+}): Promise<{ ok: true } | { ok: false; fehler: string }> {
+  try {
+    await generateText({
+      model: direktesModell(ziel.provider, ziel.nativeId, ziel.apiKey),
+      prompt: "Antworte nur mit OK.",
+      maxOutputTokens: 16,
+      maxRetries: 0,
+    });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, fehler: beschreibeAnbieterfehler(error, ziel.provider) };
+  }
+}
+
+/**
+ * Uebersetzt SDK-/HTTP-Fehler in einen Satz, mit dem der Admin etwas anfangen
+ * kann. Enthaelt nie den Key — nur Status und Anbietername.
+ */
+export function beschreibeAnbieterfehler(error: unknown, provider: Anbieter): string {
+  const label = ANBIETER_LABEL[provider];
+  const status = (error as { statusCode?: number } | undefined)?.statusCode;
+  const meldung = error instanceof Error ? error.message : String(error);
+
+  if (status === 401 || status === 403) return `${label} hat den API-Key abgelehnt.`;
+  if (status === 404) return `${label} kennt dieses Modell nicht. Bitte die Modellkennung pruefen.`;
+  if (status === 429) return `${label} meldet ein Ratenlimit oder erschoepftes Guthaben.`;
+  return `${label}: ${meldung}`;
 }
 
 export const SYSTEM_ANWEISUNG = `Du bist der Wissensassistent einer Organisation. Du beantwortest Fragen ausschliesslich auf Grundlage von Auszuegen aus den Dokumentensammlungen des Nutzers.
