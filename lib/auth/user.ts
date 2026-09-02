@@ -6,6 +6,7 @@ import { getDb } from "../db";
 import { seedStammdaten } from "../db/seed";
 import { plans, sizeClasses, users } from "../db/schema";
 import type { Plan, SizeClass } from "../db/schema";
+import { planAusEinladung } from "../einladungen";
 import { ausZwischenspeicher, kontextSchluessel } from "../ratelimit";
 
 /**
@@ -88,13 +89,20 @@ async function anlegen(clerkUserId: string, plan: Plan): Promise<Kontext> {
     where: eq(users.isAdmin, true),
   });
 
+  // Wer ueber eine Einladung kommt, bringt den vom Admin vorgegebenen Plan in
+  // den Clerk-Metadaten mit. Der Webhook liest ihn ebenso — aber die erste
+  // Seite des neuen Nutzers ist oft schneller als die Zustellung, und bei
+  // `user.created` bleibt der Plan einer schon vorhandenen Zeile unangetastet.
+  // Ohne diesen Griff ginge die Vorgabe genau dann verloren.
+  const planId = (await planAusEinladung(clerk?.publicMetadata)) ?? plan.id;
+
   await db
     .insert(users)
     .values({
       clerkUserId,
       email: clerk?.primaryEmailAddress?.emailAddress ?? null,
       name: [clerk?.firstName, clerk?.lastName].filter(Boolean).join(" ") || null,
-      planId: plan.id,
+      planId,
       isAdmin: !schonEinAdmin,
     })
     // Zwei gleichzeitige Anfragen desselben neuen Nutzers duerfen sich nicht
