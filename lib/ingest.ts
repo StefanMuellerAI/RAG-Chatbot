@@ -27,7 +27,8 @@ import { loescheDokumentChunks } from "./vector";
  *
  *   sql     CSV  -> Tabelle in der SQLite-Datei der Sammlung (Blob)
  *   graph   Cypher-Skript -> Statements in den FalkorDB-Graph der Sammlung
- *   vector  bleibt in workflows/ingest.ts (Extraktion, Zerlegung, Pinecone)
+ *   vector  bleibt in workflows/ingest.ts (Extraktion bzw. MP3-Transkription,
+ *           Zerlegung, Pinecone)
  *
  * Reine Verarbeitungsfunktionen: kein Request, keine Sperre, kein Kontingent.
  * Das erledigen die Aufrufer — der Ablauf in workflows/ingest.ts und die
@@ -52,7 +53,7 @@ export type IngestErgebnis = {
  * Prueft die Dateiendung gegen den Sammlungstyp.
  *
  * Fuer Dokumentensammlungen ist das nur die erste Huerde; danach prueft
- * `detectKind` zusaetzlich den Inhaltstyp. Fuer CSV und Cypher ist die Endung
+ * `detectKind` zusaetzlich den Inhaltstyp (PDF, DOCX, XLSX, MP3). Fuer CSV und Cypher ist die Endung
  * die einzige verlaessliche Angabe — Browser melden fuer beide je nach System
  * einen leeren oder generischen Inhaltstyp.
  */

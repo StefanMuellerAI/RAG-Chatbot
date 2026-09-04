@@ -11,19 +11,26 @@ import {
   entferneDokumentSatz,
   ladeDokumenteDerSammlung,
   leseDatei,
+  leseDateiFenster,
   loescheDatei,
   schliesseDokumentAb,
   setzeDokumentStatus,
 } from "@/lib/documents";
 import { MissingConfigError } from "@/lib/env";
 import { QuotaError, ValidationError, fehlerMeldung } from "@/lib/errors";
-import { extractBlocks } from "@/lib/extract";
+import { extractBlocks, istMp3 } from "@/lib/extract";
 import { chunkBlocks } from "@/lib/chunk";
 import { ersetzteDokumente, ingestGraph, ingestSql } from "@/lib/ingest";
 import { DEFAULT_MODEL_ID } from "@/lib/models";
+import { planeMp3Teile, type Mp3Teil } from "@/lib/mp3-teile";
 import { findPreset } from "@/lib/presets";
 import { pruefeSeitenzahl } from "@/lib/quota";
 import { erwirbSperre, gibSperreFrei, sperrSchluessel } from "@/lib/ratelimit";
+import {
+  fuegeTranskripteZusammen,
+  transkribiereMp3Teil,
+  type TranskriptTeilErgebnis,
+} from "@/lib/transcribe";
 import { upsertChunks } from "@/lib/vector";
 import { verbucheIngestion } from "@/lib/verbrauch";
 
@@ -38,7 +45,9 @@ import { verbucheIngestion } from "@/lib/verbrauch";
  * deterministisch aus Dokument-ID und Nummer entstehen, ist ein erneuter
  * Schreibvorgang unschaedlich: er ueberschreibt dieselben Eintraege statt
  * Duplikate anzulegen. Genau das macht die Wiederholung eines Schrittes
- * gefahrlos.
+ * gefahrlos. MP3s gehen in mehrere Schritte (Rahmenplan, je Teilstueck eine
+ * Transkription, dann Schreiben), damit ein langer Mitschnitt nicht an einem
+ * Timeout haengt und ein fehlgeschlagener Teil allein wiederholt wird.
  */
 
 type Vorbereitung = {
@@ -191,6 +200,132 @@ async function extrahiereUndSchreibe(
       throw new RetryableError(meldung, { retryAfter: "30s" });
     }
 
+    throw new FatalError(meldung);
+  }
+
+  return { seiten, abschnitte: abschnitte.length };
+}
+
+/**
+ * MP3: Rahmenplan, je Teil ein eigener Schritt, danach zusammenfuegen und
+ * schreiben. So bleibt ein Fehler in Teil 7 eine Wiederholung von Teil 7,
+ * und der Ablaufspeicher haelt nur Text, nicht die Audiodaten.
+ */
+async function verarbeiteAudio(
+  docId: string,
+  vorbereitung: Vorbereitung,
+): Promise<{ seiten: number; abschnitte: number }> {
+  const plan = await planeAudioTeile(docId, vorbereitung);
+  console.log(`[ingest ${docId}] MP3 in ${plan.length} Teil(e) fuer die Transkription`);
+
+  const teile: TranskriptTeilErgebnis[] = [];
+  for (const [index, teil] of plan.entries()) {
+    console.log(
+      `[ingest ${docId}] Transkription ${index + 1}/${plan.length} ` +
+        `(Bytes ${teil.startByte}–${teil.endByte})`,
+    );
+    teile.push(await transkribiereAudioTeil(vorbereitung, teil));
+  }
+
+  return schreibeAudioChunks(docId, vorbereitung, teile);
+}
+
+async function planeAudioTeile(
+  docId: string,
+  vorbereitung: Vorbereitung,
+): Promise<Mp3Teil[]> {
+  "use step";
+
+  console.log(`[ingest ${docId}] MPEG-Rahmen von "${vorbereitung.filename}" lesen`);
+
+  const strom = await leseDatei(vorbereitung.blobPath);
+  if (!strom) {
+    throw new FatalError(
+      "Die hochgeladene Datei wurde nicht gefunden. Bitte erneut hochladen.",
+    );
+  }
+
+  try {
+    return await planeMp3Teile(strom);
+  } catch (error) {
+    alsAblauffehler(error);
+  }
+}
+
+async function transkribiereAudioTeil(
+  vorbereitung: Vorbereitung,
+  teil: Mp3Teil,
+): Promise<TranskriptTeilErgebnis> {
+  "use step";
+
+  const bytes = await leseDateiFenster(
+    vorbereitung.blobPath,
+    teil.startByte,
+    teil.endByte,
+  );
+  if (!bytes || bytes.byteLength === 0) {
+    throw new FatalError(
+      "Die hochgeladene Datei wurde nicht gefunden. Bitte erneut hochladen.",
+    );
+  }
+
+  try {
+    return await transkribiereMp3Teil(bytes, teil);
+  } catch (error) {
+    alsAblauffehler(error);
+  }
+}
+
+async function schreibeAudioChunks(
+  docId: string,
+  vorbereitung: Vorbereitung,
+  teile: TranskriptTeilErgebnis[],
+): Promise<{ seiten: number; abschnitte: number }> {
+  "use step";
+
+  const { bloecke, seiten } = fuegeTranskripteZusammen(teile);
+
+  try {
+    pruefeSeitenzahl(
+      { name: vorbereitung.sammlungsName, pageCount: vorbereitung.seitenBisher },
+      {
+        id: vorbereitung.sizeClassId,
+        maxPagesPerDocument: vorbereitung.maxPagesPerDocument,
+        maxTotalPages: vorbereitung.maxTotalPages,
+      },
+      seiten,
+    );
+  } catch (error) {
+    if (error instanceof QuotaError) throw new FatalError(error.message);
+    throw error;
+  }
+
+  const preset = findPreset(vorbereitung.preset);
+  const abschnitte = chunkBlocks(bloecke, preset);
+
+  if (abschnitte.length === 0) {
+    throw new FatalError(
+      `Aus "${vorbereitung.filename}" liess sich kein gesprochener Text gewinnen. ` +
+        `Stille, Musik ohne Sprache oder eine beschaedigte Aufnahme fuehren dazu.`,
+    );
+  }
+
+  console.log(
+    `[ingest ${docId}] Transkript: ${seiten} Seiten, ${abschnitte.length} Abschnitte (${preset.label})`,
+  );
+
+  try {
+    await upsertChunks(
+      vorbereitung.collectionId,
+      docId,
+      vorbereitung.filename,
+      abschnitte,
+    );
+  } catch (error) {
+    const meldung = fehlerMeldung(error);
+    if (/429|ueberlastet|rate limit|timeout|ETIMEDOUT|ECONNRESET/i.test(meldung)) {
+      throw new RetryableError(meldung, { retryAfter: "30s" });
+    }
     throw new FatalError(meldung);
   }
 
@@ -510,7 +645,9 @@ export async function verarbeiteDokument(docId: string): Promise<void> {
         ? await verarbeiteTabelle(docId, vorbereitung)
         : vorbereitung.kind === "graph"
           ? await verarbeiteGraph(docId, vorbereitung)
-          : await extrahiereUndSchreibe(docId, vorbereitung);
+          : istMp3(vorbereitung.filename, vorbereitung.contentType)
+            ? await verarbeiteAudio(docId, vorbereitung)
+            : await extrahiereUndSchreibe(docId, vorbereitung);
 
     await schliesseAb(docId, vorbereitung, ergebnis);
     await ergaenzeBeschreibung(vorbereitung.collectionId);

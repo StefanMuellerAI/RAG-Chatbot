@@ -58,7 +58,7 @@ type Texte = {
 const TEXTE: Record<CollectionKind, Texte> = {
   vector: {
     titel: "Dokumente einpflegen",
-    hinweis: "PDF, DOCX und XLSX.",
+    hinweis: "PDF, DOCX, XLSX und MP3. MP3 wird transkribiert; lange Aufnahmen intern in Teilen.",
     grenze: "Mehrere Dateien gleichzeitig moeglich",
     leer: "Noch nichts eingepflegt. Zu dieser Sammlung kann der Chat derzeit nichts sagen.",
     fertig: "Durchsuchbar",

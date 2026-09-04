@@ -215,10 +215,111 @@ export async function entferneDokumentSatz(satz: DocumentRecord): Promise<void> 
 // --- Dateien ----------------------------------------------------------------
 
 /** Laedt die Originaldatei aus dem Blob-Store. */
-export async function leseDatei(pfad: string): Promise<ReadableStream | null> {
+export async function leseDatei(pfad: string): Promise<ReadableStream<Uint8Array> | null> {
   assertConfigured();
   const ergebnis = await get(pfad, { access: "private" });
-  return ergebnis ? (ergebnis.stream as ReadableStream) : null;
+  return ergebnis?.stream ?? null;
+}
+
+/**
+ * Liest ein Bytefenster [start, end) aus der Datei.
+ *
+ * Zuerst mit Range-Header, damit ein 25-MB-Teilstueck einer XL-MP3 nicht die
+ * ganze Datei durch den Schritt zieht. Liefert der Store die Datei trotzdem
+ * vollstaendig, wird das Fenster aus dem Strom geschnitten.
+ */
+export async function leseDateiFenster(
+  pfad: string,
+  start: number,
+  endExclusive: number,
+): Promise<Uint8Array | null> {
+  assertConfigured();
+  if (endExclusive <= start) return new Uint8Array();
+  const erwartet = endExclusive - start;
+
+  const perRange = await get(pfad, {
+    access: "private",
+    headers: { Range: `bytes=${start}-${endExclusive - 1}` },
+  });
+
+  if (perRange?.stream) {
+    const data = await uint8AusStrom(perRange.stream);
+    if (data.byteLength === erwartet) return data;
+    if (data.byteLength > erwartet && data.byteLength > start) {
+      return data.subarray(start, Math.min(endExclusive, data.byteLength));
+    }
+    if (data.byteLength > 0) return data;
+  }
+
+  if (!perRange) return null;
+
+  const strom = await leseDatei(pfad);
+  if (!strom) return null;
+  return uint8AusFenster(strom, start, endExclusive);
+}
+
+async function uint8AusStrom(strom: ReadableStream<Uint8Array>): Promise<Uint8Array> {
+  const reader = strom.getReader();
+  const teile: Uint8Array[] = [];
+  let laenge = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      teile.push(value);
+      laenge += value.byteLength;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const out = new Uint8Array(laenge);
+  let offset = 0;
+  for (const teil of teile) {
+    out.set(teil, offset);
+    offset += teil.byteLength;
+  }
+  return out;
+}
+
+async function uint8AusFenster(
+  strom: ReadableStream<Uint8Array>,
+  start: number,
+  endExclusive: number,
+): Promise<Uint8Array> {
+  const reader = strom.getReader();
+  const teile: Uint8Array[] = [];
+  let pos = 0;
+  let laenge = 0;
+  try {
+    while (pos < endExclusive) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      const chunkStart = pos;
+      pos += value.byteLength;
+      if (pos <= start) continue;
+      const from = Math.max(0, start - chunkStart);
+      const to = Math.min(value.byteLength, endExclusive - chunkStart);
+      if (to > from) {
+        const stueck = value.subarray(from, to);
+        teile.push(stueck);
+        laenge += stueck.byteLength;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+    await strom.cancel().catch(() => {
+      // Der Rest interessiert nicht; ein fehlgeschlagenes Abbrechen ist egal.
+    });
+  }
+  const out = new Uint8Array(laenge);
+  let offset = 0;
+  for (const teil of teile) {
+    out.set(teil, offset);
+    offset += teil.byteLength;
+  }
+  return out;
 }
 
 export async function loescheDatei(pfad: string): Promise<void> {

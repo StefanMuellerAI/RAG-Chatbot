@@ -6,7 +6,7 @@ entscheidet das Modell selbst, wo es sucht — und womit.
 
 Eine Sammlung hat einen von drei Typen (siehe [Drei Arten von Sammlungen](#drei-arten-von-sammlungen)):
 
-- **Dokumente** — PDF, DOCX und XLSX werden zerlegt und semantisch durchsucht; die
+- **Dokumente** — PDF, DOCX, XLSX und MP3 werden zerlegt bzw. transkribiert und semantisch durchsucht; die
   Antwort zitiert Fundstellen.
 - **Tabellen** — CSV-Dateien werden zu Tabellen einer SQLite-Datenbank; das Modell
   schreibt SQL und rechnet mit den Zahlen statt sie zu schätzen.
@@ -23,7 +23,7 @@ Eine Sammlung hat einen von drei Typen (siehe [Drei Arten von Sammlungen](#drei-
 - **Dateiablage**: Vercel Blob (privat, mandantenpräfigiert)
 - **Drosselung, Kontingente und Schreibsperren**: Upstash Redis
 - **Verarbeitung**: Vercel Workflow SDK
-- **Formate**: PDF, DOCX, XLSX · CSV · Cypher-Skripte
+- **Formate**: PDF, DOCX, XLSX, MP3 · CSV · Cypher-Skripte
 - **Design**: in Anlehnung an stadt-koeln.de
 
 Ausgelegt auf rund 15.000 gleichzeitig aktive Nutzer. Was das konkret bedeutet und wo die
@@ -225,7 +225,7 @@ Verbrauch einsehen.
 
 | | Dokumente (`vector`) | Tabellen (`sql`) | Graph (`graph`) |
 |---|---|---|---|
-| **Eingabe** | PDF, DOCX, XLSX | CSV mit Kopfzeile; `;` oder `,` als Trenner, Dezimalkomma wird erkannt | `.cypher`, `.cql`, `.txt` mit `CREATE`/`MERGE`-Statements, durch `;` getrennt |
+| **Eingabe** | PDF, DOCX, XLSX, MP3 (wird transkribiert) | CSV mit Kopfzeile; `;` oder `,` als Trenner, Dezimalkomma wird erkannt | `.cypher`, `.cql`, `.txt` mit `CREATE`/`MERGE`-Statements, durch `;` getrennt |
 | **Speicher** | Pinecone-Namespace je Sammlung | SQLite-Datei in Blob (`files/<userId>/<collectionId>/_db/sammlung.sqlite`), zur Laufzeit in-process mit sql.js | FalkorDB-Graph `c_<collectionId>` |
 | **Abfrage der KI** | `dokumente_durchsuchen` (semantische Suche) | `sql_ausfuehren` — SQLite-Dialekt, ein `SELECT`/`WITH` | `cypher_ausfuehren` — openCypher, `GRAPH.RO_QUERY` |
 | **Grenzen je Datei** | MB/Datei und Seiten der Größenklasse | zusätzlich 20 MB, 200.000 Zeilen, 200 Spalten; SQLite-Datei der Sammlung höchstens 50 MB | zusätzlich 5 MB, 5.000 Statements; FalkorDB-Free-Tier 100 MB für alle Graphen zusammen |
@@ -504,6 +504,7 @@ lib/
   tools.ts · tools-types.ts       Werkzeuge sql_ausfuehren, cypher_ausfuehren, Schritt-Ereignisse
   presets.ts · chunk.ts           die drei Verarbeitungsarten
   extract.ts                      PDF · DOCX · XLSX → Text und Seitenzahl
+  mp3-teile.ts · transcribe.ts    MP3-Rahmenplan, Transkription (Gateway), Zeitversatz
   quota.ts · ratelimit.ts         Grenzen, Drosselung, Schreibsperre (SET NX EX)
   chats.ts · chatVerlauf.ts       Verlauf, Server und Client-Fassade
   admin.ts · models.ts            Stammdaten, Modellkatalog-Pflege, Kostenrechnung, Modellhebung
@@ -680,11 +681,16 @@ Die alten Blobs bleiben unberührt und können nach einer Sichtprobe entfernt we
 - **Gescannte PDFs ohne Texterkennung** liefern keinen Text. Die Verarbeitung meldet das
   ausdrücklich, statt ein leeres Dokument anzulegen. Abhilfe: die Datei vorher durch OCR
   schicken.
+- **MP3 wird transkribiert** (AI Gateway, `openai/whisper-1`, sonst ein hinterlegter
+  OpenAI-Key). Die Transkriptions-API nimmt höchstens 25 MB je Aufruf; größere Dateien
+  teilt die App intern an MPEG-Rahmen. Die Upload-Grenze bleibt die der Größenklasse.
+  Fundstellen zitieren Zeitspannen (`3:12–4:45`). Stille oder Musik ohne Sprache
+  scheitert mit einer klaren Meldung, analog zu einem Scan-PDF.
 - **Alte Binärformate `.doc` und `.xls`** werden nicht unterstützt. Einmal als `.docx`
   bzw. `.xlsx` speichern genügt.
-- **Seitenzahlen bei DOCX und XLSX sind Schätzungen.** DOCX kennt keine Seiten — der
+- **Seitenzahlen bei DOCX, XLSX und MP3 sind Schätzungen.** DOCX kennt keine Seiten — der
   Umbruch entsteht erst beim Druck. Für die Kontingentprüfung wird gerechnet: 3.000
-  Zeichen bzw. 50 Tabellenzeilen je Seite.
+  Zeichen bzw. 50 Tabellenzeilen je Seite. Beim Transkript gilt dieselbe Zeichenzahl.
 - **Sammlungen sind nicht teilbar.** Jede gehört genau einem Nutzer. Team-Freigaben wären
   über Clerk-Organisationen möglich, brauchen aber das B2B-Add-on.
 - **Das Verarbeitungspreset lässt sich nachträglich nicht ändern.** Es müssten alle

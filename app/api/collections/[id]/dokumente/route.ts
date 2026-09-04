@@ -6,9 +6,10 @@ import { CSV_MAX_BYTES } from "@/lib/csv";
 import { CYPHER_MAX_BYTES } from "@/lib/cypher-script";
 import { blobPfad, ladeDokumenteDerSammlung, legeDokumentAn } from "@/lib/documents";
 import { ValidationError } from "@/lib/errors";
-import { UnsupportedFileError, detectKind } from "@/lib/extract";
+import { UnsupportedFileError, detectKind, istMp3 } from "@/lib/extract";
 import { assertAllowedExtension } from "@/lib/ingest";
 import { pruefeNeuesDokument } from "@/lib/quota";
+import { transkriptionBereit } from "@/lib/transcribe";
 
 export const runtime = "nodejs";
 
@@ -68,6 +69,13 @@ export async function POST(request: Request, kontextparameter: Kontextparameter)
           throw new ValidationError(error.message);
         }
         throw error;
+      }
+
+      if (istMp3(dateiname, eingabe.contentType) && !(await transkriptionBereit())) {
+        throw new ValidationError(
+          "MP3-Dateien brauchen das AI Gateway oder einen hinterlegten OpenAI-Key, " +
+            "damit sie transkribiert werden koennen.",
+        );
       }
     }
 

@@ -104,6 +104,7 @@ beforeEach(() => {
 describe("assertAllowedExtension", () => {
   it("laesst je Typ nur die passenden Endungen durch", () => {
     expect(() => assertAllowedExtension("vector", "Bericht.PDF")).not.toThrow();
+    expect(() => assertAllowedExtension("vector", "sitzung.mp3")).not.toThrow();
     expect(() => assertAllowedExtension("vector", "daten.csv")).toThrow(ValidationError);
     expect(() => assertAllowedExtension("sql", "Umsatz 2025.csv")).not.toThrow();
     expect(() => assertAllowedExtension("sql", "umsatz.xlsx")).toThrow(/Tabellen-Sammlung/);

@@ -207,11 +207,15 @@ export async function missingFor(area: Bereich): Promise<string[]> {
 }
 
 /**
+ * Ist das AI Gateway erreichbar — per Schluessel, per Env-OIDC oder per
+ * Request-Header auf Vercel? MP3-Transkription und der Chat brauchen das,
+ * PDF-Extraktion nicht.
+ *
  * Auf Vercel liegt der OIDC-Token am Request, nicht in process.env.
  * Lokal zaehlt AI_GATEWAY_API_KEY bzw. ein per `vercel env pull` geholtes
  * VERCEL_OIDC_TOKEN.
  */
-async function gatewayBereit(): Promise<boolean> {
+export async function gatewayBereit(): Promise<boolean> {
   if (roh("AI_GATEWAY_API_KEY") || roh("VERCEL_OIDC_TOKEN")) return true;
   return (await oidcHeader()) !== undefined;
 }

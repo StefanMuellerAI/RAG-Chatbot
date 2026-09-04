@@ -16,6 +16,8 @@
  *                genau solche Blocks entstehen beim Zerlegen.
  */
 
+import { ValidationError } from "./errors";
+
 export type ExtractedBlock = {
   text: string;
   location?: string;
@@ -32,17 +34,20 @@ export const SUPPORTED_TYPES = {
   "application/pdf": "pdf",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+  "audio/mpeg": "mp3",
+  "audio/mp3": "mp3",
 } as const;
 
 export type SupportedMimeType = keyof typeof SUPPORTED_TYPES;
+export type DocumentKind = (typeof SUPPORTED_TYPES)[SupportedMimeType];
 
 export const SUPPORTED_MIME_TYPES = Object.keys(SUPPORTED_TYPES) as SupportedMimeType[];
-export const SUPPORTED_EXTENSIONS = [".pdf", ".docx", ".xlsx"];
+export const SUPPORTED_EXTENSIONS = [".pdf", ".docx", ".xlsx", ".mp3"];
 
 export class UnsupportedFileError extends Error {
   constructor(filename: string) {
     super(
-      `"${filename}" wird nicht unterstuetzt. Moeglich sind PDF, DOCX und XLSX. ` +
+      `"${filename}" wird nicht unterstuetzt. Moeglich sind PDF, DOCX, XLSX und MP3. ` +
         `Alte Formate (.doc, .xls) bitte einmal in Word bzw. Excel als .docx / .xlsx speichern.`,
     );
     this.name = "UnsupportedFileError";
@@ -50,16 +55,25 @@ export class UnsupportedFileError extends Error {
 }
 
 /** Bestimmt das Format primaer ueber die Dateiendung, ersatzweise ueber den MIME-Typ. */
-export function detectKind(filename: string, mimeType?: string): "pdf" | "docx" | "xlsx" {
+export function detectKind(filename: string, mimeType?: string): DocumentKind {
   const lower = filename.toLowerCase();
   if (lower.endsWith(".pdf")) return "pdf";
   if (lower.endsWith(".docx")) return "docx";
   if (lower.endsWith(".xlsx")) return "xlsx";
+  if (lower.endsWith(".mp3")) return "mp3";
 
   const byMime = mimeType ? SUPPORTED_TYPES[mimeType as SupportedMimeType] : undefined;
   if (byMime) return byMime;
 
   throw new UnsupportedFileError(filename);
+}
+
+export function istMp3(filename: string, mimeType?: string): boolean {
+  try {
+    return detectKind(filename, mimeType) === "mp3";
+  } catch {
+    return false;
+  }
 }
 
 export async function extractBlocks(
@@ -74,6 +88,13 @@ export async function extractBlocks(
       return extractDocx(buffer);
     case "xlsx":
       return extractXlsx(buffer);
+    case "mp3":
+      // Die Transkription laeuft im Ingest-Workflow (lib/transcribe.ts), nicht
+      // ueber die lokalen Parser. Wer extractBlocks mit einer MP3 aufruft,
+      // hat den falschen Weg genommen.
+      throw new ValidationError(
+        "MP3-Dateien werden transkribiert, nicht als Dokumenttext gelesen.",
+      );
   }
 }
 
