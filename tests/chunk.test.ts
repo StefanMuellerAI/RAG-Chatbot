@@ -87,6 +87,19 @@ describe("chunkBlocks (Fliesstext)", () => {
       expect(chunks.some((chunk) => chunk.text.includes(marker))).toBe(true);
     }
   });
+
+  it("folgt einer im Expertenmodus verkleinerten Abschnittsgroesse", () => {
+    // So kommt die Verarbeitung aus effektiveVerarbeitung an: das Preset mit
+    // den Abweichungen darueber.
+    const angepasst = { ...FLIESSTEXT, zielGroesse: 400, ueberlappung: 50 };
+    const text = prosa(200);
+    const standard = chunkBlocks([{ text }], FLIESSTEXT);
+    const klein = chunkBlocks([{ text }], angepasst);
+    expect(klein.length).toBeGreaterThan(standard.length * 2);
+    for (const chunk of klein) {
+      expect(chunk.text.length).toBeLessThanOrEqual(400);
+    }
+  });
 });
 
 describe("chunkBlocks (Tabellen)", () => {

@@ -422,6 +422,15 @@ gleichem Inhalt.
 **Regelwerke** — Satzungen, Verträge, AGB. Kleine, präzise Abschnitte, Schnitt an
 Paragraphengrenzen, die zugehörige Überschrift bleibt am Abschnitt.
 
+**Expertenmodus** — Unter den Preset-Karten lässt sich beim Anlegen ein zugeklappter
+Bereich öffnen, in dem Abschnittsgröße, Überlappung, Treffer je Suche (topK) und die
+Mindest-Ähnlichkeit für diese Sammlung übersteuert werden können. Gespeichert wird nur die
+Abweichung vom Preset (`collections.processing`, JSON); `effektiveVerarbeitung` in
+`lib/presets.ts` legt beides übereinander. Sammlungen ohne Abweichung folgen damit weiterhin
+späteren Anpassungen der Presets. Die Grenzen stehen in `VERARBEITUNG_GRENZEN`; die
+Überlappung muss unter der halben Abschnittsgröße bleiben, sonst kriecht die Zerlegung
+zeichenweise voran.
+
 Die Logik ist durch `npm run pruefe:chunks` abgedeckt. Das ist kein Selbstzweck: Zwei
 Fehler darin hätten falsche Antworten erzeugt — eine Bestimmung mit der Überschrift einer
 anderen, und eine Schnittkante, die aus drei Abschnitten vierundfünfzig fast gleiche
@@ -695,7 +704,7 @@ Die alten Blobs bleiben unberührt und können nach einer Sichtprobe entfernt we
   über Clerk-Organisationen möglich, brauchen aber das B2B-Add-on.
 - **Das Verarbeitungspreset lässt sich nachträglich nicht ändern.** Es müssten alle
   Dokumente der Sammlung neu zerlegt werden; einfacher ist eine neue Sammlung. Dasselbe
-  gilt für den Typ einer Sammlung.
+  gilt für den Typ einer Sammlung und für die Werte aus dem Expertenmodus.
 - **Graph-Import nur über Cypher-Skripte.** Kein CSV-zu-Graph, kein GraphML, kein
   Neo4j-Dump. FalkorDB versteht eine Teilmenge von openCypher — Prozeduren wie `apoc.*`
   gibt es nicht, und ein Skript, das darauf baut, scheitert beim Import mit der
