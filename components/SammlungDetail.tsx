@@ -15,7 +15,7 @@ import {
 } from "@/lib/collection-kinds";
 import type { SammlungMitKlasse } from "@/lib/collections";
 import type { DocumentRecord } from "@/lib/db/schema";
-import type { Preset } from "@/lib/presets";
+import type { Verarbeitung } from "@/lib/presets";
 
 /**
  * Eine Sammlung: Dokumente einpflegen, Fortschritt verfolgen, entfernen.
@@ -92,7 +92,8 @@ const TEXTE: Record<CollectionKind, Texte> = {
 type Eigenschaften = {
   sammlung: SammlungMitKlasse;
   dokumente: DocumentRecord[];
-  preset: Preset;
+  /** Preset samt Abweichungen aus dem Expertenmodus. */
+  verarbeitung: Verarbeitung;
 };
 
 type Vorgang = {
@@ -133,7 +134,7 @@ function abgleichen(vorgaenge: Vorgang[], dokumente: DocumentRecord[]): Vorgang[
   return naechste;
 }
 
-export default function SammlungDetail({ sammlung, dokumente, preset }: Eigenschaften) {
+export default function SammlungDetail({ sammlung, dokumente, verarbeitung }: Eigenschaften) {
   const router = useRouter();
 
   const kind = sammlung.kind;
@@ -440,13 +441,24 @@ export default function SammlungDetail({ sammlung, dokumente, preset }: Eigensch
           </div>
           <div className="kennzahl">
             <div className="kennzahl-wert" style={{ fontSize: 17 }}>
-              {kind === "vector" ? preset.label : KIND_LABEL[kind]}
+              {kind === "vector" ? verarbeitung.label : KIND_LABEL[kind]}
             </div>
             <div className="kennzahl-beschriftung">
               {kind === "vector" ? "Verarbeitung" : "Art"}
             </div>
           </div>
         </div>
+
+        {kind === "vector" && (
+          <p className="hinweis-text verarbeitung-werte">
+            {verarbeitung.zielGroesse.toLocaleString("de-DE")} Zeichen je Abschnitt ·{" "}
+            {verarbeitung.ueberlappung} Zeichen Ueberlappung · {verarbeitung.topK} Treffer je
+            Suche · Mindest-Aehnlichkeit {schwelle(verarbeitung.minScore)}
+            {verarbeitung.angepasst
+              ? " · im Expertenmodus angepasst"
+              : " · Vorgaben des Presets"}
+          </p>
+        )}
       </div>
 
       {sammlung.schema && <SchemaCard schema={sammlung.schema} />}
@@ -454,7 +466,7 @@ export default function SammlungDetail({ sammlung, dokumente, preset }: Eigensch
       <div className="karte">
         <h2 className="karte-titel">{texte.titel}</h2>
         <p className="hinweis-text">
-          {texte.hinweis} {kind === "vector" ? `${preset.kurz} ` : ""}Hoechstens{" "}
+          {texte.hinweis} {kind === "vector" ? `${verarbeitung.kurz} ` : ""}Hoechstens{" "}
           {klasse.maxPagesPerDocument} Seiten und{" "}
           {Math.round(klasse.maxFileBytes / (1024 * 1024))} MB je Datei.
         </p>
@@ -683,6 +695,13 @@ function Angaben({
       </div>
     </div>
   );
+}
+
+function schwelle(minScore: number): string {
+  return minScore.toLocaleString("de-DE", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
 function groesse(bytes: number): string {

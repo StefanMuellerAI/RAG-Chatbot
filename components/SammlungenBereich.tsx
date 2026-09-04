@@ -11,7 +11,14 @@ import {
 } from "@/lib/collection-kinds";
 import type { SammlungMitKlasse } from "@/lib/collections";
 import type { SizeClass } from "@/lib/db/schema";
-import type { Preset } from "@/lib/presets";
+import {
+  STANDARD_MIN_SCORE,
+  VERARBEITUNG_GRENZEN,
+  maxUeberlappung,
+  type Preset,
+  type VerarbeitungOverride,
+  type VerarbeitungsFeld,
+} from "@/lib/presets";
 
 type Eigenschaften = {
   sammlungen: SammlungMitKlasse[];
@@ -28,6 +35,8 @@ type NeueSammlung = {
   kind: CollectionKind;
   preset: string;
   sizeClassId: string;
+  /** Expertenmodus; null, wenn die Werte des Presets gelten sollen. */
+  verarbeitung: VerarbeitungOverride | null;
 };
 
 export default function SammlungenBereich({
@@ -144,7 +153,9 @@ export default function SammlungenBereich({
                 </p>
 
                 <div className="sammlung-fuss">
-                  {verarbeitung} · {sammlung.documentCount}{" "}
+                  {verarbeitung}
+                  {sammlung.kind === "vector" && sammlung.processing ? " (angepasst)" : ""} ·{" "}
+                  {sammlung.documentCount}{" "}
                   {sammlung.documentCount === 1 ? "Dokument" : "Dokumente"} ·{" "}
                   {sammlung.pageCount} Seiten
                 </div>
@@ -181,8 +192,40 @@ function Anlegeformular({
   // Die kleinste erlaubte Klasse als Vorauswahl: Sie ist bei allen Plaenen
   // verfuegbar, und heraufsetzen ist einfacher zu verstehen als herabsetzen.
   const [sizeClassId, setSizeClassId] = useState(klassen[0]?.id ?? "");
+  // null: Der Expertenmodus wurde nicht angefasst, es gelten die Werte des
+  // Presets. Sonst die Eingaben als Text, so wie sie in den Feldern stehen.
+  const [experten, setExperten] = useState<ExpertenEingabe | null>(null);
 
-  const bereit = name.trim().length >= 2 && sizeClassId && !gesperrt;
+  const aktivesPreset = presets.find((eintrag) => eintrag.id === preset) ?? presets[0];
+  const expertenWerte = experten ?? (aktivesPreset ? vorgaben(aktivesPreset) : null);
+  const expertenFehler =
+    aktivesPreset && expertenWerte ? pruefeExperten(expertenWerte, aktivesPreset) : {};
+  const expertenGueltig =
+    kind !== "vector" || Object.keys(expertenFehler).length === 0;
+
+  const bereit = name.trim().length >= 2 && sizeClassId && expertenGueltig && !gesperrt;
+
+  function waehlePreset(id: Preset["id"]) {
+    setPreset(id);
+    // Die Vorgaben haengen am Preset; alte Abweichungen zu einem anderen
+    // Preset waeren hier irrefuehrend.
+    setExperten(null);
+  }
+
+  function setzeExperten(feld: VerarbeitungsFeld, wert: string) {
+    if (!aktivesPreset) return;
+    setExperten({ ...(experten ?? vorgaben(aktivesPreset)), [feld]: wert });
+  }
+
+  function verarbeitung(): VerarbeitungOverride | null {
+    if (kind !== "vector" || !experten) return null;
+    return {
+      zielGroesse: Number(experten.zielGroesse),
+      ueberlappung: Number(experten.ueberlappung),
+      topK: Number(experten.topK),
+      minScore: Number(experten.minScore.replace(",", ".")),
+    };
+  }
 
   return (
     <div className="anlegen">
@@ -277,7 +320,7 @@ function Anlegeformular({
                   name="preset"
                   value={eintrag.id}
                   checked={eintrag.id === preset}
-                  onChange={() => setPreset(eintrag.id)}
+                  onChange={() => waehlePreset(eintrag.id)}
                 />
                 <span className="wahlkarte-titel">{eintrag.label}</span>
                 <span className="wahlkarte-kurz">{eintrag.kurz}</span>
@@ -285,6 +328,17 @@ function Anlegeformular({
               </label>
             ))}
           </div>
+
+          {aktivesPreset && expertenWerte && (
+            <Expertenmodus
+              preset={aktivesPreset}
+              werte={expertenWerte}
+              fehler={expertenFehler}
+              angefasst={experten !== null}
+              onAendern={setzeExperten}
+              onZuruecksetzen={() => setExperten(null)}
+            />
+          )}
         </fieldset>
       )}
 
@@ -325,7 +379,16 @@ function Anlegeformular({
         <button
           className="knopf"
           disabled={!bereit}
-          onClick={() => onAnlegen({ name, beschreibung, kind, preset, sizeClassId })}
+          onClick={() =>
+            onAnlegen({
+              name,
+              beschreibung,
+              kind,
+              preset,
+              sizeClassId,
+              verarbeitung: verarbeitung(),
+            })
+          }
         >
           {gesperrt ? "Wird angelegt …" : "Sammlung anlegen"}
         </button>
@@ -334,5 +397,201 @@ function Anlegeformular({
         </button>
       </div>
     </div>
+  );
+}
+
+// --- Expertenmodus ----------------------------------------------------------
+
+/** Die vier Felder als Text, so wie sie in den Eingabefeldern stehen. */
+type ExpertenEingabe = Record<VerarbeitungsFeld, string>;
+
+type ExpertenFehler = Partial<Record<VerarbeitungsFeld, string>>;
+
+const dezimal = new Intl.NumberFormat("de-DE", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+/** Die Vorgaben des Presets in Feldform. */
+function vorgaben(preset: Preset): ExpertenEingabe {
+  return {
+    zielGroesse: String(preset.zielGroesse),
+    ueberlappung: String(preset.ueberlappung),
+    topK: String(preset.topK),
+    minScore: STANDARD_MIN_SCORE.toFixed(2),
+  };
+}
+
+/**
+ * Plausibilitaet im Browser, damit der Knopf erst freigegeben wird, wenn die
+ * Werte durchgehen. Die verbindliche Pruefung macht der Server
+ * (pruefeVerarbeitung in lib/presets.ts) mit denselben Grenzen.
+ */
+function pruefeExperten(werte: ExpertenEingabe, preset: Preset): ExpertenFehler {
+  const fehler: ExpertenFehler = {};
+
+  const zielGroesse = ganzzahl(werte.zielGroesse);
+  const { min: minGroesse, max: maxGroesse } = VERARBEITUNG_GRENZEN.zielGroesse;
+  if (zielGroesse === null || zielGroesse < minGroesse || zielGroesse > maxGroesse) {
+    fehler.zielGroesse = `Ganze Zahl zwischen ${minGroesse} und ${maxGroesse.toLocaleString("de-DE")}.`;
+  }
+
+  const ueberlappung = ganzzahl(werte.ueberlappung);
+  const hoechstens = maxUeberlappung(zielGroesse ?? preset.zielGroesse);
+  if (ueberlappung === null || ueberlappung < 0 || ueberlappung > hoechstens) {
+    fehler.ueberlappung = `Ganze Zahl zwischen 0 und ${hoechstens} (unter der halben Abschnittsgroesse).`;
+  }
+
+  const topK = ganzzahl(werte.topK);
+  const { min: minTopK, max: maxTopK } = VERARBEITUNG_GRENZEN.topK;
+  if (topK === null || topK < minTopK || topK > maxTopK) {
+    fehler.topK = `Ganze Zahl zwischen ${minTopK} und ${maxTopK}.`;
+  }
+
+  const minScore = Number(werte.minScore.trim().replace(",", "."));
+  const { min: minSchwelle, max: maxSchwelle } = VERARBEITUNG_GRENZEN.minScore;
+  if (
+    werte.minScore.trim() === "" ||
+    !Number.isFinite(minScore) ||
+    minScore < minSchwelle ||
+    minScore > maxSchwelle
+  ) {
+    fehler.minScore = `Zahl zwischen ${minSchwelle} und ${maxSchwelle}, z. B. 0,80.`;
+  }
+
+  return fehler;
+}
+
+function ganzzahl(text: string): number | null {
+  if (text.trim() === "") return null;
+  const zahl = Number(text);
+  return Number.isInteger(zahl) ? zahl : null;
+}
+
+/**
+ * Zugeklappt eine Zeile, aufgeklappt vier Zahlenfelder. Die Werte sind mit
+ * dem Preset vorbelegt; wer nichts anfasst, bekommt eine gewoehnliche
+ * Preset-Sammlung.
+ */
+function Expertenmodus({
+  preset,
+  werte,
+  fehler,
+  angefasst,
+  onAendern,
+  onZuruecksetzen,
+}: {
+  preset: Preset;
+  werte: ExpertenEingabe;
+  fehler: ExpertenFehler;
+  angefasst: boolean;
+  onAendern: (feld: VerarbeitungsFeld, wert: string) => void;
+  onZuruecksetzen: () => void;
+}) {
+  const felder: {
+    id: VerarbeitungsFeld;
+    label: string;
+    zusatz: string;
+    step: number;
+    min: number;
+    max: number;
+    inputMode: "numeric" | "decimal";
+  }[] = [
+    {
+      id: "zielGroesse",
+      label: "Abschnittsgroesse",
+      zusatz: "Zeichen",
+      step: 1,
+      min: VERARBEITUNG_GRENZEN.zielGroesse.min,
+      max: VERARBEITUNG_GRENZEN.zielGroesse.max,
+      inputMode: "numeric",
+    },
+    {
+      id: "ueberlappung",
+      label: "Ueberlappung",
+      zusatz: "Zeichen",
+      step: 1,
+      min: VERARBEITUNG_GRENZEN.ueberlappung.min,
+      max: maxUeberlappung(ganzzahl(werte.zielGroesse) ?? preset.zielGroesse),
+      inputMode: "numeric",
+    },
+    {
+      id: "topK",
+      label: "Treffer je Suche",
+      zusatz: "Abschnitte",
+      step: 1,
+      min: VERARBEITUNG_GRENZEN.topK.min,
+      max: VERARBEITUNG_GRENZEN.topK.max,
+      inputMode: "numeric",
+    },
+    {
+      id: "minScore",
+      label: "Mindest-Aehnlichkeit",
+      zusatz: "0 bis 1",
+      step: 0.01,
+      min: VERARBEITUNG_GRENZEN.minScore.min,
+      max: VERARBEITUNG_GRENZEN.minScore.max,
+      inputMode: "decimal",
+    },
+  ];
+
+  return (
+    <details className="experten">
+      <summary>Expertenmodus{angefasst ? " · angepasst" : ""}</summary>
+
+      <p className="feld-zusatz">
+        Vorbelegt mit den Werten von „{preset.label}“. Sie gelten fuer die ganze Sammlung
+        und lassen sich nachtraeglich nicht aendern — die Abschnitte einer Sammlung
+        muessen vergleichbar lang bleiben, sonst hinge die Rangfolge der Treffer von der
+        Laenge ab statt vom Inhalt. Ein Wechsel des Presets setzt die Werte zurueck.
+      </p>
+
+      <div className="experten-raster">
+        {felder.map((feld) => {
+          const meldung = fehler[feld.id];
+          const eingabeId = `experten-${feld.id}`;
+          return (
+            <div key={feld.id} className="feld">
+              <label htmlFor={eingabeId}>
+                {feld.label} <span className="feld-zusatz">{feld.zusatz}</span>
+              </label>
+              <input
+                id={eingabeId}
+                type="number"
+                inputMode={feld.inputMode}
+                min={feld.min}
+                max={feld.max}
+                step={feld.step}
+                value={werte[feld.id]}
+                aria-invalid={meldung ? true : undefined}
+                aria-describedby={meldung ? `${eingabeId}-fehler` : undefined}
+                onChange={(e) => onAendern(feld.id, e.target.value)}
+              />
+              {meldung && (
+                <p id={`${eingabeId}-fehler`} className="feld-fehler">
+                  {meldung}
+                </p>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="experten-fuss">
+        <span className="feld-zusatz">
+          Vorgabe {preset.label}: {preset.zielGroesse.toLocaleString("de-DE")} Zeichen ·{" "}
+          {preset.ueberlappung} Ueberlappung · {preset.topK} Treffer · ab{" "}
+          {dezimal.format(STANDARD_MIN_SCORE)}
+        </span>
+        <button
+          type="button"
+          className="knopf-schlicht"
+          disabled={!angefasst}
+          onClick={onZuruecksetzen}
+        >
+          Auf Preset zuruecksetzen
+        </button>
+      </div>
+    </details>
   );
 }

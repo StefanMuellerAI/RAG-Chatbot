@@ -1242,6 +1242,88 @@ fieldset.auswahl .feld-zusatz {
   flex-wrap: wrap;
 }
 
+/* --- Expertenmodus -------------------------------------------------------- */
+
+/* Bewusst unauffaellig: eine graue Zeile unter den Preset-Karten, kein
+   eigener Kasten. Wer sie nicht sucht, soll sie nicht als Aufforderung lesen. */
+.experten {
+  margin-top: 12px;
+}
+
+.experten > summary {
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  list-style: none;
+  font-size: 13px;
+  color: var(--grau-600);
+  width: fit-content;
+}
+
+.experten > summary::-webkit-details-marker {
+  display: none;
+}
+
+.experten > summary::before {
+  content: "";
+  flex: none;
+  align-self: center;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 6px solid var(--grau-600);
+  transition: transform 120ms ease;
+}
+
+.experten[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.experten > summary:hover {
+  color: var(--rot-dunkel);
+}
+
+.experten > .feld-zusatz {
+  display: block;
+  margin: 10px 0 12px;
+}
+
+.experten-raster {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 0 16px;
+}
+
+.experten-raster .feld {
+  margin-bottom: 12px;
+}
+
+.experten-raster input[aria-invalid="true"] {
+  border-color: var(--rot);
+}
+
+.feld-fehler {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--rot-dunkel);
+}
+
+.experten-fuss {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* Die wirksamen Schnitt- und Suchwerte unter den Kennzahlen der Detailseite. */
+.verarbeitung-werte {
+  margin: 12px 0 0;
+  font-size: 13px;
+}
+
 /* --- Schema-Anzeige (Tabellen- und Graph-Sammlungen) ---------------------- */
 
 .formular-raster {

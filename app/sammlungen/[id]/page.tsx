@@ -4,7 +4,7 @@ import { requireKontextFuerSeite } from "@/lib/auth/user";
 import { ladeSammlung } from "@/lib/collections";
 import { ladeDokumenteDerSammlung } from "@/lib/documents";
 import { NotFoundError } from "@/lib/errors";
-import { findPreset } from "@/lib/presets";
+import { effektiveVerarbeitung } from "@/lib/presets";
 
 export const dynamic = "force-dynamic";
 
@@ -25,7 +25,7 @@ export default async function SammlungSeite({
     <SammlungDetail
       sammlung={daten.sammlung}
       dokumente={daten.dokumente}
-      preset={findPreset(daten.sammlung.preset)}
+      verarbeitung={effektiveVerarbeitung(daten.sammlung)}
     />
   );
 }
