@@ -12,7 +12,13 @@ import { loescheUnterPraefix, sammlungsPraefix } from "./documents";
 import { graphConfigured } from "./env";
 import { NotFoundError, ValidationError } from "./errors";
 import { deleteGraph } from "./graphstore";
-import { STANDARD_PRESET, isPresetId } from "./presets";
+import {
+  STANDARD_PRESET,
+  findPreset,
+  isPresetId,
+  pruefeVerarbeitung,
+  type VerarbeitungOverride,
+} from "./presets";
 import {
   pruefeGroessenklasse,
   pruefeNeueSammlung,
@@ -83,6 +89,8 @@ export type SammlungEingabe = {
   sizeClassId: unknown;
   /** Sammlungstyp; fehlt er, entsteht eine Dokumentensammlung. */
   kind?: unknown;
+  /** Expertenmodus: Abweichungen vom Preset. Nur fuer Dokumentensammlungen. */
+  verarbeitung?: unknown;
 };
 
 /**
@@ -122,6 +130,7 @@ export async function erstelleSammlung(
   // Migration noch ein Sonderfall in findPreset noetig wird, bekommen diese
   // Sammlungen serverseitig den Standardwert.
   let preset: PresetId;
+  let processing: VerarbeitungOverride | null = null;
   if (kind === "vector") {
     if (!isPresetId(eingabe.preset)) {
       throw new ValidationError(
@@ -129,6 +138,7 @@ export async function erstelleSammlung(
       );
     }
     preset = eingabe.preset;
+    processing = pruefeVerarbeitung(findPreset(preset), eingabe.verarbeitung);
   } else {
     preset = STANDARD_PRESET;
   }
@@ -149,6 +159,7 @@ export async function erstelleSammlung(
       description: beschreibung,
       descriptionSource: beschreibung ? "user" : "auto",
       preset,
+      processing,
       kind,
       sizeClassId: klasse.id,
     })

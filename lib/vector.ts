@@ -1,6 +1,7 @@
 import { Pinecone } from "@pinecone-database/pinecone";
 import { requireEnv } from "./env";
 import { fehlerMeldung } from "./errors";
+import { STANDARD_MIN_SCORE } from "./presets";
 
 /**
  * Vektorsuche ueber Pinecone Serverless — ein Namespace je Sammlung.
@@ -30,15 +31,13 @@ export const TEXT_FELD = "chunk_text";
 export const EMBEDDING_MODELL = "multilingual-e5-large";
 
 /**
- * Aehnlichkeitsschwelle.
+ * Aehnlichkeitsschwelle, sofern eine Sammlung keine eigene setzt.
  *
- * NEU KALIBRIERT gegenueber dem Vorgaenger: Dort galt 0,35 fuer bge-m3 mit
- * Dot-Product. multilingual-e5-large arbeitet mit Cosine und legt seine Werte
- * deutlich hoeher und enger zusammen — auch inhaltlich unpassende Abschnitte
- * erreichen dort noch etwa 0,75. Der Wert unten trennt bei diesem Modell
- * zwischen "hat mit der Frage zu tun" und "ist nur auch deutscher Text".
+ * Der Wert und seine Kalibrierung stehen in lib/presets.ts, weil das
+ * Anlegeformular ihn als Vorgabe zeigt. Hier bleibt er unter dem alten Namen
+ * erreichbar, damit bestehende Aufrufer und Test-Mocks weiterlaufen.
  */
-export const MIN_SCORE = 0.82;
+export const MIN_SCORE = STANDARD_MIN_SCORE;
 
 export type ChunkMetadata = {
   docId: string;

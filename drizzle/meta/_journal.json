@@ -22,6 +22,13 @@
       "when": 1788331390478,
       "tag": "0002_modelle_und_anbieter_keys",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1788539542592,
+      "tag": "0003_verarbeitung_je_sammlung",
+      "breakpoints": true
     }
   ]
 }

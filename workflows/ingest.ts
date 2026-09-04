@@ -5,7 +5,6 @@ import { modell } from "@/lib/ai";
 import { setzeAutoBeschreibung } from "@/lib/collections";
 import { getDb } from "@/lib/db";
 import { collections, documents, sizeClasses } from "@/lib/db/schema";
-import type { PresetId } from "@/lib/db/schema";
 import type { CollectionKind } from "@/lib/collection-kinds";
 import {
   entferneDokumentSatz,
@@ -23,7 +22,7 @@ import { chunkBlocks } from "@/lib/chunk";
 import { ersetzteDokumente, ingestGraph, ingestSql } from "@/lib/ingest";
 import { DEFAULT_MODEL_ID } from "@/lib/models";
 import { planeMp3Teile, type Mp3Teil } from "@/lib/mp3-teile";
-import { findPreset } from "@/lib/presets";
+import { effektiveVerarbeitung, type Verarbeitung } from "@/lib/presets";
 import { pruefeSeitenzahl } from "@/lib/quota";
 import { erwirbSperre, gibSperreFrei, sperrSchluessel } from "@/lib/ratelimit";
 import {
@@ -56,7 +55,8 @@ type Vorbereitung = {
   filename: string;
   contentType: string;
   blobPath: string;
-  preset: PresetId;
+  /** Preset samt Abweichungen aus dem Expertenmodus — steuert das Zerlegen. */
+  verarbeitung: Verarbeitung;
   /** Sammlungstyp — entscheidet, welcher Verarbeitungsschritt laeuft. */
   kind: CollectionKind;
   /** Grenzen der Groessenklasse — die Seitenpruefung braucht sie im Schritt. */
@@ -104,7 +104,7 @@ async function bereiteVor(docId: string): Promise<Vorbereitung> {
     filename: zeile.dokument.filename,
     contentType: zeile.dokument.contentType,
     blobPath: zeile.dokument.blobPath,
-    preset: zeile.sammlung.preset,
+    verarbeitung: effektiveVerarbeitung(zeile.sammlung),
     kind: zeile.sammlung.kind,
     sizeClassId: zeile.klasse.id,
     maxPagesPerDocument: zeile.klasse.maxPagesPerDocument,
@@ -168,8 +168,8 @@ async function extrahiereUndSchreibe(
     throw error;
   }
 
-  const preset = findPreset(vorbereitung.preset);
-  const abschnitte = chunkBlocks(bloecke, preset);
+  const { verarbeitung } = vorbereitung;
+  const abschnitte = chunkBlocks(bloecke, verarbeitung);
 
   if (abschnitte.length === 0) {
     throw new FatalError(
@@ -180,7 +180,7 @@ async function extrahiereUndSchreibe(
   }
 
   console.log(
-    `[ingest ${docId}] ${seiten} Seiten, ${abschnitte.length} Abschnitte (${preset.label})`,
+    `[ingest ${docId}] ${seiten} Seiten, ${abschnitte.length} Abschnitte (${beschreibeVerarbeitung(verarbeitung)})`,
   );
 
   try {
@@ -300,8 +300,8 @@ async function schreibeAudioChunks(
     throw error;
   }
 
-  const preset = findPreset(vorbereitung.preset);
-  const abschnitte = chunkBlocks(bloecke, preset);
+  const { verarbeitung } = vorbereitung;
+  const abschnitte = chunkBlocks(bloecke, verarbeitung);
 
   if (abschnitte.length === 0) {
     throw new FatalError(
@@ -311,7 +311,7 @@ async function schreibeAudioChunks(
   }
 
   console.log(
-    `[ingest ${docId}] Transkript: ${seiten} Seiten, ${abschnitte.length} Abschnitte (${preset.label})`,
+    `[ingest ${docId}] Transkript: ${seiten} Seiten, ${abschnitte.length} Abschnitte (${beschreibeVerarbeitung(verarbeitung)})`,
   );
 
   try {
@@ -330,6 +330,15 @@ async function schreibeAudioChunks(
   }
 
   return { seiten, abschnitte: abschnitte.length };
+}
+
+/** Fuer das Log: Preset und, falls abweichend, die tatsaechlichen Schnittwerte. */
+function beschreibeVerarbeitung(verarbeitung: Verarbeitung): string {
+  if (!verarbeitung.angepasst) return verarbeitung.label;
+  return (
+    `${verarbeitung.label}, angepasst: ${verarbeitung.zielGroesse} Zeichen, ` +
+    `${verarbeitung.ueberlappung} Ueberlappung`
+  );
 }
 
 /** So lange darf ein Upload die SQLite-Datei bzw. den Graphen einer Sammlung hoechstens sperren. */

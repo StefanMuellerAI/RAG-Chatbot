@@ -15,6 +15,7 @@ export function beispielSammlung(
     description: "",
     descriptionSource: "user",
     preset: "fliesstext",
+    processing: null,
     schema: null,
     sizeClassId: "S",
     documentCount: 0,

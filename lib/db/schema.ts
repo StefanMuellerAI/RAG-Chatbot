@@ -13,6 +13,7 @@ import {
 } from "drizzle-orm/pg-core";
 import type { CollectionKind, CollectionSchema } from "../collection-kinds";
 import type { Anbieter, KeyAnbieter } from "../models";
+import type { VerarbeitungOverride } from "../presets";
 import type { ToolStep } from "../tools-types";
 
 /**
@@ -112,6 +113,13 @@ export const collections = pgTable(
      * FalkorDB. Das Preset gilt nur fuer den Typ vector.
      */
     kind: text("kind").$type<CollectionKind>().notNull().default("vector"),
+    /**
+     * Abweichungen vom Preset aus dem Expertenmodus (siehe lib/presets.ts):
+     * Abschnittsgroesse, Ueberlappung, Treffer je Suche, Mindest-Aehnlichkeit.
+     * Nur fuer den Typ vector. null heisst: die Werte des Presets gelten —
+     * auch dann noch, wenn das Preset spaeter nachjustiert wird.
+     */
+    processing: jsonb("processing").$type<VerarbeitungOverride>(),
     /**
      * Struktur der Daten fuer sql- und graph-Sammlungen (Tabellen und
      * Spalten bzw. Labels und Kantentypen). Das Modell braucht sie, um SQL

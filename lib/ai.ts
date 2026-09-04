@@ -13,9 +13,9 @@ import {
   type Anbieter,
   type KeyAnbieter,
 } from "./models";
-import { findPreset } from "./presets";
+import { effektiveVerarbeitung, findPreset } from "./presets";
 import { ladeKey } from "./provider-keys";
-import { MIN_SCORE, sucheInSammlung, type Hit } from "./vector";
+import { sucheInSammlung, type Hit } from "./vector";
 
 /**
  * Modellzugriff, Systemanweisung und das Werkzeug zur Sammlungsauswahl.
@@ -377,14 +377,18 @@ export function baueSuchwerkzeug(userId: string, sammler: Fundstellensammler) {
   });
 }
 
-/** Sucht in einer Sammlung mit dem topK ihres Presets und filtert Rauschen aus. */
+/**
+ * Sucht in einer Sammlung mit ihrem topK und filtert Rauschen unterhalb ihrer
+ * Aehnlichkeitsschwelle aus. Beides kommt aus dem Preset, sofern die Sammlung
+ * es nicht im Expertenmodus uebersteuert hat.
+ */
 export async function sucheMitSchwelle(
   sammlung: SammlungMitKlasse,
   suchbegriff: string,
 ): Promise<Hit[]> {
-  const preset = findPreset(sammlung.preset);
-  const hits = await sucheInSammlung(sammlung.id, suchbegriff, preset.topK);
-  return hits.filter((hit) => hit.score >= MIN_SCORE);
+  const verarbeitung = effektiveVerarbeitung(sammlung);
+  const hits = await sucheInSammlung(sammlung.id, suchbegriff, verarbeitung.topK);
+  return hits.filter((hit) => hit.score >= verarbeitung.minScore);
 }
 
 /**
