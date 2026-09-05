@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { beispielSammlung } from "./hilfen";
 
 /**
@@ -10,7 +10,9 @@ const speicher = vi.hoisted(() => ({
   bytes: null as Uint8Array | null,
   geladen: [] as { userId: string; collectionId: string }[],
   cypherCalls: [] as string[],
+  lock: vi.fn<(key: string, owner: string, seconds: number) => Promise<boolean>>(async () => true), unlock: vi.fn(async () => undefined),
 }));
+vi.mock("@/lib/ratelimit", () => ({ erwirbSperre: speicher.lock, gibSperreFrei: speicher.unlock, sperrSchluessel: (id: string) => `wa:write:${id}` }));
 
 vi.mock("@/lib/sqlstore", async () => {
   const echt = await vi.importActual<typeof import("@/lib/sqlstore")>("@/lib/sqlstore");
@@ -23,6 +25,15 @@ vi.mock("@/lib/sqlstore", async () => {
     },
   };
 });
+
+vi.mock("@/lib/capacity", () => ({ withCapacity: async (_kind: string, work: () => Promise<unknown>) => work() }));
+vi.mock("@/lib/sql-executor", () => ({
+  runSql: async (collection: { userId: string; id: string }, query: string) => {
+    const store = await import("@/lib/sqlstore");
+    const db = await store.loadDatabase(collection.userId, collection.id);
+    try { return store.runReadOnlyQuery(db, query); } finally { db.close(); }
+  },
+}));
 
 vi.mock("@/lib/graphstore", () => ({
   runReadOnlyCypher: async (_id: string, cypher: string) => {
@@ -37,6 +48,7 @@ vi.mock("@/lib/graphstore", () => ({
 }));
 
 import { newDatabase, replaceTable } from "@/lib/sqlstore";
+import { RateLimitError, ToolUnavailableError } from "@/lib/errors";
 import {
   ERGEBNIS_MAX_ZEICHEN,
   baueCypherWerkzeug,
@@ -88,6 +100,7 @@ beforeAll(async () => {
   speicher.bytes = db.export();
   db.close();
 });
+beforeEach(() => { speicher.lock.mockReset().mockResolvedValue(true); speicher.unlock.mockClear(); });
 
 describe("Allowlist", () => {
   it("lehnt fremde Sammlungs-IDs als Ergebnis ab, nicht als Ausnahme", async () => {
@@ -173,6 +186,32 @@ describe("Ausfuehrung", () => {
 
     expect(ergebnis).toMatchObject({ ok: true, collection: "Netzwerk", rowCount: 1 });
     expect(speicher.cypherCalls).toContain("MATCH (p:Person) RETURN p");
+    expect(speicher.lock).toHaveBeenCalledWith("wa:write:c-graph", expect.any(String), 30);
+    expect(speicher.unlock).toHaveBeenCalledExactlyOnceWith("wa:write:c-graph", speicher.lock.mock.calls[0][1]);
+  });
+
+  it("does not read a graph during an upload or rebuild and propagates backpressure", async () => {
+    speicher.lock.mockResolvedValue(false);
+    const before = speicher.cypherCalls.length;
+    await expect(ausfuehren(baueCypherWerkzeug([graph]))({ cypher: "MATCH (n) RETURN n" })).rejects.toBeInstanceOf(RateLimitError);
+    expect(speicher.cypherCalls).toHaveLength(before);
+    expect(speicher.unlock).not.toHaveBeenCalled();
+  });
+
+  it("fails closed on graph lock infrastructure failure", async () => {
+    speicher.lock.mockRejectedValue(new Error("Redis unavailable"));
+    const before = speicher.cypherCalls.length;
+    await expect(ausfuehren(baueCypherWerkzeug([graph]))({ cypher: "MATCH (n) RETURN n" })).rejects.toBeInstanceOf(ToolUnavailableError);
+    expect(speicher.cypherCalls).toHaveLength(before);
+  });
+
+  it("releases only its unique graph lock owner when the request aborts after acquisition", async () => {
+    const controller = new AbortController();
+    speicher.lock.mockImplementation(async () => { controller.abort(); return true; });
+    const before = speicher.cypherCalls.length;
+    await expect(ausfuehren(baueCypherWerkzeug([graph], { signal: controller.signal }))({ cypher: "MATCH (n) RETURN n" })).rejects.toThrow();
+    expect(speicher.cypherCalls).toHaveLength(before);
+    expect(speicher.unlock).toHaveBeenCalledExactlyOnceWith("wa:write:c-graph", speicher.lock.mock.calls[0][1]);
   });
 });
 

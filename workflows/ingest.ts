@@ -1,4 +1,8 @@
-import { FatalError, RetryableError } from "workflow";
+import { randomUUID } from "node:crypto";
+import { CapacityLeaseLostError, checkIngestionCapacity, protectIngestionLock, reserveModelCall, withIngestionCapacity } from "@/lib/capacity";
+import { tokenBound } from "@/lib/chat-contract";
+import { RateLimitError } from "@/lib/errors";
+import { FatalError, RetryableError, getStepMetadata } from "workflow";
 import { generateText } from "ai";
 import { eq } from "drizzle-orm";
 import { modell } from "@/lib/ai";
@@ -19,7 +23,7 @@ import { MissingConfigError } from "@/lib/env";
 import { QuotaError, ValidationError, fehlerMeldung } from "@/lib/errors";
 import { extractBlocks, istMp3 } from "@/lib/extract";
 import { chunkBlocks } from "@/lib/chunk";
-import { ersetzteDokumente, ingestGraph, ingestSql } from "@/lib/ingest";
+import { ersetzteDokumente, ingestGraph, ingestSql, rebuildGraph } from "@/lib/ingest";
 import { DEFAULT_MODEL_ID } from "@/lib/models";
 import { planeMp3Teile, type Mp3Teil } from "@/lib/mp3-teile";
 import { effektiveVerarbeitung, type Verarbeitung } from "@/lib/presets";
@@ -96,7 +100,8 @@ async function bereiteVor(docId: string): Promise<Vorbereitung> {
     throw new FatalError(`Dokument ${docId} existiert nicht mehr.`);
   }
 
-  await setzeDokumentStatus(docId, "laeuft");
+  // A repeated workflow must not hide an import that already committed.
+  if (zeile.dokument.status !== "fertig") await setzeDokumentStatus(docId, "laeuft");
 
   return {
     userId: zeile.dokument.userId,
@@ -132,6 +137,7 @@ async function extrahiereUndSchreibe(
   vorbereitung: Vorbereitung,
 ): Promise<{ seiten: number; abschnitte: number }> {
   "use step";
+  return await ingestionCapacity(async () => {
 
   console.log(`[ingest ${docId}] Extraktion von "${vorbereitung.filename}"`);
 
@@ -143,12 +149,14 @@ async function extrahiereUndSchreibe(
   }
 
   const puffer = await new Response(strom).arrayBuffer();
+  checkIngestionCapacity();
 
   const { bloecke, seiten } = await extractBlocks(
     puffer,
     vorbereitung.filename,
     vorbereitung.contentType,
   );
+  checkIngestionCapacity();
 
   // Seitengrenze der Groessenklasse. Vorher nicht pruefbar: Die Seitenzahl
   // steht erst nach der Extraktion fest.
@@ -204,6 +212,8 @@ async function extrahiereUndSchreibe(
   }
 
   return { seiten, abschnitte: abschnitte.length };
+
+  });
 }
 
 /**
@@ -235,6 +245,7 @@ async function planeAudioTeile(
   vorbereitung: Vorbereitung,
 ): Promise<Mp3Teil[]> {
   "use step";
+  return ingestionCapacity(async () => {
 
   console.log(`[ingest ${docId}] MPEG-Rahmen von "${vorbereitung.filename}" lesen`);
 
@@ -246,10 +257,12 @@ async function planeAudioTeile(
   }
 
   try {
+    checkIngestionCapacity();
     return await planeMp3Teile(strom);
   } catch (error) {
     alsAblauffehler(error);
   }
+  });
 }
 
 async function transkribiereAudioTeil(
@@ -257,6 +270,7 @@ async function transkribiereAudioTeil(
   teil: Mp3Teil,
 ): Promise<TranskriptTeilErgebnis> {
   "use step";
+  return await ingestionCapacity(async () => {
 
   const bytes = await leseDateiFenster(
     vorbereitung.blobPath,
@@ -270,10 +284,13 @@ async function transkribiereAudioTeil(
   }
 
   try {
+    checkIngestionCapacity();
     return await transkribiereMp3Teil(bytes, teil);
   } catch (error) {
     alsAblauffehler(error);
   }
+
+  });
 }
 
 async function schreibeAudioChunks(
@@ -282,6 +299,7 @@ async function schreibeAudioChunks(
   teile: TranskriptTeilErgebnis[],
 ): Promise<{ seiten: number; abschnitte: number }> {
   "use step";
+  return await ingestionCapacity(async () => {
 
   const { bloecke, seiten } = fuegeTranskripteZusammen(teile);
 
@@ -330,6 +348,8 @@ async function schreibeAudioChunks(
   }
 
   return { seiten, abschnitte: abschnitte.length };
+
+  });
 }
 
 /** Fuer das Log: Preset und, falls abweichend, die tatsaechlichen Schnittwerte. */
@@ -341,7 +361,7 @@ function beschreibeVerarbeitung(verarbeitung: Verarbeitung): string {
   );
 }
 
-/** So lange darf ein Upload die SQLite-Datei bzw. den Graphen einer Sammlung hoechstens sperren. */
+/** Schreiblock-TTL; der laufende Schritt erneuert sie alle 60 Sekunden. */
 const SPERRE_SEKUNDEN = 120;
 
 /**
@@ -356,6 +376,7 @@ function seitenpruefung(
   seitenBisher: number,
 ): (seiten: number) => void {
   return (seiten) => {
+    checkIngestionCapacity();
     try {
       pruefeSeitenzahl(
         { name: vorbereitung.sammlungsName, pageCount: seitenBisher },
@@ -379,6 +400,8 @@ function seitenpruefung(
  * wird wiederholt; alles andere beendet den Ablauf mit der Meldung.
  */
 function alsAblauffehler(error: unknown): never {
+  checkIngestionCapacity();
+  if (error instanceof CapacityLeaseLostError) throw new RetryableError(error.message, { retryAfter: "30s" });
   if (error instanceof FatalError || error instanceof RetryableError) throw error;
 
   const meldung = fehlerMeldung(error);
@@ -396,6 +419,7 @@ function alsAblauffehler(error: unknown): never {
 }
 
 async function ladePuffer(vorbereitung: Vorbereitung): Promise<ArrayBuffer> {
+  checkIngestionCapacity();
   const strom = await leseDatei(vorbereitung.blobPath);
   if (!strom) {
     throw new FatalError(
@@ -421,28 +445,32 @@ async function ladePuffer(vorbereitung: Vorbereitung): Promise<ArrayBuffer> {
  * derselben Sperre und ist wiederholbar: Ein zweiter Durchlauf findet die
  * Saetze nicht mehr vor.
  */
-async function verarbeiteTabelle(
+export async function verarbeiteTabelle(
   docId: string,
   vorbereitung: Vorbereitung,
 ): Promise<{ seiten: number; abschnitte: number }> {
   "use step";
+  return await ingestionCapacity(async () => {
 
   console.log(`[ingest ${docId}] CSV "${vorbereitung.filename}" als Tabelle`);
 
   const schluessel = sperrSchluessel(vorbereitung.collectionId);
-  await sperreSammlung(schluessel, docId, "Tabellen", "eine andere Tabelle geschrieben");
+  const freigabe = await sperreSammlung(schluessel, randomUUID(), "Tabellen", "eine andere Tabelle geschrieben");
 
   try {
     const vorhanden = await ladeDokumenteDerSammlung(
       vorbereitung.userId,
       vorbereitung.collectionId,
     );
+    checkIngestionCapacity();
+    const fertig = vorhanden.find((satz) => satz.id === docId && satz.status === "fertig");
+    if (fertig) return { seiten: fertig.pageCount, abschnitte: fertig.chunkCount };
     const ersetzt = ersetzteDokumente(vorhanden, vorbereitung.filename, docId);
 
     // Die Seiten der ersetzten Datei zaehlen fuer die Pruefung nicht mehr mit —
     // sie werden gleich zurueckgebucht.
     const seitenBisher = Math.max(
-      vorbereitung.seitenBisher - ersetzt.reduce((summe, satz) => summe + satz.pageCount, 0),
+      vorhanden.reduce((summe, satz) => summe + satz.pageCount, 0) - ersetzt.reduce((summe, satz) => summe + satz.pageCount, 0),
       0,
     );
 
@@ -455,14 +483,20 @@ async function verarbeiteTabelle(
     });
 
     for (const satz of ersetzt) {
+      checkIngestionCapacity();
       console.log(
         `[ingest ${docId}] ersetzt "${satz.filename}" (Tabelle ${ergebnis.replacedTable})`,
       );
       await loescheDatei(satz.blobPath).catch(() => {
         // Die Datei kann bereits fehlen; der Satz muss trotzdem weichen.
       });
+      checkIngestionCapacity();
       await entferneDokumentSatz(satz);
     }
+
+    // Publish readiness before another owner can replace or rebuild this data.
+    checkIngestionCapacity();
+    await schliesseDokumentAb(docId, vorbereitung.collectionId, ergebnis.pageCount, ergebnis.units);
 
     console.log(
       `[ingest ${docId}] ${ergebnis.units} Zeilen in Tabelle ${ergebnis.replacedTable}, ` +
@@ -473,8 +507,10 @@ async function verarbeiteTabelle(
   } catch (error) {
     alsAblauffehler(error);
   } finally {
-    await gibSperreFrei(schluessel, docId);
+    await freigabe();
   }
+
+  });
 }
 
 /**
@@ -489,8 +525,9 @@ async function sperreSammlung(
   inhaber: string,
   typ: string,
   wasLaeuft: string,
-): Promise<void> {
+): Promise<() => Promise<void>> {
   let gesperrt: boolean;
+  const acquiredAt = Date.now();
   try {
     gesperrt = await erwirbSperre(schluessel, inhaber, SPERRE_SEKUNDEN);
   } catch (error) {
@@ -507,45 +544,67 @@ async function sperreSammlung(
       retryAfter: "15s",
     });
   }
+  try {
+    const release = protectIngestionLock(schluessel, inhaber, SPERRE_SEKUNDEN * 1000, acquiredAt);
+    checkIngestionCapacity();
+    return release;
+  } catch (error) {
+    await gibSperreFrei(schluessel, inhaber);
+    throw error;
+  }
 }
 
 /**
  * Cypher-Skript in den Graphen der Sammlung einspielen.
  *
- * Schlaegt der Import fehl, baut lib/ingest.ts den Graphen aus den uebrigen
- * fertigen Skripten neu auf, bevor der Fehler hier ankommt. Der Zustand ist
- * danach derselbe wie vor dem Schritt — ein Wiederholen ist damit gefahrlos.
+ * Vor jedem noch nicht abgeschlossenen Import werden die fertigen Skripte
+ * wiederhergestellt. Das entfernt auch Teilimporte abgebrochener anderer
+ * Dokumente. Die WDK-Versuchsnummer allein erkennt diese nicht, ebenso wenig
+ * einen manuell neu gestarteten Workflow. Ohne dauerhaften Fortschrittsmarker
+ * waere deshalb auch das Ueberspringen beim ersten Versuch unsicher.
  *
  * Dieselbe Sperre wie bei Tabellen: Ein Neuaufbau (nach Fehler oder beim
  * Loeschen eines Skripts) leert den Graphen und spielt die uebrigen Skripte
  * neu ein. Liefe parallel ein Import, wuerde der Neuaufbau ihn wegraeumen —
  * oder ihn als "uebrig" mitzaehlen, obwohl er noch nicht fertig ist.
  */
-async function verarbeiteGraph(
+export async function verarbeiteGraph(
   docId: string,
   vorbereitung: Vorbereitung,
 ): Promise<{ seiten: number; abschnitte: number }> {
   "use step";
+  return await ingestionCapacity(async () => {
 
   console.log(`[ingest ${docId}] Cypher-Skript "${vorbereitung.filename}" in den Graphen`);
 
   const schluessel = sperrSchluessel(vorbereitung.collectionId);
-  await sperreSammlung(schluessel, docId, "Graph", "ein anderes Skript eingespielt");
+  const freigabe = await sperreSammlung(schluessel, randomUUID(), "Graph", "ein anderes Skript eingespielt");
 
   try {
     const vorhanden = await ladeDokumenteDerSammlung(
       vorbereitung.userId,
       vorbereitung.collectionId,
     );
+    checkIngestionCapacity();
+    const fertig = vorhanden.find((satz) => satz.id === docId && satz.status === "fertig");
+    if (fertig) return { seiten: fertig.pageCount, abschnitte: fertig.chunkCount };
     const uebrige = vorhanden.filter((satz) => satz.id !== docId && satz.status === "fertig");
+
+    // A previous owner may have died before its rollback. This fresh owner
+    // reconstructs from committed documents before adding the current script.
+    await rebuildGraph(vorbereitung.userId, vorbereitung.collectionId, uebrige);
+    checkIngestionCapacity();
 
     const ergebnis = await ingestGraph({
       userId: vorbereitung.userId,
       collectionId: vorbereitung.collectionId,
       buffer: await ladePuffer(vorbereitung),
       uebrige,
-      vorSchreiben: seitenpruefung(vorbereitung, vorbereitung.seitenBisher),
+      vorSchreiben: seitenpruefung(vorbereitung, uebrige.reduce((summe, satz) => summe + satz.pageCount, 0)),
     });
+
+    checkIngestionCapacity();
+    await schliesseDokumentAb(docId, vorbereitung.collectionId, ergebnis.pageCount, ergebnis.units);
 
     console.log(
       `[ingest ${docId}] ${ergebnis.units} Statements, ${ergebnis.pageCount} Seiten gerechnet`,
@@ -555,8 +614,10 @@ async function verarbeiteGraph(
   } catch (error) {
     alsAblauffehler(error);
   } finally {
-    await gibSperreFrei(schluessel, docId);
+    await freigabe();
   }
+
+  });
 }
 
 async function schliesseAb(
@@ -575,7 +636,7 @@ async function schliesseAb(
     ergebnis.abschnitte,
   );
 
-  await verbucheIngestion(vorbereitung.userId, ergebnis.abschnitte);
+  await verbucheIngestion(vorbereitung.userId, ergebnis.abschnitte, getStepMetadata().stepId);
 }
 
 /**
@@ -587,7 +648,7 @@ async function schliesseAb(
  * ausfuellt, entsteht die Beschreibung hier aus dem, was tatsaechlich
  * drinsteht — und nur, wenn der Nutzer keine eigene hinterlegt hat.
  */
-async function ergaenzeBeschreibung(collectionId: string): Promise<void> {
+export async function ergaenzeBeschreibung(collectionId: string): Promise<void> {
   "use step";
 
   const db = getDb();
@@ -611,21 +672,30 @@ async function ergaenzeBeschreibung(collectionId: string): Promise<void> {
   console.log(`[ingest] Beschreibung fuer Sammlung ${collectionId} vorschlagen`);
 
   try {
+    await ingestionCapacity(async ({ signal }) => {
+    const instructions =
+      "Du formulierst eine knappe Inhaltsangabe fuer eine Dokumentensammlung. " +
+      "Ein Satz, hoechstens 200 Zeichen, auf Deutsch, ohne Einleitung und ohne " +
+      "Anfuehrungszeichen. Sie soll erkennbar machen, wann sich eine Suche in " +
+      "dieser Sammlung lohnt.";
+    const prompt = `Sammlung "${sammlung.name.slice(0, 200)}" enthaelt diese Dateien:\n` +
+      dateien.map((datei) => `- ${datei.filename.slice(0, 200)}`).join("\n");
+    const abortSignal = AbortSignal.any([signal, AbortSignal.timeout(20_000)]);
+    await reserveModelCall(DEFAULT_MODEL_ID, tokenBound(instructions + prompt) + 256 + 1024, { pool: "ingestion", signal: abortSignal });
     const { text } = await generateText({
       // Bewusst das guenstigste Modell: Es geht um einen Satz aus einer Liste
       // von Dateinamen, nicht um eine inhaltliche Leistung.
       model: await modell(DEFAULT_MODEL_ID),
-      instructions:
-        "Du formulierst eine knappe Inhaltsangabe fuer eine Dokumentensammlung. " +
-        "Ein Satz, hoechstens 200 Zeichen, auf Deutsch, ohne Einleitung und ohne " +
-        "Anfuehrungszeichen. Sie soll erkennbar machen, wann sich eine Suche in " +
-        "dieser Sammlung lohnt.",
-      prompt:
-        `Sammlung "${sammlung.name}" enthaelt diese Dateien:\n` +
-        dateien.map((datei) => `- ${datei.filename}`).join("\n"),
+      instructions,
+      prompt,
+      maxOutputTokens: 256,
+      maxRetries: 0,
+      abortSignal,
     });
 
+    checkIngestionCapacity();
     await setzeAutoBeschreibung(collectionId, text);
+    });
   } catch (error) {
     // Eine misslungene Beschreibung darf die Verarbeitung nicht scheitern
     // lassen — das Dokument ist da und durchsuchbar, darauf kommt es an.
@@ -664,6 +734,16 @@ export async function verarbeiteDokument(docId: string): Promise<void> {
     // Der Fehler muss am Dokument landen, sonst steht es bis in alle Ewigkeit
     // auf "laeuft" und der Nutzer erfaehrt nie, woran es lag.
     await vermerkeFehler(docId, fehlerMeldung(error));
+    throw error;
+  }
+}
+
+/** Ingestion has its own capacity pool; Workflow retries overload without occupying a chat slot. */
+async function ingestionCapacity<T>(work: Parameters<typeof withIngestionCapacity<T>>[0]): Promise<T> {
+  try { return await withIngestionCapacity(work); }
+  catch (error) {
+    if (error instanceof RateLimitError) throw new RetryableError("Verarbeitungskapazitaet belegt.", { retryAfter: "15s" });
+    if (error instanceof CapacityLeaseLostError) throw new RetryableError("Verarbeitungskapazitaet verloren.", { retryAfter: "30s" });
     throw error;
   }
 }

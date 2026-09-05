@@ -1518,3 +1518,82 @@ fieldset.auswahl .feld-zusatz {
     align-items: stretch;
   }
 }
+
+/* --- Chat: stabile Arbeitsfläche und zugängliche Aktionen ------------------ */
+.chat-haupt { min-width: 0; min-height: 0; }
+.chat-karte { --chat-hoehe: max(380px, calc(100dvh - 225px)); height: var(--chat-hoehe); padding: 0; }
+.chat-karte .chat { height: 100%; min-height: 0; gap: 0; }
+.chat-karte .chat-verlauf { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior-y: contain; padding: 20px; scroll-padding: 16px; overflow-anchor: none; }
+.chat-einstellungen { display: flex; gap: 14px; padding: 12px 18px; background: var(--grau-100); border-bottom: 1px solid var(--grau-300); }
+.chat-einstellungen label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--grau-600); min-width: 0; }
+.chat-einstellungen label:first-child { flex: 1; }
+.chat-einstellungen select { width: 100%; min-width: 0; min-height: 40px; padding: 6px 8px; font: inherit; font-size: 14px; color: var(--schwarz); background: var(--weiss); border: 1px solid var(--grau-300); }
+.chat-unterer-bereich { position: sticky; bottom: 0; padding: 10px 18px max(12px, env(safe-area-inset-bottom)); background: var(--weiss); border-top: 1px solid var(--grau-300); }
+.chat-karte .chat-eingabe { flex-direction: row; align-items: flex-end; }
+.chat-karte .chat-eingabe textarea { flex: 1; width: 100%; min-width: 0; resize: none; max-height: 160px; padding: 12px; font: inherit; border: 1px solid var(--grau-300); }
+.chat-karte .chat-eingabe .knopf { min-height: 48px; flex: none; }
+.chat-eingabe-hinweis { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; color: var(--grau-600); margin-top: 5px; }
+.chat-zu-lang { color: var(--rot-dunkel); font-weight: bold; }
+.chat-status { color: var(--grau-600); font-size: 13px; }
+.chat-status:not(:empty) { padding-bottom: 9px; }
+.chat-fehlermeldung { color: var(--rot-dunkel); font-size: 13px; padding-bottom: 8px; }
+.chat-nach-unten { display: block; margin: -28px auto 8px; position: relative; background: var(--weiss); border: 1px solid var(--grau-300); box-shadow: 0 2px 5px #0001; }
+.chat-wissensbasis { font-size: 13px; color: var(--grau-600); overflow-wrap: anywhere; }
+.chat-vorschlaege { display: grid; gap: 8px; max-width: 580px; margin: 20px auto 0; text-align: left; }
+.chat-vorschlaege .knopf-schlicht { padding: 12px 14px; text-align: left; border: 1px solid var(--grau-300); background: var(--weiss); white-space: normal; }
+.nachricht-aktionen { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 10px; white-space: normal; }
+.chat-karte .knopf-schlicht { font-size: 13px; min-height: 36px; }
+.chat-karte .knopf-schlicht[aria-pressed="true"] { color: var(--rot-dunkel); background: var(--rot-hell); }
+.aktions-hinweis { font-size: 12px; color: var(--grau-600); margin: 4px 0 0; }
+.feedback-gruende { border: 1px solid var(--grau-300); padding: 8px; margin-top: 10px; font-size: 13px; }
+.feedback-gruende .knopf-schlicht { display: block; text-align: left; }
+.blase-unvollstaendig { border-left-style: dashed; }
+.chat-unvollstaendig { font-size: 12px; color: var(--rot-dunkel); margin: 10px 0 0; }
+.chat-aeltere { align-self: center; flex: none; }
+.chat-skelett { color: var(--grau-600); font-size: 14px; }
+.chat-skelett > div { height: 70px; width: 78%; background: var(--grau-100); border: 1px solid var(--grau-200); margin-top: 18px; }
+.chat-skelett > div:nth-child(even) { margin-left: auto; width: 58%; }
+.chat-ladeansicht { min-height: 420px; }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+.inline-fundstelle { font: inherit; font-size: .88em; padding: 0 3px; color: var(--rot-dunkel); background: var(--rot-hell); border: 0; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.quellen-link { border: 0; padding: 4px 0; background: none; font: inherit; font-weight: bold; color: var(--rot-dunkel); text-align: left; text-decoration: underline; cursor: pointer; }
+.quellen li p { margin: 4px 0 10px; }
+.quellen-dialog { width: min(620px, calc(100% - 28px)); max-height: calc(100dvh - 40px); padding: 24px; border: 1px solid var(--grau-300); border-top: 4px solid var(--rot); margin: auto 20px auto auto; overflow: auto; }
+.quellen-dialog::backdrop { background: #0005; }
+.quellen-dialog-kopf { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.quellen-dialog h2 { font-size: 20px; overflow-wrap: anywhere; }
+.quellen-dialog blockquote { margin: 20px 0; padding: 16px; background: var(--grau-100); border-left: 3px solid var(--rot); white-space: pre-wrap; overflow-wrap: anywhere; }
+.quellen-dialog .knopf { display: inline-block; text-decoration: none; }
+.quellen-audio { margin: 16px 0; }
+.quellen-audio audio { width: 100%; }
+.quellen-audio p { font-size: 13px; color: var(--grau-600); }
+.abfragen > summary { cursor: pointer; font-size: 13px; font-weight: bold; padding: 8px 0; }
+.abfrage-technik { margin: 10px 0; font-size: 12px; }
+.abfrage-technik summary { cursor: pointer; color: var(--grau-600); }
+.graph-pfade { padding: 12px; margin: 10px 0; background: var(--grau-100); font-size: 13px; overflow-wrap: anywhere; }
+.graph-pfade ul { padding-left: 18px; }
+.vorschau caption { text-align: left; color: var(--grau-600); font-size: 12px; padding: 6px 0; }
+.codeblock { position: relative; margin: 12px 0; }
+.codeblock > .knopf-schlicht { display: block; margin-left: auto; }
+.chat-bereich > .verlauf { max-height: max(380px, calc(100dvh - 225px)); overflow-y: auto; }
+.verlauf-aktion { width: 36px; height: 36px; }
+.verlauf-mehr { width: 100%; margin-top: 10px; }
+
+@media (max-width: 900px) {
+  .chat-bereich > .verlauf { max-height: none; overflow: visible; }
+  .verlauf-inhalt { max-height: 40dvh; overflow-y: auto; }
+  .chat-karte { --chat-hoehe: max(320px, calc(100dvh - 275px)); }
+  .chat-karte .chat-verlauf { padding: 14px; }
+  .chat-einstellungen { padding: 10px 12px; gap: 8px; }
+  .chat-unterer-bereich { padding-left: 12px; padding-right: 12px; }
+  .verlauf-aktion { width: 44px; height: 44px; }
+  .quellen-dialog { margin: auto; }
+}
+@media (max-width: 640px) {
+  .chat-karte .chat-eingabe textarea { font-size: 16px; }
+  .chat-karte .chat-eingabe .knopf { padding: 10px; font-size: 13px; max-width: 110px; }
+  .chat-eingabe-hinweis span:first-child { display: none; }
+  .chat-eingabe-hinweis { justify-content: flex-end; }
+  .chat-einstellungen label:last-child { max-width: 105px; }
+  .chat-karte .knopf-schlicht { min-height: 44px; }
+}

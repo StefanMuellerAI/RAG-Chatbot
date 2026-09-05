@@ -1,5 +1,6 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { gateway, transcribe } from "ai";
+import { checkIngestionCapacity, ingestionSignal } from "./capacity";
 import { ZEICHEN_JE_SEITE, type ExtractedBlock, type Extraktion } from "./extract";
 import { gatewayBereit, MissingConfigError, providerKeySecretKonfiguriert } from "./env";
 import type { Mp3Teil } from "./mp3-teile";
@@ -52,10 +53,14 @@ export async function transkribiereMp3Teil(
   bytes: Uint8Array,
   teil: Mp3Teil,
 ): Promise<TranskriptTeilErgebnis> {
+  checkIngestionCapacity();
   const modell = await transkriptionsModell();
+  checkIngestionCapacity();
   const ergebnis = await transcribe({
     model: modell,
     audio: bytes,
+    maxRetries: 0,
+    abortSignal: ingestionSignal(),
   });
 
   return {

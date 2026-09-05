@@ -3,23 +3,24 @@ import { requireUserId } from "@/lib/auth/user";
 import {
   benenneChatUm,
   haengeNachrichtAn,
-  ladeNachrichten,
   loescheChat,
   type VerlaufNachricht,
 } from "@/lib/chats";
 import { ValidationError } from "@/lib/errors";
+import { messagePage, pageSize } from "@/lib/chat-pages";
 
 export const runtime = "nodejs";
 
 type Kontextparameter = { params: Promise<{ id: string }> };
 
 /** Die Nachrichten eines Chats. */
-export async function GET(_request: Request, kontextparameter: Kontextparameter) {
+export async function GET(request: Request, kontextparameter: Kontextparameter) {
   try {
     const userId = await requireUserId();
     const { id } = await kontextparameter.params;
 
-    return Response.json({ nachrichten: await ladeNachrichten(userId, id) });
+    const query = new URL(request.url).searchParams;
+    return Response.json(await messagePage(userId, id, query.get("before"), pageSize(query.get("limit"), 40)), { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return errorResponse(error);
   }

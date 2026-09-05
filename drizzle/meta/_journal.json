@@ -29,6 +29,13 @@
       "when": 1788539542592,
       "tag": "0003_verarbeitung_je_sammlung",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1788625831216,
+      "tag": "0004_chat_generierungen",
+      "breakpoints": true
     }
   ]
 }

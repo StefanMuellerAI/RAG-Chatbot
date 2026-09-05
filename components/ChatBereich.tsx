@@ -1,237 +1,244 @@
 "use client";
 
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import ChatPanel from "@/components/ChatPanel";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import ChatPanel, { type ChatSammlung } from "@/components/ChatPanel";
 import VerlaufListe from "@/components/VerlaufListe";
 import {
-  getServerSnapshot,
-  getSnapshot,
-  initialisiere,
-  nachrichtAnhaengen,
-  nachrichtenVon,
-  neuerChat,
-  subscribe,
-  verwerfeFehler,
-  waehleChat,
-  type Nachricht,
-  type Quelle,
+  getServerSnapshot, getSnapshot, initialisiere, ladeNachrichten, ladeWeitereChats,
+  merkeAntwort, nachrichtenVon, neuerChat, subscribe, verwerfeFehler, waehleChat,
+  type Nachricht, type Quelle,
 } from "@/lib/chatVerlauf";
-import type { CollectionKind } from "@/lib/collection-kinds";
+import { leseChatStrom } from "@/lib/chat-client";
 import type { ToolStep } from "@/lib/tools-types";
 
-/**
- * Haelt Seitenleiste und Chatfenster zusammen: liest den Verlauf vom Server,
- * kennt den aktiven Chat und fuehrt die laufende Antwort.
- *
- * `typen` sind die Sammlungstypen des Nutzers — nur fuer den Hinweistext im
- * leeren Chat; die Wahl der Werkzeuge trifft der Server.
- */
-export default function ChatBereich({ typen = [] }: { typen?: CollectionKind[] }) {
-  const { chats, aktiveId, geladen, fehler } = useSyncExternalStore(
-    subscribe,
-    getSnapshot,
-    getServerSnapshot,
-  );
+type Anfrage = {
+  chatId: string; requestId: string; question: string;
+  collectionIds?: string[]; detail?: "compact" | "detailed";
+};
+type Lauf = { chatId: string | null; user: Nachricht; assistant: Nachricht; angenommen: boolean };
 
-  /**
-   * Die entstehende Antwort lebt bewusst nur im Komponenten-State. Jedes
-   * Textstueck sofort zu speichern waeren hunderte Schreibvorgaenge pro
-   * Antwort — gespeichert wird erst, wenn sie steht.
-   */
-  const [streamend, setStreamend] = useState<Nachricht | null>(null);
+export default function ChatBereich({ sammlungen = [], userId }: { sammlungen?: ChatSammlung[]; userId: string }) {
+  const stand = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+  const { chats, aktiveId, geladen, fehler, listeLaedt, nextCursor, chatLadestand } = stand;
+  const [lauf, setLauf] = useState<Lauf | null>(null);
   const [laeuft, setLaeuft] = useState(false);
+  const [status, setStatus] = useState("");
+  const [laufFehler, setLaufFehler] = useState<string | null>(null);
+  const [fehlerChat, setFehlerChat] = useState<string | null>(null);
+  const [retryAb, setRetryAb] = useState<number | null>(null);
   const [listeOffen, setListeOffen] = useState(false);
-
-  /**
-   * Bricht eine laufende Antwort ab.
-   *
-   * Vorher fehlte das: Wer den Chat wechselte oder den Tab schloss, liess die
-   * Erzeugung weiterlaufen — und bezahlte sie zu Ende. Mit dem Signal endet
-   * auch der Modellaufruf auf dem Server.
-   */
+  const [entwuerfe, setEntwuerfe] = useState<Record<string, string>>({});
+  const [sammlung, setSammlung] = useState("");
+  const [detail, setDetail] = useState<"compact" | "detailed">("compact");
+  const gesperrt = useRef(false);
   const abbruch = useRef<AbortController | null>(null);
+  const laufRef = useRef<Lauf | null>(null);
+  const anfragen = useRef(new Map<string, Anfrage>());
+  const mounted = useRef(true);
+  const entwurfKey = aktiveId ?? "neu";
+  const entwurf = entwuerfe[entwurfKey] ?? "";
+  const geladenChat = aktiveId ? chatLadestand[aktiveId] : undefined;
 
   useEffect(() => {
-    void initialisiere();
-    return () => abbruch.current?.abort();
+    mounted.current = true;
+    // Reset the account cache synchronously, then load the selected chat in
+    // parallel with the sidebar. A deep link must not briefly behave as a new chat.
+    void initialisiere(userId);
+    const id = new URL(window.location.href).searchParams.get("chat");
+    if (id) void waehleChat(id);
+    const zurueck = () => {
+      abbruch.current?.abort();
+      void waehleChat(new URL(window.location.href).searchParams.get("chat"));
+    };
+    window.addEventListener("popstate", zurueck);
+    return () => {
+      mounted.current = false;
+      abbruch.current?.abort();
+      window.removeEventListener("popstate", zurueck);
+    };
+  }, [userId]);
+
+  const setzeEntwurf = useCallback((text: string) => {
+    setEntwuerfe((vorher) => ({ ...vorher, [getSnapshot().aktiveId ?? "neu"]: text }));
   }, []);
 
-  const gespeichert = nachrichtenVon(aktiveId);
-  // Die laufende Antwort haengt hinten an — ausser sie steht schon als letzte
-  // im Verlauf. Beide Aktualisierungen (Store und State) kommen aus
-  // verschiedenen Quellen; ohne diese Pruefung gaebe es dazwischen einen
-  // Render, in dem die Antwort doppelt erscheint.
-  const angezeigt =
-    streamend && gespeichert[gespeichert.length - 1] !== streamend
-      ? [...gespeichert, streamend]
-      : gespeichert;
+  const wechsle = useCallback((id: string | null) => {
+    abbruch.current?.abort();
+    if (laufRef.current?.chatId && laufRef.current.angenommen) {
+      merkeAntwort(laufRef.current.chatId, [laufRef.current.user, laufRef.current.assistant]);
+    }
+    void waehleChat(id);
+    const url = new URL(window.location.href);
+    if (id) url.searchParams.set("chat", id); else url.searchParams.delete("chat");
+    window.history.pushState(null, "", url);
+    setListeOffen(false);
+    setLaufFehler(null);
+  }, []);
 
-  async function senden(frage: string) {
-    if (laeuft) return;
-
-    // Beim allerersten Absenden entsteht der Chat. Vorher liegt kein leerer
-    // Eintrag herum, nur weil jemand die Seite geoeffnet hat.
-    const chatId = aktiveId ?? (await neuerChat());
-    if (!chatId) return;
-
-    const frageNachricht: Nachricht = { role: "user", content: frage };
-
-    // Der Verlauf fuer die Anfrage enthaelt nur echte Konversation —
-    // Fehlermeldungen aus frueheren Versuchen wuerden das Modell nur verwirren.
-    const verlauf = [...nachrichtenVon(chatId), frageNachricht]
-      .filter((nachricht) => !nachricht.fehler)
-      .map((nachricht) => ({ role: nachricht.role, content: nachricht.content }));
-
-    void nachrichtAnhaengen(chatId, frageNachricht);
+  async function senden(frage: string, wiederholen?: Anfrage) {
+    const sauber = frage.trim();
+    const selected = getSnapshot().aktiveId;
+    if (gesperrt.current || !sauber || sauber.length > 2000) return;
+    if (selected && getSnapshot().chatLadestand[selected]?.status !== "ready") return;
+    gesperrt.current = true;
     setLaeuft(true);
-    setStreamend({ role: "assistant", content: "" });
-
+    setStatus(selected ? "Frage wird übermittelt …" : "Chat wird angelegt …");
+    setLaufFehler(null);
+    setFehlerChat(selected);
+    setRetryAb(null);
     const steuerung = new AbortController();
     abbruch.current = steuerung;
-
-    let antwort: Nachricht = { role: "assistant", content: "" };
-    const uebernehmen = (naechste: Nachricht) => {
-      antwort = naechste;
-      setStreamend(naechste);
+    const requestId = wiederholen?.requestId ?? crypto.randomUUID();
+    const draftKey = selected ?? "neu";
+    let aktuell: Lauf = {
+      chatId: selected,
+      user: { id: `${requestId}-user`, requestId, role: "user", content: sauber, status: "pending" },
+      assistant: { id: `${requestId}-assistant`, requestId, role: "assistant", content: "", status: "pending" },
+      angenommen: false,
     };
-
+    const zeigen = () => {
+      laufRef.current = aktuell;
+      if (mounted.current) setLauf({ ...aktuell });
+    };
+    zeigen();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let fertig = false;
+    const puffern = () => {
+      if (!timer) timer = setTimeout(() => { timer = null; zeigen(); }, 40);
+    };
     try {
-      const reaktion = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: verlauf }),
-        signal: steuerung.signal,
+      const chatId = wiederholen?.chatId ?? selected ?? await neuerChat();
+      if (!chatId) throw new Error("Der Chat konnte nicht angelegt werden. Ihre Frage bleibt im Eingabefeld.");
+      aktuell = { ...aktuell, chatId };
+      setFehlerChat(chatId);
+      if (!selected && mounted.current) setEntwuerfe((vorher) => ({
+        ...vorher, [chatId]: vorher[draftKey] ?? sauber, [draftKey]: "",
+      }));
+      const anfrage: Anfrage = wiederholen ?? {
+        chatId, requestId, question: sauber, detail,
+        ...(sammlung ? { collectionIds: [sammlung] } : {}),
+      };
+      anfragen.current.set(requestId, anfrage);
+      if (steuerung.signal.aborted) throw new DOMException("Abgebrochen", "AbortError");
+      const url = new URL(window.location.href);
+      url.searchParams.set("chat", chatId);
+      window.history.replaceState(null, "", url);
+      zeigen();
+      const response = await fetch("/api/chat", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(anfrage), signal: steuerung.signal,
       });
-
-      if (!reaktion.ok || !reaktion.body) {
-        const daten = await reaktion.json().catch(() => ({}));
-        throw new Error(daten.error ?? `Der Server antwortete mit Status ${reaktion.status}.`);
+      if (!response.ok || !response.body) {
+        const body = await response.json().catch(() => ({}));
+        const retry = Number(body.retryAfter ?? response.headers.get("Retry-After"));
+        if (Number.isFinite(retry) && retry > 0) setRetryAb(Date.now() + retry * 1000);
+        throw new Error(body.error ?? `Der Server antwortete mit Status ${response.status}.`);
       }
-
-      const leser = reaktion.body.getReader();
-      const decoder = new TextDecoder();
-      let puffer = "";
-      let abgeschlossen = false;
-
-      for (;;) {
-        const { done, value } = await leser.read();
-        if (done) break;
-
-        puffer += decoder.decode(value, { stream: true });
-        const zeilen = puffer.split("\n");
-        // Die letzte Zeile kann abgeschnitten sein und wartet auf den naechsten Happen.
-        puffer = zeilen.pop() ?? "";
-
-        for (const zeile of zeilen) {
-          if (!zeile.trim()) continue;
-          const ereignis = JSON.parse(zeile) as Record<string, unknown>;
-
-          if (ereignis.type === "sources") {
-            uebernehmen({ ...antwort, sources: ereignis.sources as Quelle[] });
-          } else if (ereignis.type === "step") {
-            // Jeder Werkzeugaufruf sofort in die laufende Antwort: Der Nutzer
-            // sieht, was gerade abgefragt wird, bevor das erste Wort kommt.
-            uebernehmen({
-              ...antwort,
-              steps: [...(antwort.steps ?? []), ereignis.step as ToolStep],
-            });
-          } else if (ereignis.type === "text") {
-            uebernehmen({ ...antwort, content: antwort.content + String(ereignis.delta) });
-          } else if (ereignis.type === "done") {
-            abgeschlossen = true;
-          } else if (ereignis.type === "error") {
-            uebernehmen({
-              ...antwort,
-              content: antwort.content || String(ereignis.message),
-              fehler: true,
-            });
-            abgeschlossen = true;
-          }
+      await leseChatStrom(response.body, (event) => {
+        if (event.type === "start") {
+          aktuell = { ...aktuell, angenommen: true,
+            user: { ...aktuell.user, id: String(event.userMessageId), status: "completed" },
+            assistant: { ...aktuell.assistant, id: String(event.assistantMessageId), status: "streaming" },
+          };
+          // Clear only the submitted draft; a new draft typed during the wait survives.
+          setEntwuerfe((vorher) => ({ ...vorher,
+            [chatId]: vorher[chatId]?.trim() === sauber ? "" : (vorher[chatId] ?? ""),
+          }));
+          zeigen();
+        } else if (event.type === "status") {
+          setStatus(String(event.message ?? "Antwort wird vorbereitet …"));
+        } else if (event.type === "text") {
+          aktuell = { ...aktuell, assistant: { ...aktuell.assistant,
+            content: aktuell.assistant.content + String(event.delta ?? "") } };
+          puffern();
+        } else if (event.type === "sources") {
+          aktuell = { ...aktuell, assistant: { ...aktuell.assistant, sources: event.sources as Quelle[] } };
+          puffern();
+        } else if (event.type === "step") {
+          aktuell = { ...aktuell, assistant: { ...aktuell.assistant,
+            steps: [...(aktuell.assistant.steps ?? []), event.step as ToolStep] } };
+          puffern();
+        } else if (event.type === "error") {
+          setLaufFehler(String(event.message ?? "Die Antwort konnte nicht beendet werden."));
+          const retry = Number(event.retryAfter);
+          if (Number.isFinite(retry) && retry > 0) setRetryAb(Date.now() + retry * 1000);
+          aktuell = { ...aktuell, assistant: { ...aktuell.assistant, status: "failed" } };
+        } else if (event.type === "done") {
+          fertig = true;
+          const status = event.status === "failed" || event.status === "aborted" ? event.status : "completed";
+          aktuell = { ...aktuell, assistant: { ...aktuell.assistant, status } };
         }
-      }
-
-      /**
-       * Ohne "done" ist die Antwort abgeschnitten.
-       *
-       * Vorher galt jedes Ende des Stroms als Abschluss. Riss die Verbindung
-       * oder lief die Funktion in ihr Zeitlimit, wurde die halbe Antwort als
-       * vollstaendig in den Verlauf uebernommen — in einem Wissensassistenten
-       * ist eine halbe Auskunft schlimmer als keine.
-       */
-      if (!abgeschlossen) {
-        uebernehmen({
-          ...antwort,
-          content:
-            (antwort.content ? `${antwort.content}\n\n` : "") +
-            "*Die Antwort wurde unterbrochen und ist unvollstaendig. Bitte die Frage erneut stellen.*",
-          fehler: true,
+      });
+      if (!fertig) throw new Error("Die Verbindung wurde unterbrochen. Die Antwort ist unvollständig.");
+    } catch (error) {
+      aktuell = { ...aktuell, assistant: { ...aktuell.assistant,
+        status: steuerung.signal.aborted ? "aborted" : "failed" } };
+      if (mounted.current) setLaufFehler(steuerung.signal.aborted
+        ? "Antwort gestoppt. Der bisherige Text bleibt erhalten."
+        : error instanceof Error ? error.message : "Die Antwort konnte nicht geladen werden.");
+    } finally {
+      if (timer) clearTimeout(timer);
+      zeigen();
+      gesperrt.current = false;
+      abbruch.current = null;
+      if (mounted.current) { setLaeuft(false); setStatus(""); }
+      if (aktuell.chatId && aktuell.angenommen && mounted.current) {
+        const id = aktuell.chatId;
+        merkeAntwort(id, [aktuell.user, aktuell.assistant]);
+        // Refresh independently: stopping a stream must not lock navigation until a GET finishes.
+        void ladeNachrichten(id, true).then((refreshed) => {
+          if (!mounted.current) return;
+          const saved = nachrichtenVon(id).find((n) => n.id === aktuell.assistant.id);
+          if (refreshed && saved && saved.status !== "streaming" && saved.status !== "pending"
+            && saved.content.length >= aktuell.assistant.content.length) {
+            if (laufRef.current?.user.requestId === requestId) { laufRef.current = null; setLauf(null); }
+          } else {
+            merkeAntwort(id, [aktuell.user, aktuell.assistant]);
+            if (laufRef.current?.user.requestId === requestId) setLaufFehler((vorher) => vorher
+              ?? "Der Speicherstand konnte noch nicht bestätigt werden. Bitte Verlauf erneut laden.");
+          }
         });
       }
-
-      // Nicht auf das Speichern warten: `nachrichtAnhaengen` legt die Antwort
-      // sofort in den Verlauf und schickt sie dann zum Server. Wer hier auf
-      // den Request wartete, sah die Antwort so lange doppelt — einmal aus dem
-      // Verlauf, einmal als laufende. Fehler beim Speichern meldet die
-      // Funktion selbst ueber den Verlaufs-Hinweis.
-      if (antwort.content) void nachrichtAnhaengen(chatId, antwort);
-
-      setStreamend(null);
-      setLaeuft(false);
-    } catch (error) {
-      // Ein Abbruch durch den Nutzer ist kein Fehler, der angezeigt werden muss.
-      if (steuerung.signal.aborted) {
-        setStreamend(null);
-        setLaeuft(false);
-        return;
-      }
-
-      // Die Frage bleibt gespeichert, die Fehlermeldung nicht: eine
-      // Fehlermeldung von gestern hilft beim Zuruecksprigen niemandem.
-      setStreamend({
-        role: "assistant",
-        content: error instanceof Error ? error.message : "Unbekannter Fehler.",
-        fehler: true,
-      });
-      setLaeuft(false);
-    } finally {
-      abbruch.current = null;
     }
   }
 
-  function wechsle(id: string | null) {
-    abbruch.current?.abort();
-    setStreamend(null);
-    setLaeuft(false);
-    void waehleChat(id);
-    setListeOffen(false);
-  }
+  const wiederholen = (nachricht: Nachricht) => {
+    if (!aktiveId || !nachricht.requestId) return;
+    const gespeichert = anfragen.current.get(nachricht.requestId);
+    const frage = nachrichtenVon(aktiveId).find((n) => n.requestId === nachricht.requestId && n.role === "user")
+      ?? (lauf?.user.requestId === nachricht.requestId ? lauf.user : undefined);
+    if (gespeichert) void senden(gespeichert.question, gespeichert);
+    else if (frage) void senden(frage.content, {
+      chatId: aktiveId, requestId: nachricht.requestId, question: frage.content,
+      ...(nachricht.request?.collectionIds ? { collectionIds: nachricht.request.collectionIds } : {}),
+      ...(nachricht.request?.detail ? { detail: nachricht.request.detail } : {}),
+    });
+  };
+  const gespeichert = nachrichtenVon(aktiveId);
+  const sichtbarerLauf = lauf && (lauf.chatId === aktiveId || (!aktiveId && !lauf.chatId)) ? lauf : null;
+  const angezeigt = sichtbarerLauf ? [
+    ...gespeichert.filter((n) => n.requestId !== sichtbarerLauf.user.requestId),
+    sichtbarerLauf.user, sichtbarerLauf.assistant,
+  ] : gespeichert;
 
   return (
     <div className="chat-bereich">
-      <VerlaufListe
-        chats={chats}
-        aktiveId={aktiveId}
-        geladen={geladen}
-        gesperrt={laeuft}
-        offen={listeOffen}
-        onUmschalten={() => setListeOffen((offen) => !offen)}
-        onWaehlen={(id) => wechsle(id)}
-        onNeu={() => {
-          abbruch.current?.abort();
-          setStreamend(null);
-          setLaeuft(false);
-          void neuerChat();
-          setListeOffen(false);
-        }}
-      />
-
-      <div>
-        {fehler && (
-          <div className="meldung" onClick={verwerfeFehler} role="status">
-            {fehler}
-          </div>
-        )}
-        <ChatPanel nachrichten={angezeigt} laeuft={laeuft} typen={typen} onSenden={senden} />
+      <VerlaufListe chats={chats} aktiveId={aktiveId} geladen={geladen} gesperrt={laeuft}
+        offen={listeOffen} onUmschalten={() => setListeOffen((offen) => !offen)}
+        onWaehlen={wechsle} onNeu={() => wechsle(null)} mehr={Boolean(nextCursor)} laedt={listeLaedt}
+        onMehr={() => void ladeWeitereChats()} />
+      <div className="chat-haupt">
+        {fehler && <div className="meldung" role="status">{fehler}
+          <button className="knopf-schlicht" onClick={() => void initialisiere(userId, true)}>Erneut laden</button>
+          <button className="knopf-schlicht" onClick={verwerfeFehler} aria-label="Hinweis schließen">Schließen</button>
+        </div>}
+        <ChatPanel key={aktiveId ?? "neu"} chatId={aktiveId} nachrichten={angezeigt}
+          laeuft={laeuft} status={status} laufFehler={fehlerChat === aktiveId ? laufFehler : null} retryAb={fehlerChat === aktiveId ? retryAb : null}
+          ladestand={geladenChat} sammlungen={sammlungen} sammlung={sammlung} onSammlung={setSammlung}
+          detail={detail} onDetail={setDetail} eingabe={entwurf} onEingabe={setzeEntwurf}
+          onSenden={(frage) => void senden(frage)} onStop={() => { setStatus("Antwort wird gestoppt …"); abbruch.current?.abort(); }}
+          onRetry={wiederholen} onLaden={() => aktiveId ? ladeNachrichten(aktiveId, true) : Promise.resolve(true)}
+          onMehr={() => aktiveId ? ladeNachrichten(aktiveId, false, true) : Promise.resolve(true)} />
       </div>
     </div>
   );

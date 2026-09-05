@@ -9,6 +9,7 @@ import {
   pgTable,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 import type { CollectionKind, CollectionSchema } from "../collection-kinds";
@@ -198,6 +199,8 @@ export type StoredSource = {
   score: number;
   snippet: string;
   collectionName: string;
+  documentId?: string;
+  downloadUrl?: string;
 };
 
 export const messages = pgTable(
@@ -213,10 +216,29 @@ export const messages = pgTable(
     /** Werkzeugaufrufe (Suche, SQL, Cypher), die zu dieser Antwort gefuehrt haben. */
     steps: jsonb("steps").$type<ToolStep[]>(),
     isError: boolean("is_error").default(false).notNull(),
+    requestId: uuid("request_id"),
+    status: text("status").$type<"streaming" | "completed" | "failed" | "aborted">().default("completed").notNull(),
+    feedback: jsonb("feedback").$type<{ helpful: boolean; reason?: string }>(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (table) => [index("messages_chat_idx").on(table.chatId, table.createdAt)],
+  (table) => [
+    index("messages_chat_idx").on(table.chatId, table.createdAt, table.id),
+    uniqueIndex("messages_request_role_idx").on(table.chatId, table.requestId, table.role),
+  ],
 );
+
+export const chatRuns = pgTable("chat_runs", {
+  id: uuid("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.clerkUserId, { onDelete: "cascade" }),
+  chatId: uuid("chat_id").notNull().references(() => chats.id, { onDelete: "cascade" }),
+  requestHash: text("request_hash").notNull(),
+  request: jsonb("request").$type<{ question: string; collectionIds?: string[]; detail: "compact" | "detailed" }>().notNull(),
+  userMessageId: uuid("user_message_id").notNull(),
+  assistantMessageId: uuid("assistant_message_id").notNull(),
+  status: text("status").$type<"streaming" | "completed" | "failed" | "aborted">().notNull(),
+  attempt: integer("attempt").default(1).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, table => [index("chat_runs_chat_idx").on(table.chatId, table.updatedAt)]);
 
 /**
  * Verbrauchsjournal. Die Kontingentpruefung selbst laeuft ueber Redis-Zaehler

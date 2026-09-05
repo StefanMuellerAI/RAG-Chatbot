@@ -1,0 +1,9 @@
+{
+  "name": "rag-sql-executor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": { "start": "node server.mjs" },
+  "dependencies": { "@vercel/blob": "2.8.0", "sql.js": "1.14.2" }
+}

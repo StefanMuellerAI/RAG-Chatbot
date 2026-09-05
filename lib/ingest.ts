@@ -4,6 +4,7 @@ import {
   type CollectionKind,
   type CollectionSchema,
 } from "./collection-kinds";
+import { checkIngestionCapacity } from "./capacity";
 import { setzeSammlungsSchema } from "./collections";
 import { parseCsv, tableNameFromFilename } from "./csv";
 import { statementsZumImport } from "./cypher-script";
@@ -133,12 +134,16 @@ export async function ingestSql(
 
   eingabe.vorSchreiben?.(pageCount);
 
+  checkIngestionCapacity();
   const db = await loadDatabase(eingabe.userId, eingabe.collectionId);
   try {
+    checkIngestionCapacity();
     replaceTable(db, tabelle, parsed.columns, parsed.rows);
+    checkIngestionCapacity();
     await saveDatabase(eingabe.userId, eingabe.collectionId, db);
 
     const schema = describeSchema(db);
+    checkIngestionCapacity();
     await setzeSammlungsSchema(eingabe.userId, eingabe.collectionId, schema);
 
     return { units: parsed.rows.length, pageCount, schema, replacedTable: tabelle };
@@ -182,13 +187,18 @@ export async function ingestGraph(eingabe: GraphEingabe): Promise<IngestErgebnis
   eingabe.vorSchreiben?.(pageCount);
 
   try {
+    checkIngestionCapacity();
     await importStatements(eingabe.collectionId, statements);
   } catch (error) {
+    // A lost lease must not start a destructive rebuild alongside a new owner.
+    checkIngestionCapacity();
     await rebuildGraph(eingabe.userId, eingabe.collectionId, eingabe.uebrige);
     throw error;
   }
 
+  checkIngestionCapacity();
   const schema = await describeGraph(eingabe.collectionId);
+  checkIngestionCapacity();
   await setzeSammlungsSchema(eingabe.userId, eingabe.collectionId, schema);
 
   return { units: statements.length, pageCount, schema };
@@ -204,6 +214,7 @@ export async function rebuildGraph(
   collectionId: string,
   dokumente: DocumentRecord[],
 ): Promise<CollectionSchema | null> {
+  checkIngestionCapacity();
   await deleteGraph(collectionId);
 
   const reihenfolge = [...dokumente].sort(
@@ -212,17 +223,21 @@ export async function rebuildGraph(
 
   let eingespielt = 0;
   for (const satz of reihenfolge) {
+    checkIngestionCapacity();
     const strom = await leseDatei(satz.blobPath);
     // Eine fehlende Datei kann nicht wiederhergestellt werden; der Rest soll
     // deshalb nicht ebenfalls fehlen.
     if (!strom) continue;
 
     const skript = skriptAusPuffer(await new Response(strom).arrayBuffer());
+    checkIngestionCapacity();
     await importStatements(collectionId, statementsZumImport(skript));
     eingespielt += 1;
   }
 
+  checkIngestionCapacity();
   const schema = eingespielt > 0 ? await describeGraph(collectionId) : null;
+  checkIngestionCapacity();
   await setzeSammlungsSchema(userId, collectionId, schema);
   return schema;
 }

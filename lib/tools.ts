@@ -2,9 +2,12 @@ import { tool } from "ai";
 import { z } from "zod";
 import { KIND_LABEL, type CollectionKind } from "./collection-kinds";
 import type { SammlungMitKlasse } from "./collections";
-import { fehlerMeldung } from "./errors";
+import { fehlerMeldung, RateLimitError, ToolUnavailableError } from "./errors";
+import { MissingConfigError } from "./env";
 import { runReadOnlyCypher } from "./graphstore";
-import { loadDatabase, runReadOnlyQuery } from "./sqlstore";
+import { runSql } from "./sql-executor";
+import { withCapacity } from "./capacity";
+import { erwirbSperre, gibSperreFrei, sperrSchluessel } from "./ratelimit";
 import type { ToolName, ToolStep } from "./tools-types";
 
 export type { ToolName, ToolStep } from "./tools-types";
@@ -47,9 +50,9 @@ type Tabellenergebnis = {
  * Halbieren statt zeilenweise abschneiden: Bei 200 Zeilen mit langen Zellen
  * waeren sonst bis zu 200 Serialisierungen noetig, so sind es hoechstens acht.
  */
-export function capRows<T>(rows: T[]): { rows: T[]; capped: boolean } {
+export function capRows<T>(rows: T[], maxChars = ERGEBNIS_MAX_ZEICHEN): { rows: T[]; capped: boolean } {
   let ende = rows.length;
-  while (ende > 0 && JSON.stringify(rows.slice(0, ende)).length > ERGEBNIS_MAX_ZEICHEN) {
+  while (ende > 0 && JSON.stringify(rows.slice(0, ende)).length > maxChars) {
     ende = Math.floor(ende / 2);
   }
   return { rows: rows.slice(0, ende), capped: ende < rows.length };
@@ -105,10 +108,15 @@ function waehleSammlung(
 
 /**
  * Werkzeug `sql_ausfuehren`: eine lesende SQL-Abfrage gegen die SQLite-Datei
- * einer Tabellen-Sammlung. Die Datei wird je Aufruf frisch aus dem Blob
- * geladen und danach geschlossen — es gibt keinen geteilten Zustand.
+ * einer Tabellen-Sammlung. Der separate Dienst revalidiert den Blob-Cache
+ * und fuehrt die Abfrage in einem terminierbaren Worker aus.
  */
-export function baueSqlWerkzeug(userId: string, sammlungen: SammlungMitKlasse[]) {
+export type ToolOptions = {
+  signal?: AbortSignal;
+  onStatus?: (phase: "sql" | "graph" | "queued", message: string) => void;
+};
+
+export function baueSqlWerkzeug(userId: string, sammlungen: SammlungMitKlasse[], options: ToolOptions = {}) {
   const fest = festeSammlung(sammlungen);
 
   return tool({
@@ -129,10 +137,13 @@ export function baueSqlWerkzeug(userId: string, sammlungen: SammlungMitKlasse[])
       if ("fehler" in wahl) return { ok: false, error: wahl.fehler };
 
       try {
-        const db = await loadDatabase(userId, wahl.sammlung.id);
-        try {
-          const ergebnis = runReadOnlyQuery(db, sql);
-          const { rows, capped } = capRows(ergebnis.rows);
+        options.signal?.throwIfAborted();
+        options.onStatus?.("sql", `Tabelle in „${wahl.sammlung.name}“ wird ausgewertet …`);
+        const ergebnis = await withCapacity("sql", () => runSql({
+          userId, id: wahl.sammlung.id,
+          sqlBlobPath: `files/${userId}/${wahl.sammlung.id}/_db/sammlung.sqlite`,
+        }, sql, { signal: options.signal }), { signal: options.signal, onWait: () => options.onStatus?.("queued", "Warte auf freie Tabellenkapazitaet …") });
+          const { rows, capped } = capRows(ergebnis.rows, 6000);
           return {
             ok: true,
             collection: wahl.sammlung.name,
@@ -141,10 +152,8 @@ export function baueSqlWerkzeug(userId: string, sammlungen: SammlungMitKlasse[])
             rowCount: ergebnis.rowCount,
             truncated: ergebnis.truncated || capped,
           };
-        } finally {
-          db.close();
-        }
       } catch (error) {
+        if (options.signal?.aborted || error instanceof RateLimitError || error instanceof ToolUnavailableError || error instanceof MissingConfigError) throw error;
         return { ok: false, error: fehlerMeldung(error) };
       }
     },
@@ -155,7 +164,7 @@ export function baueSqlWerkzeug(userId: string, sammlungen: SammlungMitKlasse[])
  * Werkzeug `cypher_ausfuehren`: eine lesende Cypher-Abfrage gegen den Graphen
  * einer Graph-Sammlung (GRAPH.RO_QUERY — der Server lehnt Schreibzugriffe ab).
  */
-export function baueCypherWerkzeug(sammlungen: SammlungMitKlasse[]) {
+export function baueCypherWerkzeug(sammlungen: SammlungMitKlasse[], options: ToolOptions = {}) {
   const fest = festeSammlung(sammlungen);
 
   return tool({
@@ -176,8 +185,35 @@ export function baueCypherWerkzeug(sammlungen: SammlungMitKlasse[]) {
       if ("fehler" in wahl) return { ok: false, error: wahl.fehler };
 
       try {
-        const ergebnis = await runReadOnlyCypher(wahl.sammlung.id, cypher);
-        const { rows, capped } = capRows(ergebnis.rows);
+        options.signal?.throwIfAborted();
+        options.onStatus?.("graph", `Beziehungen in „${wahl.sammlung.name}“ werden ausgewertet …`);
+        const ergebnis = await withCapacity("graph", async () => {
+          // Rebuilds clear the graph before replaying scripts. A short exclusive
+          // collection lock prevents chat answers from using that partial state.
+          const key = sperrSchluessel(wahl.sammlung.id);
+          const owner = randomUUID();
+          const expiresAt = Date.now() + 30_000;
+          let acquired: boolean;
+          try { acquired = await erwirbSperre(key, owner, 30); }
+          catch (error) {
+            if (error instanceof MissingConfigError) throw error;
+            throw new ToolUnavailableError("Die Graph-Sperre ist derzeit nicht erreichbar. Bitte erneut versuchen.");
+          }
+          if (!acquired) throw new RateLimitError(5);
+          try {
+            options.signal?.throwIfAborted();
+            // Keep room for FalkorDB's 10-second read timeout after Redis latency.
+            if (Date.now() + 15_000 >= expiresAt) throw new RateLimitError(5);
+            const result = await runReadOnlyCypher(wahl.sammlung.id, cypher);
+            options.signal?.throwIfAborted();
+            if (Date.now() >= expiresAt) throw new RateLimitError(5);
+            return result;
+          } finally { await gibSperreFrei(key, owner); }
+        }, {
+          signal: options.signal, onWait: () => options.onStatus?.("queued", "Warte auf freie Graphkapazitaet …"),
+        });
+        options.signal?.throwIfAborted();
+        const { rows, capped } = capRows(ergebnis.rows, 6000);
         return {
           ok: true,
           collection: wahl.sammlung.name,
@@ -187,6 +223,7 @@ export function baueCypherWerkzeug(sammlungen: SammlungMitKlasse[]) {
           truncated: ergebnis.truncated || capped,
         };
       } catch (error) {
+        if (options.signal?.aborted || error instanceof RateLimitError || error instanceof ToolUnavailableError || error instanceof MissingConfigError) throw error;
         return { ok: false, error: fehlerMeldung(error) };
       }
     },
@@ -269,3 +306,4 @@ export function toStep(
 
   return step;
 }
+import { randomUUID } from "node:crypto";

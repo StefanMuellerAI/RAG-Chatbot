@@ -16,6 +16,7 @@ import {
 import { effektiveVerarbeitung, findPreset } from "./presets";
 import { ladeKey } from "./provider-keys";
 import { sucheInSammlung, type Hit } from "./vector";
+import { withCapacity } from "./capacity";
 
 /**
  * Modellzugriff, Systemanweisung und das Werkzeug zur Sammlungsauswahl.
@@ -245,6 +246,8 @@ export type Fundstelle = {
   score: number;
   snippet: string;
   collectionName: string;
+  documentId?: string;
+  downloadUrl?: string;
 };
 
 /**
@@ -259,6 +262,7 @@ export type Fundstelle = {
 export class Fundstellensammler {
   private readonly treffer: Fundstelle[] = [];
   private readonly gesehen = new Set<string>();
+  private remaining = 10_000;
 
   /**
    * Nimmt Treffer auf und liefert die neu aufgenommenen zurueck — samt
@@ -271,7 +275,8 @@ export class Fundstellensammler {
   ): { fundstelle: Fundstelle; volltext: string }[] {
     const neu: { fundstelle: Fundstelle; volltext: string }[] = [];
 
-    for (const hit of hits) {
+    for (const hit of [...hits].sort((a, b) => b.score - a.score)) {
+      if (this.remaining <= 0 || this.treffer.length >= 20) break;
       // Zwei Suchdurchgaenge liefern haeufig ueberlappende Abschnitte. Eine
       // doppelte Fundstelle wuerde die Liste unter der Antwort aufblaehen und
       // dem Modell zwei Nummern fuer denselben Text anbieten.
@@ -286,10 +291,14 @@ export class Fundstellensammler {
         score: Math.round(hit.score * 1000) / 1000,
         snippet: hit.metadata.text.slice(0, 240),
         collectionName: sammlungsname,
+        documentId: hit.metadata.docId,
+        downloadUrl: `/api/documents/${encodeURIComponent(hit.metadata.docId)}/download`,
       };
 
       this.treffer.push(fundstelle);
-      neu.push({ fundstelle, volltext: hit.metadata.text });
+      const volltext = hit.metadata.text.slice(0, Math.min(this.remaining, 2000));
+      this.remaining -= volltext.length;
+      neu.push({ fundstelle, volltext });
     }
 
     return neu;
@@ -309,7 +318,10 @@ export class Fundstellensammler {
  * unvertrauenswuerdig. Halluziniert das Modell eine fremde ID oder wird es per
  * Prompt-Injection dazu verleitet, kommt sie hier nicht durch.
  */
-export function baueSuchwerkzeug(userId: string, sammler: Fundstellensammler) {
+export function baueSuchwerkzeug(userId: string, sammler: Fundstellensammler, options: {
+  sammlungen?: SammlungMitKlasse[]; signal?: AbortSignal;
+  onStatus?: (phase: "retrieval" | "queued", message: string) => void;
+} = {}) {
   return tool({
     description:
       "Durchsucht eine oder mehrere der aufgelisteten Dokumentensammlungen und " +
@@ -330,7 +342,11 @@ export function baueSuchwerkzeug(userId: string, sammler: Fundstellensammler) {
         .describe("Inhaltliche Suchanfrage, keine an dich selbst gerichtete Frage."),
     }),
     execute: async ({ collectionIds, suchbegriff }) => {
-      const erlaubt = await ladeEigeneSammlungen(userId, collectionIds);
+      options.signal?.throwIfAborted();
+      const erlaubt = options.sammlungen
+        ? options.sammlungen.filter(s => s.userId === userId && s.kind === "vector" && collectionIds.includes(s.id))
+        : (await ladeEigeneSammlungen(userId, collectionIds)).filter(s => s.kind === "vector");
+      options.onStatus?.("retrieval", `Suche in ${erlaubt.map(s => s.name).join(", ")} …`);
 
       if (erlaubt.length === 0) {
         return {
@@ -345,7 +361,9 @@ export function baueSuchwerkzeug(userId: string, sammler: Fundstellensammler) {
       const ergebnisse = await Promise.all(
         erlaubt.map(async (sammlung) => ({
           sammlung,
-          hits: await sucheMitSchwelle(sammlung, suchbegriff),
+          hits: await withCapacity("retrieval", () => sucheMitSchwelle(sammlung, suchbegriff, options.signal), {
+            signal: options.signal, onWait: () => options.onStatus?.("queued", "Warte auf freie Suchkapazitaet …"),
+          }),
         })),
       );
 
@@ -385,9 +403,10 @@ export function baueSuchwerkzeug(userId: string, sammler: Fundstellensammler) {
 export async function sucheMitSchwelle(
   sammlung: SammlungMitKlasse,
   suchbegriff: string,
+  signal?: AbortSignal,
 ): Promise<Hit[]> {
   const verarbeitung = effektiveVerarbeitung(sammlung);
-  const hits = await sucheInSammlung(sammlung.id, suchbegriff, verarbeitung.topK);
+  const hits = await sucheInSammlung(sammlung.id, suchbegriff, Math.min(verarbeitung.topK, 12), signal);
   return hits.filter((hit) => hit.score >= verarbeitung.minScore);
 }
 

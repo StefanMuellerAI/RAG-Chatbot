@@ -3,7 +3,7 @@ import { connection } from "next/server";
 import ChatBereich from "@/components/ChatBereich";
 import NichtBereit from "@/components/NichtBereit";
 import { requireKontextFuerSeite } from "@/lib/auth/user";
-import { ladeSammlungen } from "@/lib/collections";
+import { ladeSammlungen, ladeSammlungsStatus } from "@/lib/collections";
 import { missingFor } from "@/lib/env";
 import { leseTagesstand } from "@/lib/ratelimit";
 
@@ -17,9 +17,10 @@ export default async function ChatSeite() {
   if (fehlt.length > 0) return <NichtBereit bereich="Der Assistent" fehlt={fehlt} />;
 
   const kontext = await requireKontextFuerSeite("/");
-  const [sammlungen, verbraucht] = await Promise.all([
+  const [sammlungen, verbraucht, sammlungsStatus] = await Promise.all([
     ladeSammlungen(kontext.userId),
     leseTagesstand(kontext.userId),
+    ladeSammlungsStatus(kontext.userId),
   ]);
 
   return (
@@ -33,13 +34,20 @@ export default async function ChatSeite() {
       ) : (
         <p className="kontingentzeile">
           {sammlungen.length}{" "}
-          {sammlungen.length === 1 ? "Sammlung" : "Sammlungen"} durchsuchbar ·{" "}
+          {sammlungen.length === 1 ? "Sammlung" : "Sammlungen"} verfügbar ·{" "}
           {verbraucht} von {kontext.plan.maxQuestionsPerDay} Fragen heute genutzt
           {sammlungen.length > 1 && " · der Assistent waehlt selbst, wo er sucht"}
         </p>
       )}
 
-      <ChatBereich typen={[...new Set(sammlungen.map((sammlung) => sammlung.kind))]} />
+      <ChatBereich key={kontext.userId} userId={kontext.userId} sammlungen={sammlungen.map((sammlung) => ({
+        id: sammlung.id,
+        name: sammlung.name,
+        kind: sammlung.kind,
+        documentCount: sammlung.documentCount,
+        updatedAt: sammlung.updatedAt.toISOString(),
+        processingStatus: sammlungsStatus[sammlung.id] ?? { ready: 0, pending: 0, failed: 0 },
+      }))} />
     </>
   );
 }

@@ -1,5 +1,6 @@
 import { errorResponse, readJson } from "@/lib/api";
-import { requireUserId } from "@/lib/auth/user";
+import { requireKontext, requireUserId } from "@/lib/auth/user";
+import { chatPage, pageSize } from "@/lib/chat-pages";
 import {
   erstelleChat,
   ladeChats,
@@ -10,10 +11,11 @@ import {
 
 export const runtime = "nodejs";
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const userId = await requireUserId();
-    return Response.json({ chats: await ladeChats(userId) });
+    const query = new URL(request.url).searchParams;
+    return Response.json(await chatPage(userId, query.get("before"), pageSize(query.get("limit"), 30)), { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return errorResponse(error);
   }
@@ -27,7 +29,7 @@ export async function GET() {
  */
 export async function POST(request: Request) {
   try {
-    const userId = await requireUserId();
+    const { userId } = await requireKontext();
 
     type Eingabe = {
       titel?: string;
@@ -43,7 +45,9 @@ export async function POST(request: Request) {
       return Response.json({ uebernommen: anzahl, chats: await ladeChats(userId) });
     }
 
-    return Response.json({ chat: await erstelleChat(userId, eingabe.titel) }, { status: 201 });
+    return Response.json({ chat: await erstelleChat(userId, eingabe.titel), authenticatedUserId: userId }, {
+      status: 201, headers: { "Cache-Control": "private, no-store" },
+    });
   } catch (error) {
     return errorResponse(error);
   }

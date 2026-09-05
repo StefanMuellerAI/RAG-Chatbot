@@ -1,4 +1,4 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import type { Kontext } from "./auth/user";
 import {
   isCollectionKind,
@@ -6,7 +6,7 @@ import {
   type CollectionSchema,
 } from "./collection-kinds";
 import { getDb } from "./db";
-import { collections, sizeClasses } from "./db/schema";
+import { collections, documents, sizeClasses } from "./db/schema";
 import type { Collection, PresetId, SizeClass } from "./db/schema";
 import { loescheUnterPraefix, sammlungsPraefix } from "./documents";
 import { graphConfigured } from "./env";
@@ -36,6 +36,19 @@ import { loescheSammlung as loescheSammlungVektoren } from "./vector";
  */
 
 export type SammlungMitKlasse = Collection & { sizeClass: SizeClass };
+export type SammlungsStatus = { ready: number; pending: number; failed: number };
+
+/** One tenant-filtered aggregation; documents_user_idx supports the predicate. */
+export async function ladeSammlungsStatus(userId: string): Promise<Record<string, SammlungsStatus>> {
+  const rows = await getDb().select({
+    collectionId: documents.collectionId,
+    ready: sql<number>`count(*) filter (where ${documents.status} = 'fertig')`.mapWith(Number),
+    pending: sql<number>`count(*) filter (where ${documents.status} in ('wartet', 'laeuft'))`.mapWith(Number),
+    failed: sql<number>`count(*) filter (where ${documents.status} = 'fehler')`.mapWith(Number),
+  }).from(documents).where(eq(documents.userId, userId)).groupBy(documents.collectionId);
+
+  return Object.fromEntries(rows.map(({ collectionId, ...status }) => [collectionId, status]));
+}
 
 export async function ladeSammlungen(userId: string): Promise<SammlungMitKlasse[]> {
   const zeilen = await getDb()

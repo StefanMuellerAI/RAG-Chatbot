@@ -1,4 +1,5 @@
 import { FalkorDB } from "falkordb";
+import { checkIngestionCapacity } from "./capacity";
 import type { CollectionSchema } from "./collection-kinds";
 import { MissingConfigError, optionalEnv } from "./env";
 import { ValidationError } from "./errors";
@@ -59,8 +60,10 @@ function istLeererGraph(error: unknown): boolean {
 
 /** Spielt Statements nacheinander ein; der Fehler nennt die Statement-Nummer. */
 export async function importStatements(collectionId: string, statements: string[]): Promise<void> {
+  checkIngestionCapacity();
   const graph = await graphOf(collectionId);
   for (const [index, statement] of statements.entries()) {
+    checkIngestionCapacity();
     try {
       await graph.query(statement, { TIMEOUT: WRITE_TIMEOUT_MS });
     } catch (error) {
@@ -73,6 +76,7 @@ export async function importStatements(collectionId: string, statements: string[
 }
 
 export async function deleteGraph(collectionId: string): Promise<void> {
+  checkIngestionCapacity();
   try {
     await (await graphOf(collectionId)).delete();
   } catch (error) {
@@ -85,7 +89,9 @@ export async function deleteGraph(collectionId: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function erstesFeld<T>(collectionId: string, cypher: string): Promise<T[]> {
+  checkIngestionCapacity();
   const graph = await graphOf(collectionId);
+  checkIngestionCapacity();
   try {
     const reply = await graph.roQuery<Record<string, T>>(cypher, { TIMEOUT: READ_TIMEOUT_MS });
     return (reply.data ?? []).map((row) => Object.values(row)[0]);
@@ -128,11 +134,75 @@ export type CypherResult = {
 export function prepareReadOnlyCypher(cypher: string): string {
   const trimmed = cypher.trim().replace(/;\s*$/, "");
   if (trimmed.length === 0) throw new ValidationError("Die Cypher-Abfrage ist leer.");
-  if (trimmed.includes(";")) {
+  const { text, maske } = cypherOhneKommentare(trimmed);
+  if (maske.includes(";")) {
     throw new ValidationError("Bitte genau ein Cypher-Statement ohne Semikolon.");
   }
-  // Ohne LIMIT koennte eine Abfrage den ganzen Graphen zurueckgeben.
-  return /\bLIMIT\s+\d+\s*$/i.test(trimmed) ? trimmed : `${trimmed} LIMIT ${CYPHER_MAX_ROWS}`;
+
+  // Only inspect outer clauses. LIMIT in strings, identifiers, properties or
+  // subqueries must not be mistaken for the result limit. UNION would apply
+  // an appended LIMIT only to its last branch, so require separate queries.
+  const tokens = [...maske.matchAll(/(?<![.\w])\b(RETURN|LIMIT|UNION)\b/gi)];
+  if (tokens.some((token) => token[1].toUpperCase() === "UNION")) {
+    throw new ValidationError("Bitte UNION in getrennten Graph-Abfragen ausfuehren.");
+  }
+  const letztesReturn = [...tokens].reverse().find((token) => token[1].toUpperCase() === "RETURN");
+  if (!letztesReturn) throw new ValidationError("Eine Graph-Abfrage braucht RETURN.");
+  const limit = [...tokens].reverse().find((token) => token[1].toUpperCase() === "LIMIT" && token.index! > letztesReturn.index!);
+  if (limit) {
+    const wert = /^LIMIT\s+(\d+)\s*$/i.exec(maske.slice(limit.index));
+    if (!wert) throw new ValidationError("LIMIT muss eine nichtnegative ganze Zahl am Ende der Abfrage sein.");
+    const begrenzt = BigInt(wert[1]) > BigInt(CYPHER_MAX_ROWS) ? CYPHER_MAX_ROWS : Number(wert[1]);
+    return `${text.slice(0, limit.index).trimEnd()} LIMIT ${begrenzt}`;
+  }
+  return `${text.trimEnd()} LIMIT ${CYPHER_MAX_ROWS}`;
+}
+
+/** Keep offsets stable while stripping comments and masking literals/nesting. */
+function cypherOhneKommentare(eingabe: string): { text: string; maske: string } {
+  const text = eingabe.split("");
+  const maske = eingabe.split("");
+  const klammern: string[] = [];
+  for (let i = 0; i < eingabe.length; i++) {
+    const start = i;
+    const zeichen = eingabe[i];
+    if (zeichen === "'" || zeichen === '"' || zeichen === "`") {
+      let geschlossen = false;
+      for (i++; i < eingabe.length; i++) {
+        if (eingabe[i] === "\\") { i++; continue; }
+        if (eingabe[i] === zeichen) {
+          if (eingabe[i + 1] === zeichen) { i++; continue; }
+          geschlossen = true;
+          break;
+        }
+      }
+      if (!geschlossen) throw new ValidationError("Ein Cypher-Text oder Bezeichner ist nicht abgeschlossen.");
+      for (let n = start; n <= i; n++) maske[n] = " ";
+      continue;
+    }
+    if (eingabe.slice(i, i + 2) === "//" || eingabe.slice(i, i + 2) === "/*") {
+      const block = eingabe[i + 1] === "*";
+      const ende = block ? eingabe.indexOf("*/", i + 2) : eingabe.indexOf("\n", i + 2);
+      if (block && ende < 0) throw new ValidationError("Ein Cypher-Kommentar ist nicht abgeschlossen.");
+      i = ende < 0 ? eingabe.length - 1 : block ? ende + 1 : ende - 1;
+      for (let n = start; n <= i; n++) text[n] = maske[n] = " ";
+      continue;
+    }
+    if ("([{".includes(zeichen)) {
+      klammern.push(zeichen);
+      maske[i] = " ";
+    } else if (")]}".includes(zeichen)) {
+      const offen = klammern.pop();
+      if (!offen || "([{".indexOf(offen) !== ")]}".indexOf(zeichen)) {
+        throw new ValidationError("Ungueltige Klammern in der Cypher-Abfrage.");
+      }
+      maske[i] = " ";
+    } else if (klammern.length > 0) {
+      maske[i] = " ";
+    }
+  }
+  if (klammern.length) throw new ValidationError("Ungueltige Klammern in der Cypher-Abfrage.");
+  return { text: text.join(""), maske: maske.join("") };
 }
 
 export async function runReadOnlyCypher(

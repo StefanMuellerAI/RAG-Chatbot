@@ -33,6 +33,14 @@ export class RateLimitError extends Error {
   }
 }
 
+/** Infrastructure failure: correcting a generated query cannot fix this. */
+export class ToolUnavailableError extends Error {
+  constructor(message = "Der Abfragedienst ist derzeit nicht erreichbar. Bitte erneut versuchen.") {
+    super(message);
+    this.name = "ToolUnavailableError";
+  }
+}
+
 /**
  * Nicht gefunden — oder nicht dem Aufrufer zugehoerig.
  *

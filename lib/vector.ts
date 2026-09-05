@@ -1,4 +1,5 @@
 import { Pinecone } from "@pinecone-database/pinecone";
+import { checkIngestionCapacity, ingestionSignal } from "./capacity";
 import { requireEnv } from "./env";
 import { fehlerMeldung } from "./errors";
 import { STANDARD_MIN_SCORE } from "./presets";
@@ -65,9 +66,11 @@ export function namespaceFuer(collectionId: string): string {
 }
 
 /** Erst im Request-Handler aufrufen, niemals auf Modulebene. */
-function getIndex() {
+function getIndex(signal?: AbortSignal) {
   const env = requireEnv("PINECONE_API_KEY", "PINECONE_INDEX");
-  const pinecone = new Pinecone({ apiKey: env.PINECONE_API_KEY });
+  const pinecone = new Pinecone({ apiKey: env.PINECONE_API_KEY, maxRetries: 0,
+    ...(signal ? { fetchApi: (url, init) => fetch(url, { ...init, signal }) } : {}),
+  });
   return pinecone.index(env.PINECONE_INDEX);
 }
 
@@ -99,9 +102,11 @@ export async function upsertChunks(
   chunks: UpsertChunk[],
   startIndex = 0,
 ): Promise<void> {
-  const namespace = getIndex().namespace(namespaceFuer(collectionId));
+  checkIngestionCapacity();
+  const namespace = getIndex(ingestionSignal()).namespace(namespaceFuer(collectionId));
 
   for (let offset = 0; offset < chunks.length; offset += UPSERT_BATCH_SIZE) {
+    checkIngestionCapacity();
     const stapel = chunks.slice(offset, offset + UPSERT_BATCH_SIZE).map((chunk, i) => {
       const nummer = startIndex + offset + i;
       return {
@@ -127,8 +132,10 @@ export async function sucheInSammlung(
   collectionId: string,
   frage: string,
   topK: number,
+  signal?: AbortSignal,
 ): Promise<Hit[]> {
-  const namespace = getIndex().namespace(namespaceFuer(collectionId));
+  signal?.throwIfAborted();
+  const namespace = getIndex(signal).namespace(namespaceFuer(collectionId));
 
   let antwort;
   try {

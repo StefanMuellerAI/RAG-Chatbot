@@ -3,6 +3,8 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { del, get, put } from "@vercel/blob";
 import initSqlJs, { type Database, type SqlJsStatic, type SqlValue } from "sql.js";
+import { assertReadOnlySql as pruefeSql } from "../services/sql/sql-policy.mjs";
+import { checkIngestionCapacity, ingestionSignal } from "./capacity";
 import type { CollectionSchema, SqlColumn, SqlTableSchema } from "./collection-kinds";
 import { DB_ORDNER, sammlungsPraefix } from "./documents";
 import { requireEnv } from "./env";
@@ -100,10 +102,11 @@ export async function newDatabase(): Promise<Database> {
 
 /** Datenbank einer Sammlung laden; ohne Datei eine leere. */
 export async function loadDatabase(userId: string, collectionId: string): Promise<Database> {
+  checkIngestionCapacity();
   assertConfigured();
   const SQL = await getSql();
 
-  const result = await get(databasePath(userId, collectionId), { access: "private" });
+  const result = await get(databasePath(userId, collectionId), { access: "private", abortSignal: ingestionSignal() });
   if (!result) return new SQL.Database();
 
   const buffer = await new Response(result.stream as ReadableStream).arrayBuffer();
@@ -120,6 +123,7 @@ export async function saveDatabase(
   collectionId: string,
   db: Database,
 ): Promise<number> {
+  checkIngestionCapacity();
   assertConfigured();
   const bytes = db.export();
   if (bytes.byteLength > SQLITE_MAX_BYTES) {
@@ -132,6 +136,7 @@ export async function saveDatabase(
     contentType: "application/vnd.sqlite3",
     addRandomSuffix: false,
     allowOverwrite: true,
+    abortSignal: ingestionSignal(),
   });
   return bytes.byteLength;
 }
@@ -252,37 +257,16 @@ export type QueryResult = {
   truncated: boolean;
 };
 
-const FORBIDDEN =
-  /\b(attach|detach|pragma|insert|update|delete|drop|alter|create|vacuum|reindex|analyze)\b|\breplace\b(?!\s*\()/i;
-
 /**
  * Laesst genau ein SELECT (auch mit WITH) durch. Der Rest ist Verteidigung in
  * der Tiefe: die Datenbank ist ohnehin nur eine Kopie im Speicher.
  */
 export function assertReadOnlySql(sql: string): string {
-  const trimmed = sql.trim().replace(/;\s*$/, "");
-  if (trimmed.length === 0) throw new ValidationError("Die SQL-Abfrage ist leer.");
-  if (trimmed.includes(";")) {
-    throw new ValidationError("Bitte genau ein SQL-Statement ohne Semikolon.");
+  try {
+    return pruefeSql(sql);
+  } catch (error) {
+    throw new ValidationError(error instanceof Error ? error.message : "Ungueltige SQL-Abfrage.");
   }
-  if (!/^(select|with)\b/i.test(trimmed)) {
-    throw new ValidationError("Nur lesende Abfragen (SELECT, auch mit WITH) sind erlaubt.");
-  }
-  if (FORBIDDEN.test(stripLiteralsAndComments(trimmed))) {
-    throw new ValidationError(
-      "Die Abfrage enthaelt ein nicht erlaubtes Schluesselwort (nur lesen).",
-    );
-  }
-  return trimmed;
-}
-
-/** Entfernt String-Literale und Kommentare, damit Schluesselwoerter darin nicht anschlagen. */
-function stripLiteralsAndComments(sql: string): string {
-  return sql
-    .replace(/'(?:[^']|'')*'/g, "''")
-    .replace(/"(?:[^"]|"")*"/g, '""')
-    .replace(/--[^\n]*/g, " ")
-    .replace(/\/\*[\s\S]*?\*\//g, " ");
 }
 
 export function runReadOnlyQuery(db: Database, sql: string): QueryResult {

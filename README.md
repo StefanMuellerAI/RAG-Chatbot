@@ -17,7 +17,7 @@ Eine Sammlung hat einen von drei Typen (siehe [Drei Arten von Sammlungen](#drei-
 - **Antworten**: Modell je Plan aus einem im Admin gepflegten Katalog — über das Vercel AI
   Gateway oder, mit eigenem Key, direkt bei Anthropic bzw. OpenAI
 - **Vektorsuche**: Pinecone Serverless, ein Namespace je Sammlung, Embedding im Dienst
-- **Tabellen**: SQLite-Datei je Sammlung in Vercel Blob, abgefragt in-process mit sql.js
+- **Tabellen**: SQLite-Datei je Sammlung in Vercel Blob, abgefragt durch einen separaten SQL-Dienst mit terminierbaren Workern
 - **Graphen**: FalkorDB, ein Graph je Sammlung (optional, über `FALKORDB_URL`)
 - **Datenbank**: Neon Postgres mit Drizzle
 - **Dateiablage**: Vercel Blob (privat, mandantenpräfigiert)
@@ -26,8 +26,9 @@ Eine Sammlung hat einen von drei Typen (siehe [Drei Arten von Sammlungen](#drei-
 - **Formate**: PDF, DOCX, XLSX, MP3 · CSV · Cypher-Skripte
 - **Design**: in Anlehnung an stadt-koeln.de
 
-Ausgelegt auf rund 15.000 gleichzeitig aktive Nutzer. Was das konkret bedeutet und wo die
-Grenzen liegen, steht unter [Betrieb](#betrieb).
+Das Lasttestziel sind 1.000 gleichzeitig laufende Antworten. Verteilte Zulassung,
+Modellbudgets und SQL-Isolation sind vorbereitet; eine Kapazitätszusage erfordert den
+Lastnachweis mit realen Dienstquoten. [Migration, Grenzen und Abnahme](docs/scaling-and-chat.md).
 
 ---
 
@@ -72,14 +73,19 @@ npm install
 ### 2. Datenbank anlegen
 
 ```bash
-npm run db:push    # Tabellen erzeugen
+npm run db:migrate # Migrationen auf neuer oder bereits migrationsverwalteter Datenbank anwenden
 npm run db:seed    # Größenklassen S/M/L/XL, Pläne und Modellkatalog anlegen
 ```
 
 Der Seed ist beliebig oft aufrufbar; bestehende Zeilen bleiben unberührt, damit
 Admin-Anpassungen erhalten bleiben. Wer die Datenbank aus einer früheren Fassung
-übernimmt, spielt die Migrationen unter `drizzle/` ein (`db:push` gleicht das Schema ab);
-`0002` legt die Tabellen `models` und `provider_keys` an.
+übernimmt, gleicht zuerst den bestehenden Migrationsstand ab. Bei bisherigem `db:push`
+nicht unbesehen alle Migrationen erneut ausführen. `0004` ergänzt serverseitige
+Chat-Generierungen, Status und Feedback; sie muss vor dem neuen App-Deployment angewendet
+werden. [Rollout-Anleitung](docs/scaling-and-chat.md#migration-und-rollout).
+
+Für SQL-Abfragen zusätzlich den [SQL-Dienst](services/sql/README.md) betreiben und
+`SQL_EXECUTOR_URL` sowie `SQL_EXECUTOR_TOKEN` in der App setzen.
 
 ### 3. Pinecone-Index anlegen
 
@@ -226,7 +232,7 @@ Verbrauch einsehen.
 | | Dokumente (`vector`) | Tabellen (`sql`) | Graph (`graph`) |
 |---|---|---|---|
 | **Eingabe** | PDF, DOCX, XLSX, MP3 (wird transkribiert) | CSV mit Kopfzeile; `;` oder `,` als Trenner, Dezimalkomma wird erkannt | `.cypher`, `.cql`, `.txt` mit `CREATE`/`MERGE`-Statements, durch `;` getrennt |
-| **Speicher** | Pinecone-Namespace je Sammlung | SQLite-Datei in Blob (`files/<userId>/<collectionId>/_db/sammlung.sqlite`), zur Laufzeit in-process mit sql.js | FalkorDB-Graph `c_<collectionId>` |
+| **Speicher** | Pinecone-Namespace je Sammlung | SQLite-Datei in Blob (`files/<userId>/<collectionId>/_db/sammlung.sqlite`), isolierte Worker im separaten SQL-Dienst | FalkorDB-Graph `c_<collectionId>` |
 | **Abfrage der KI** | `dokumente_durchsuchen` (semantische Suche) | `sql_ausfuehren` — SQLite-Dialekt, ein `SELECT`/`WITH` | `cypher_ausfuehren` — openCypher, `GRAPH.RO_QUERY` |
 | **Grenzen je Datei** | MB/Datei und Seiten der Größenklasse | zusätzlich 20 MB, 200.000 Zeilen, 200 Spalten; SQLite-Datei der Sammlung höchstens 50 MB | zusätzlich 5 MB, 5.000 Statements; FalkorDB-Free-Tier 100 MB für alle Graphen zusammen |
 | **Löschen einer Datei** | Abschnitte per Präfix `<docId>#` aus dem Namespace | Tabelle gedroppt, Datei zurückgeschrieben | Graph gelöscht und aus den übrigen Skripten neu aufgebaut |
@@ -580,9 +586,9 @@ stehen. Fehlende Variablen führen zu einer benannten Meldung in der Oberfläche
 statt zu einem abgebrochenen Build. Marketplace-Aliase (`POSTGRES_URL`,
 `KV_REST_API_*`) und der Vercel-OIDC-Token für das AI Gateway zählen mit.
 
-**Modell-Routing ist nicht nur ein Kostenhebel.** Anthropic zählt seine Minutenlimits
-getrennt pro Modell. Last über Haiku, Sonnet und Opus zu verteilen verdreifacht damit den
-verfügbaren Durchsatz.
+**Modell-Routing berücksichtigt auch Quoten.** Vor Änderungen die tatsächlichen
+Account-, Modell- und Gatewaylimits prüfen. Mehrere Modelle bedeuten nicht automatisch
+einen entsprechend höheren verfügbaren Gesamtdurchsatz.
 
 ---
 
@@ -590,25 +596,24 @@ verfügbaren Durchsatz.
 
 ### Vor dem Produktivgang
 
-**Fluid Compute mit In-Function-Concurrency einschalten** (Pro oder Enterprise, im
-Projekt unter Settings → Functions). Die Antwortströme sind I/O-gebunden und warten fast
-nur. Ohne geteilte Instanzen wird jede gleichzeitige Antwort als eigene Instanz nach
-Wall-Clock abgerechnet — bei über tausend gleichzeitigen Antworten ist das der größte
-vermeidbare Kostenposten.
+**Fluid Compute und Dienstregionen prüfen.** `vercel.json` aktiviert Fluid für neue
+Deployments. Kontrollieren, dass die Einstellung im konkreten Projekt greift und dass
+Datenbanken, SQL-Dienst und Chat in passenden Regionen laufen. Gemeinsame Instanzen
+können die vielen wartenden Streams effizienter bedienen.
 
-**Höhere Anthropic-Limits beantragen.** Bei 15.000 gleichzeitig aktiven Nutzern mit einer
-Frage alle zwei bis drei Minuten fallen etwa 5.000 bis 7.500 Fragen pro Minute an, also
-grob 4,5 Mio. Output-Token pro Minute. Das Scale-Tier gibt 2 Mio. pro Modell. Mit der
-Verteilung über drei Modelle wird es knapp erreichbar; darüber braucht es eine verhandelte
-Zusage.
+**Modellquoten bestätigen lassen.** Bei 1.000 laufenden Antworten und durchschnittlich
+30 Sekunden Antwortdauer entstehen etwa 2.000 neue Fragen/min. Bei 600 Ausgabetokens je
+Antwort sind das 1,2 Mio. Ausgabetokens/min plus Eingabe und Werkzeugschritte. Diese
+Beispielrechnung ersetzt keine Messung. Die konservativen Modellbudgets der App müssen
+auf die bestätigte Anbieterleistung abgestimmt werden.
 
 **Ein eigenes Spend-Limit setzen**, unterhalb des Tier-Caps. Es ist die letzte Notbremse,
 wenn Kontingente und Drosselung nicht greifen.
 
-**`GLOBAL_QUESTIONS_PER_MINUTE` festlegen.** Die Tageskontingente der einzelnen Pläne
-summieren sich bei 15.000 Nutzern zu einem Vielfachen dessen, was der Modellanbieter pro
-Minute liefert. Ohne diese Obergrenze bringt schon ein normaler Montagmorgen die Anwendung
-in die 429er-Zone des Anbieters — und dort trifft es alle gleichzeitig.
+**Fragen, laufende Arbeit und Tokens begrenzen.** `GLOBAL_QUESTIONS_PER_MINUTE` ergänzt
+die Plan-Kontingente; `*_MAX_CONCURRENT` steuert laufende Arbeit. Rollende Modellbudgets
+zählen jeden Schritt und jede Wiederholung. Uploads haben zusätzliche Teilbudgets.
+Siehe [.env.example](.env.example) und [Betriebsanleitung](docs/scaling-and-chat.md).
 
 ### Nach dem Deployment: Diagnose
 
@@ -632,21 +637,24 @@ lässt.
 ### Lasttest
 
 ```bash
-npm run lasttest -- --url https://... --cookie "__session=..." \
-  --gleichzeitig 50 --dauer 60
+npm run lasttest -- --url https://staging.example.org \
+  --identities-file /private/tmp/lasttest-identities.json \
+  --stages 100,250,500,1000 --dry-run
 ```
 
-Der Chat liegt hinter der Anmeldung, der Test braucht daher ein echtes Sitzungs-Cookie.
-Er fährt eine konstante Zahl offener Anfragen statt einer konstanten Rate: Bei fester Rate
-stauen sich die Anfragen, sobald es langsamer wird, und man misst am Ende die eigene
-Warteschlange.
+Die private Fixture braucht pro gleichzeitigem Stream ein anderes Testkonto mit gültiger
+Sitzung und passenden Sammlungen. Ohne `--run` wird nur die Fixture geprüft. Mit `--run`
+erstellt der Test Chats und hält die eingestellte Zahl offener Anfragen; `--burst` startet
+genau eine Frage je Konto gleichzeitig. Fehlerereignisse, fehlendes `done`, leere Antworten
+und `done.status` werden geprüft. Modellantworten werden getrennt von statischen
+Antworten und Replays ausgewiesen.
 
 Jede Frage kostet echtes Geld und verbraucht das Tageskontingent des Kontos. Klein
 anfangen.
 
-Zielgrößen zur Einordnung: rund 5.000 Fragen pro Minute, etwa 1.250 gleichzeitig offene
-Antworten. Vercel selbst ist dabei nicht der Engpass — 30.000 gleichzeitige Funktionen auf
-Hobby und Pro lassen zwei Größenordnungen Luft. Der Engpass ist der Modellanbieter.
+Anleitung für Dauerlast, gleichzeitigen Start von 1.000 Anfragen, Referenzfragen und
+Messgrößen: [Lastabnahme](docs/scaling-and-chat.md#messung-und-abnahme). Lokale Tests
+belegen die Schutzmechanismen, nicht die Produktivkapazität.
 
 ### Beobachtbarkeit
 

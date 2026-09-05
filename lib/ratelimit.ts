@@ -29,12 +29,14 @@ import { QuotaError, RateLimitError } from "./errors";
 
 let redisZwischenspeicher: Redis | null = null;
 
-function getRedis(): Redis {
+export function getRedis(): Redis {
   if (!redisZwischenspeicher) {
     const env = requireEnv("UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN");
     redisZwischenspeicher = new Redis({
       url: env.UPSTASH_REDIS_REST_URL,
       token: env.UPSTASH_REDIS_REST_TOKEN,
+      retry: { retries: 1 },
+      signal: () => AbortSignal.timeout(5000),
     });
   }
   return redisZwischenspeicher;
@@ -243,10 +245,13 @@ export async function erwirbSperre(
  * inzwischen von jemand anderem erworbene Sperre nicht versehentlich
  * freigegeben wird.
  */
+export const RELEASE_LOCK_SCRIPT = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end return 0";
+export const RENEW_LOCK_SCRIPT = "if redis.call('get', KEYS[1]) == ARGV[1] and redis.call('pttl', KEYS[1]) > 0 then return redis.call('pexpire', KEYS[1], ARGV[2]) end return 0";
+
 export async function gibSperreFrei(schluessel: string, inhaber: string): Promise<void> {
   try {
     await getRedis().eval(
-      "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end return 0",
+      RELEASE_LOCK_SCRIPT,
       [schluessel],
       [inhaber],
     );

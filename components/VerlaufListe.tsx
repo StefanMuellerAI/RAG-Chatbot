@@ -16,6 +16,9 @@ type Eigenschaften = {
   onUmschalten: () => void;
   onWaehlen: (id: string) => void;
   onNeu: () => void;
+  mehr: boolean;
+  laedt: boolean;
+  onMehr: () => void;
 };
 
 export default function VerlaufListe({
@@ -27,6 +30,9 @@ export default function VerlaufListe({
   onUmschalten,
   onWaehlen,
   onNeu,
+  mehr,
+  laedt,
+  onMehr,
 }: Eigenschaften) {
   const [bearbeitet, setBearbeitet] = useState<string | null>(null);
   const [entwurf, setEntwurf] = useState("");
@@ -67,7 +73,7 @@ export default function VerlaufListe({
       </button>
 
       <div className="verlauf-inhalt">
-        <button className="knopf knopf-sekundaer verlauf-neu" onClick={onNeu} disabled={gesperrt}>
+        <button className="knopf knopf-sekundaer verlauf-neu" onClick={onNeu}>
           + Neuer Chat
         </button>
 
@@ -109,7 +115,7 @@ export default function VerlaufListe({
                       className="verlauf-titel"
                       onClick={() => onWaehlen(chat.id)}
                       onDoubleClick={() => !gesperrt && starteUmbenennen(chat)}
-                      disabled={gesperrt}
+                      aria-current={chat.id === aktiveId ? "page" : undefined}
                       title={chat.titel}
                     >
                       {chat.titel}
@@ -139,6 +145,10 @@ export default function VerlaufListe({
             ))}
           </ul>
         )}
+
+        {mehr && <button className="knopf-schlicht verlauf-mehr" onClick={onMehr} disabled={laedt}>
+          {laedt ? "Wird geladen …" : "Weitere Chats laden"}
+        </button>}
 
         {chats.length > 0 && (
           <button

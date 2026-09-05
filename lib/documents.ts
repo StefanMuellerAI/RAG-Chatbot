@@ -4,7 +4,7 @@ import { getDb } from "./db";
 import { collections, documents } from "./db/schema";
 import type { DocumentRecord, DocumentStatus } from "./db/schema";
 import { requireEnv } from "./env";
-import { NotFoundError } from "./errors";
+import { NotFoundError, ValidationError } from "./errors";
 
 /**
  * Dokumente: Metadaten in Postgres, Originaldateien in Vercel Blob.
@@ -98,15 +98,16 @@ export type NeuesDokument = {
 export async function legeDokumentAn(neu: NeuesDokument): Promise<DocumentRecord> {
   const db = getDb();
 
-  const [angelegt] = await db.insert(documents).values(neu).returning();
-
-  await db
-    .update(collections)
-    .set({
-      documentCount: sql`${collections.documentCount} + 1`,
-      updatedAt: new Date(),
-    })
-    .where(eq(collections.id, neu.collectionId));
+  // Neon fuehrt den Batch als Transaktion aus: Ohne Zaehler kein Metadatensatz.
+  const [[angelegt]] = await db.batch([
+    db.insert(documents).values(neu).returning(),
+    db.update(collections)
+      .set({
+        documentCount: sql`${collections.documentCount} + 1`,
+        updatedAt: new Date(),
+      })
+      .where(eq(collections.id, neu.collectionId)),
+  ]);
 
   return angelegt;
 }
@@ -157,9 +158,10 @@ export async function setzeDokumentStatus(
  * Schliesst die Verarbeitung ab: Seiten- und Abschnittszahl festhalten und die
  * Zaehler der Sammlung fortschreiben.
  *
- * Die Zaehler werden als `spalte + wert` geschrieben und nicht gelesen, im
- * Speicher addiert und zurueckgeschrieben. Bei parallelen Ingestionen derselben
- * Sammlung wuerde das Zweite das Erste ueberschreiben.
+ * Die Zeilensperre liefert auch bei parallelen Abschluessen den aktuellen
+ * Dokumentstand. Nur die Differenz zu diesem Stand geht in die Sammlung ein:
+ * Ein Retry zaehlt nichts doppelt, eine Neuverarbeitung darf Werte korrigieren.
+ * Dokument und Sammlung werden in einem PostgreSQL-Statement geschrieben.
  */
 export async function schliesseDokumentAb(
   docId: string,
@@ -167,27 +169,34 @@ export async function schliesseDokumentAb(
   seiten: number,
   abschnitte: number,
 ): Promise<void> {
-  const db = getDb();
-
-  await db
-    .update(documents)
-    .set({
-      status: "fertig",
-      error: null,
-      pageCount: seiten,
-      chunkCount: abschnitte,
-      updatedAt: new Date(),
-    })
-    .where(eq(documents.id, docId));
-
-  await db
-    .update(collections)
-    .set({
-      pageCount: sql`${collections.pageCount} + ${seiten}`,
-      chunkCount: sql`${collections.chunkCount} + ${abschnitte}`,
-      updatedAt: new Date(),
-    })
-    .where(eq(collections.id, collectionId));
+  if (![seiten, abschnitte].every(value => Number.isInteger(value) && value >= 0 && value <= 2_147_483_647)) {
+    throw new ValidationError("Seiten- und Abschnittszahl muessen nichtnegative ganze Zahlen sein.");
+  }
+  const result = await getDb().execute(sql`
+    with vorher as materialized (
+      select id, collection_id, page_count, chunk_count
+      from documents
+      where id = ${docId}::uuid and collection_id = ${collectionId}::uuid
+      for update
+    ), abgeschlossen as (
+      update documents as dokument
+      set status = 'fertig', error = null, page_count = ${seiten},
+          chunk_count = ${abschnitte}, updated_at = now()
+      from vorher
+      where dokument.id = vorher.id and dokument.collection_id = vorher.collection_id
+      returning dokument.collection_id,
+        dokument.page_count - vorher.page_count as seiten_delta,
+        dokument.chunk_count - vorher.chunk_count as abschnitt_delta
+    )
+    update collections as sammlung
+    set page_count = greatest(sammlung.page_count + abgeschlossen.seiten_delta, 0),
+        chunk_count = greatest(sammlung.chunk_count + abgeschlossen.abschnitt_delta, 0),
+        updated_at = now()
+    from abgeschlossen
+    where sammlung.id = abgeschlossen.collection_id
+    returning sammlung.id
+  `);
+  if (result.rows.length === 0) throw new NotFoundError("Das Dokument in dieser Sammlung");
 }
 
 /**
@@ -197,19 +206,23 @@ export async function schliesseDokumentAb(
  * die Reihenfolge dort ist bewusst nicht hier festgelegt (siehe die Loeschroute).
  */
 export async function entferneDokumentSatz(satz: DocumentRecord): Promise<void> {
-  const db = getDb();
-
-  await db.delete(documents).where(eq(documents.id, satz.id));
-
-  await db
-    .update(collections)
-    .set({
-      documentCount: sql`greatest(${collections.documentCount} - 1, 0)`,
-      pageCount: sql`greatest(${collections.pageCount} - ${satz.pageCount}, 0)`,
-      chunkCount: sql`greatest(${collections.chunkCount} - ${satz.chunkCount}, 0)`,
-      updatedAt: new Date(),
-    })
-    .where(eq(collections.id, satz.collectionId));
+  // RETURNING uses the actual deleted counts, even if the caller's snapshot
+  // predates a completion. With no deleted row, collection counters stay put.
+  await getDb().execute(sql`
+    with entfernt as (
+      delete from documents
+      where id = ${satz.id}::uuid and collection_id = ${satz.collectionId}::uuid
+        and user_id = ${satz.userId}
+      returning collection_id, page_count, chunk_count
+    )
+    update collections as sammlung
+    set document_count = greatest(sammlung.document_count - 1, 0),
+        page_count = greatest(sammlung.page_count - entfernt.page_count, 0),
+        chunk_count = greatest(sammlung.chunk_count - entfernt.chunk_count, 0),
+        updated_at = now()
+    from entfernt
+    where sammlung.id = entfernt.collection_id and sammlung.user_id = ${satz.userId}
+  `);
 }
 
 // --- Dateien ----------------------------------------------------------------
