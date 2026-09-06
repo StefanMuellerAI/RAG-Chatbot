@@ -5,6 +5,7 @@ import NichtBereit from "@/components/NichtBereit";
 import { requireKontextFuerSeite } from "@/lib/auth/user";
 import { ladeSammlungen, ladeSammlungsStatus } from "@/lib/collections";
 import { missingFor } from "@/lib/env";
+import { starteMessung } from "@/lib/messung";
 import { leseTagesstand } from "@/lib/ratelimit";
 
 export const dynamic = "force-dynamic";
@@ -13,15 +14,20 @@ export default async function ChatSeite() {
   // Request-Zeit, nicht Build-Zeit: sonst waeren die Server-Variablen leer,
   // obwohl sie in Vercel gesetzt sind.
   await connection();
+  const messung = starteMessung("page_render", { route: "/" });
   const fehlt = await missingFor("chat");
   if (fehlt.length > 0) return <NichtBereit bereich="Der Assistent" fehlt={fehlt} />;
+  messung.phase("env");
 
   const kontext = await requireKontextFuerSeite("/");
+  messung.phase("kontext");
   const [sammlungen, verbraucht, sammlungsStatus] = await Promise.all([
     ladeSammlungen(kontext.userId),
     leseTagesstand(kontext.userId),
     ladeSammlungsStatus(kontext.userId),
   ]);
+  messung.phase("daten");
+  messung.ende({ sammlungen: sammlungen.length });
 
   return (
     <>

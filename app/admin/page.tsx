@@ -11,6 +11,7 @@ import {
 import { requireKontextFuerSeite } from "@/lib/auth/user";
 import { ladeEinladungen } from "@/lib/einladungen";
 import { missingFor, providerKeySecretKonfiguriert } from "@/lib/env";
+import { starteMessung } from "@/lib/messung";
 import { ladeKeyStatus } from "@/lib/provider-keys";
 
 export const dynamic = "force-dynamic";
@@ -21,13 +22,16 @@ export default async function AdminSeite({
   searchParams: Promise<{ suche?: string; seite?: string }>;
 }) {
   await connection();
+  const messung = starteMessung("page_render", { route: "/admin" });
   const fehlt = await missingFor("admin");
   if (fehlt.length > 0) return <NichtBereit bereich="Die Administration" fehlt={fehlt} />;
+  messung.phase("env");
 
   // Zur Anmeldung, wenn niemand angemeldet ist. Ist jemand angemeldet, hat aber
   // die Rolle nicht, bleibt es bei einer Erklaerung statt einer Weiterleitung -
   // sonst laufe er im Kreis, denn erneutes Anmelden aendert daran nichts.
   const kontext = await requireKontextFuerSeite("/admin");
+  messung.phase("kontext");
 
   if (!kontext.isAdmin) {
     return (
@@ -66,6 +70,8 @@ export default async function AdminSeite({
         return null;
       }),
     ]);
+  messung.phase("daten");
+  messung.ende({ nutzer: nutzer.gesamt });
 
   return (
     <AdminKonsole

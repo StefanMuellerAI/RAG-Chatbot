@@ -29,7 +29,7 @@ export async function erstelleSammlungAktion(
       const sammlung = await erstelleSammlung(kontext, eingabe);
       return { id: sammlung.id };
     },
-    { userId: kontext?.userId },
+    { userId: kontext?.userId, name: "sammlung_anlegen" },
   );
 }
 
@@ -41,5 +41,5 @@ export async function aktualisiereSammlungAktion(
     const kontext = await getKontext();
     if (!kontext) throw new NotSignedInError();
     await aktualisiereSammlung(kontext.userId, collectionId, eingabe);
-  });
+  }, { name: "sammlung_aktualisieren" });
 }
