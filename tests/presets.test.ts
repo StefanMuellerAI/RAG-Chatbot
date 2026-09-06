@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ValidationError } from "@/lib/errors";
 import {
+  STANDARD_MIN_RERANK,
   STANDARD_MIN_SCORE,
   effektiveVerarbeitung,
   findPreset,
@@ -125,5 +126,35 @@ describe("pruefeVerarbeitung", () => {
   it("weist unlesbare Eingaben ab", () => {
     expect(() => pruefeVerarbeitung(FLIESSTEXT, "gross")).toThrow(ValidationError);
     expect(() => pruefeVerarbeitung(FLIESSTEXT, [1_200, 200])).toThrow(ValidationError);
+  });
+});
+
+describe("Reranker im Expertenmodus", () => {
+  it("ist ohne Abweichung an und nutzt die Standard-Relevanz", () => {
+    const verarbeitung = effektiveVerarbeitung({ preset: "fliesstext", processing: null });
+    expect(verarbeitung.rerank).toBe(true);
+    expect(verarbeitung.minRerank).toBe(STANDARD_MIN_RERANK);
+    expect(verarbeitung.angepasst).toBe(false);
+  });
+
+  it("uebernimmt Schalter und Relevanz aus der Abweichung", () => {
+    const verarbeitung = effektiveVerarbeitung({ preset: "fliesstext", processing: { rerank: false, minRerank: 0.2 } });
+    expect(verarbeitung.rerank).toBe(false);
+    expect(verarbeitung.minRerank).toBe(0.2);
+    expect(verarbeitung.angepasst).toBe(true);
+  });
+
+  it("speichert den Schalter nur, wenn er aus ist, und die Relevanz nur abweichend", () => {
+    expect(pruefeVerarbeitung(FLIESSTEXT, { rerank: true, minRerank: STANDARD_MIN_RERANK })).toBeNull();
+    expect(pruefeVerarbeitung(FLIESSTEXT, { rerank: "1", minRerank: "0,05" })).toBeNull();
+    expect(pruefeVerarbeitung(FLIESSTEXT, { rerank: false })).toEqual({ rerank: false });
+    expect(pruefeVerarbeitung(FLIESSTEXT, { rerank: "0" })).toEqual({ rerank: false });
+    expect(pruefeVerarbeitung(FLIESSTEXT, { minRerank: "0,20" })).toEqual({ minRerank: 0.2 });
+  });
+
+  it("weist unbrauchbare Reranker-Angaben ab", () => {
+    expect(() => pruefeVerarbeitung(FLIESSTEXT, { rerank: "vielleicht" })).toThrow(ValidationError);
+    expect(() => pruefeVerarbeitung(FLIESSTEXT, { minRerank: 1.5 })).toThrow(ValidationError);
+    expect(() => pruefeVerarbeitung(FLIESSTEXT, { minRerank: -0.1 })).toThrow(ValidationError);
   });
 });

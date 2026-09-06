@@ -14,6 +14,7 @@ import {
   type KeyAnbieter,
 } from "./models";
 import { effektiveVerarbeitung, findPreset } from "./presets";
+import { ordneNeu, rerankKonfiguriert, type Kandidat, type RerankMessung } from "./rerank";
 import { ladeKey } from "./provider-keys";
 import { sucheInSammlung, type Hit } from "./vector";
 import { withCapacity } from "./capacity";
@@ -332,6 +333,7 @@ export class Fundstellensammler {
 export function baueSuchwerkzeug(userId: string, sammler: Fundstellensammler, options: {
   sammlungen?: SammlungMitKlasse[]; signal?: AbortSignal;
   onStatus?: (phase: "retrieval" | "queued", message: string) => void;
+  onRerank?: (messung: RerankMessung) => void;
 } = {}) {
   return tool({
     description:
@@ -368,26 +370,20 @@ export function baueSuchwerkzeug(userId: string, sammler: Fundstellensammler, op
         };
       }
 
-      // Parallel: drei Sammlungen sollen eine Wartezeit kosten und nicht drei.
-      const ergebnisse = await Promise.all(
-        erlaubt.map(async (sammlung) => ({
-          sammlung,
-          hits: await withCapacity("retrieval", () => sucheMitSchwelle(sammlung, suchbegriff, options.signal), {
-            signal: options.signal, onWait: () => options.onStatus?.("queued", "Warte auf freie Suchkapazitaet …"),
-          }),
-        })),
-      );
+      const treffer = await sammleTreffer(erlaubt, suchbegriff, {
+        signal: options.signal,
+        onWait: () => options.onStatus?.("queued", "Warte auf freie Suchkapazitaet …"),
+        onRerank: options.onRerank,
+      });
 
-      const abschnitte = ergebnisse.flatMap(({ sammlung, hits }) =>
-        sammler.fuegeHinzu(hits, sammlung.name).map(({ fundstelle, volltext }) => ({
-          nummer: fundstelle.n,
-          sammlung: sammlung.name,
-          quelle: fundstelle.location
-            ? `${fundstelle.filename}, ${fundstelle.location}`
-            : fundstelle.filename,
-          text: volltext,
-        })),
-      );
+      const abschnitte = sammler.uebernimm(treffer).map(({ fundstelle, volltext }) => ({
+        nummer: fundstelle.n,
+        sammlung: fundstelle.collectionName,
+        quelle: fundstelle.location
+          ? `${fundstelle.filename}, ${fundstelle.location}`
+          : fundstelle.filename,
+        text: volltext,
+      }));
 
       if (abschnitte.length === 0) {
         return {
@@ -407,18 +403,90 @@ export function baueSuchwerkzeug(userId: string, sammler: Fundstellensammler, op
 }
 
 /**
+ * Mit Reranker holt die Vektorsuche mehr Kandidaten und laesst die
+ * Kosinus-Schwelle etwas tiefer: Der Cross-Encoder soll auch Abschnitte
+ * bewerten, die die Einbettung knapp verfehlt hat. Er sortiert das Rauschen
+ * anschliessend verlaesslicher aus, als die Schwelle es koennte.
+ */
+export const RERANK_AUFWEITUNG = 2;
+export const RERANK_MAX_KANDIDATEN_JE_SAMMLUNG = 30;
+export const RERANK_SCHWELLEN_NACHLASS = 0.05;
+/** Hoechstens so viele Belege ueber alle Sammlungen nach dem Rerank. */
+export const RERANK_MAX_BELEGE = 20;
+
+/**
  * Sucht in einer Sammlung mit ihrem topK und filtert Rauschen unterhalb ihrer
  * Aehnlichkeitsschwelle aus. Beides kommt aus dem Preset, sofern die Sammlung
- * es nicht im Expertenmodus uebersteuert hat.
+ * es nicht im Expertenmodus uebersteuert hat. Mit `rerank` wird breiter
+ * gesucht, weil der Reranker den Zuschnitt uebernimmt.
  */
 export async function sucheMitSchwelle(
   sammlung: SammlungMitKlasse,
   suchbegriff: string,
   signal?: AbortSignal,
+  options: { rerank?: boolean } = {},
 ): Promise<Hit[]> {
   const verarbeitung = effektiveVerarbeitung(sammlung);
-  const hits = await sucheInSammlung(sammlung.id, suchbegriff, Math.min(verarbeitung.topK, 12), signal);
-  return hits.filter((hit) => hit.score >= verarbeitung.minScore);
+  const topK = options.rerank
+    ? Math.min(verarbeitung.topK * RERANK_AUFWEITUNG, RERANK_MAX_KANDIDATEN_JE_SAMMLUNG)
+    : Math.min(verarbeitung.topK, 12);
+  const schwelle = options.rerank
+    ? Math.max(0, verarbeitung.minScore - RERANK_SCHWELLEN_NACHLASS)
+    : verarbeitung.minScore;
+  const hits = await sucheInSammlung(sammlung.id, suchbegriff, topK, signal);
+  return hits.filter((hit) => hit.score >= schwelle);
+}
+
+/**
+ * Der Reranker greift, wenn er konfiguriert ist und keine der beteiligten
+ * Sammlungen ihn abgeschaltet hat. Gemischt ginge nicht: Die Reihenfolge ueber
+ * Sammlungen hinweg braucht eine gemeinsame Skala.
+ */
+export function rerankAktiv(sammlungen: SammlungMitKlasse[]): boolean {
+  return rerankKonfiguriert()
+    && sammlungen.length > 0
+    && sammlungen.every((sammlung) => effektiveVerarbeitung(sammlung).rerank);
+}
+
+export type SuchOptionen = {
+  signal?: AbortSignal;
+  onWait?: () => void;
+  onRerank?: (messung: RerankMessung) => void;
+};
+
+/**
+ * Der gemeinsame Suchweg fuer Direktsuche und Werkzeug: alle Sammlungen
+ * parallel, dann — sofern aktiv — der Reranker ueber alle Kandidaten. Die
+ * Rueckgabe traegt in `hit.score` den Wert, nach dem der Sammler ordnet:
+ * Rerank-Relevanz, sonst Kosinus.
+ */
+export async function sammleTreffer(
+  sammlungen: SammlungMitKlasse[],
+  suchbegriff: string,
+  options: SuchOptionen = {},
+): Promise<Kandidat[]> {
+  const rerank = rerankAktiv(sammlungen);
+  const ergebnisse = await Promise.all(
+    sammlungen.map(async (sammlung) => {
+      const verarbeitung = effektiveVerarbeitung(sammlung);
+      const hits = await withCapacity(
+        "retrieval",
+        () => sucheMitSchwelle(sammlung, suchbegriff, options.signal, { rerank }),
+        { signal: options.signal, onWait: options.onWait },
+      );
+      return hits.map((hit) => ({ hit, sammlungsname: sammlung.name, minRerank: verarbeitung.minRerank }));
+    }),
+  );
+  const kandidaten = ergebnisse.flat();
+  if (!rerank) return kandidaten;
+
+  const hoechstens = Math.min(
+    sammlungen.reduce((summe, sammlung) => summe + effektiveVerarbeitung(sammlung).topK, 0),
+    RERANK_MAX_BELEGE,
+  );
+  const { treffer, messung } = await ordneNeu(suchbegriff, kandidaten, { hoechstens, signal: options.signal });
+  options.onRerank?.(messung);
+  return treffer;
 }
 
 /** Hoechstens so viele Dokumentensammlungen werden ohne Werkzeug parallel durchsucht. */
@@ -430,30 +498,16 @@ export const MAX_DIREKTSUCHE = 6;
  *
  * Der Weg ohne Werkzeug: Bei reinen Dokumentensammlungen braucht es keinen
  * Modellaufruf, um zu entscheiden, wo gesucht wird. Die Schwelle je Sammlung
- * sortiert Rauschen aus, die Aehnlichkeit entscheidet ueber die Reihenfolge.
- * Das spart einen vollstaendigen Modelldurchlauf je Frage.
+ * sortiert Rauschen aus, die Aehnlichkeit — oder der Reranker — entscheidet
+ * ueber die Reihenfolge. Das spart einen vollstaendigen Modelldurchlauf je Frage.
  */
 export async function sucheInSammlungen(
   sammlungen: SammlungMitKlasse[],
   suchbegriff: string,
   sammler: Fundstellensammler,
-  options: { signal?: AbortSignal; onWait?: () => void } = {},
+  options: SuchOptionen = {},
 ): Promise<{ fundstelle: Fundstelle; volltext: string }[]> {
-  const ergebnisse = await Promise.all(
-    sammlungen.map(async (sammlung) => ({
-      sammlung,
-      hits: await withCapacity(
-        "retrieval",
-        () => sucheMitSchwelle(sammlung, suchbegriff, options.signal),
-        options,
-      ),
-    })),
-  );
-  return sammler.uebernimm(
-    ergebnisse.flatMap(({ sammlung, hits }) =>
-      hits.map((hit) => ({ hit, sammlungsname: sammlung.name })),
-    ),
-  );
+  return sammler.uebernimm(await sammleTreffer(sammlungen, suchbegriff, options));
 }
 
 /**

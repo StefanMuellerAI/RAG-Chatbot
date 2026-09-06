@@ -1290,6 +1290,17 @@ fieldset.auswahl .feld-zusatz {
   margin: 10px 0 12px;
 }
 
+.experten-schalter {
+  display: block;
+  margin: 0 0 12px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.experten-schalter input {
+  margin-right: 4px;
+}
+
 .experten-raster {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));

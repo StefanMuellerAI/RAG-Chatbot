@@ -6,6 +6,7 @@ import { ladeDokumenteDerSammlung } from "@/lib/documents";
 import { NotFoundError } from "@/lib/errors";
 import { starteMessung } from "@/lib/messung";
 import { effektiveVerarbeitung } from "@/lib/presets";
+import { rerankKonfiguriert } from "@/lib/rerank";
 
 export const dynamic = "force-dynamic";
 
@@ -31,6 +32,7 @@ export default async function SammlungSeite({
       sammlung={daten.sammlung}
       dokumente={daten.dokumente}
       verarbeitung={effektiveVerarbeitung(daten.sammlung)}
+      rerankVerfuegbar={rerankKonfiguriert()}
     />
   );
 }

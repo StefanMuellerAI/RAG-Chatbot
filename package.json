@@ -19,6 +19,7 @@
     "pruefe:chunks": "tsx scripts/chunk-pruefung.ts",
     "pruefe:kontingente": "tsx scripts/kontingent-pruefung.ts",
     "pruefe:env": "tsx scripts/env-pruefung.ts",
+    "pruefe:retrieval": "dotenv -e .env.local -- tsx scripts/retrieval-pruefung.ts",
     "migriere:altdaten": "dotenv -e .env.local -- tsx scripts/migriere-altdaten.ts",
     "lasttest": "tsx scripts/lasttest.ts"
   },

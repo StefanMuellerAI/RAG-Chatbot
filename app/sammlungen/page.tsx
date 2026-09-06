@@ -6,6 +6,7 @@ import { erlaubteGroessenklassen, ladeSammlungen } from "@/lib/collections";
 import { graphConfigured, missingFor } from "@/lib/env";
 import { starteMessung } from "@/lib/messung";
 import { PRESETS } from "@/lib/presets";
+import { rerankKonfiguriert } from "@/lib/rerank";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +34,7 @@ export default async function SammlungenSeite() {
       klassen={klassen}
       presets={[...PRESETS]}
       graphVerfuegbar={graphConfigured()}
+      rerankVerfuegbar={rerankKonfiguriert()}
       plan={{
         label: kontext.plan.label,
         maxCollections: kontext.plan.maxCollections,

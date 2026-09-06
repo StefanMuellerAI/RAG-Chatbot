@@ -12,6 +12,7 @@ import {
 import type { SammlungMitKlasse } from "@/lib/collections";
 import type { SizeClass } from "@/lib/db/schema";
 import {
+  STANDARD_MIN_RERANK,
   STANDARD_MIN_SCORE,
   VERARBEITUNG_GRENZEN,
   maxUeberlappung,
@@ -26,6 +27,8 @@ type Eigenschaften = {
   presets: Preset[];
   /** Ohne FALKORDB_URL lassen sich keine Graph-Sammlungen anlegen. */
   graphVerfuegbar: boolean;
+  /** Ohne RERANK_MODEL zeigt der Expertenmodus keine Reranker-Felder. */
+  rerankVerfuegbar: boolean;
   plan: { label: string; maxCollections: number; maxSizeClassId: string };
 };
 
@@ -44,6 +47,7 @@ export default function SammlungenBereich({
   klassen,
   presets,
   graphVerfuegbar,
+  rerankVerfuegbar,
   plan,
 }: Eigenschaften) {
   const [laueft, starte] = useTransition();
@@ -113,6 +117,7 @@ export default function SammlungenBereich({
             klassen={klassen}
             presets={presets}
             graphVerfuegbar={graphVerfuegbar}
+            rerankVerfuegbar={rerankVerfuegbar}
             gesperrt={laueft}
             onAbbrechen={() => setFormularOffen(false)}
             onAnlegen={anlegen}
@@ -174,6 +179,7 @@ function Anlegeformular({
   klassen,
   presets,
   graphVerfuegbar,
+  rerankVerfuegbar,
   gesperrt,
   onAbbrechen,
   onAnlegen,
@@ -181,6 +187,7 @@ function Anlegeformular({
   klassen: SizeClass[];
   presets: Preset[];
   graphVerfuegbar: boolean;
+  rerankVerfuegbar: boolean;
   gesperrt: boolean;
   onAbbrechen: () => void;
   onAnlegen: (eingabe: NeueSammlung) => void;
@@ -224,6 +231,8 @@ function Anlegeformular({
       ueberlappung: Number(experten.ueberlappung),
       topK: Number(experten.topK),
       minScore: Number(experten.minScore.replace(",", ".")),
+      rerank: experten.rerank !== "0",
+      minRerank: Number(experten.minRerank.replace(",", ".")),
     };
   }
 
@@ -334,6 +343,7 @@ function Anlegeformular({
               preset={aktivesPreset}
               werte={expertenWerte}
               fehler={expertenFehler}
+              rerankVerfuegbar={rerankVerfuegbar}
               angefasst={experten !== null}
               onAendern={setzeExperten}
               onZuruecksetzen={() => setExperten(null)}
@@ -402,7 +412,11 @@ function Anlegeformular({
 
 // --- Expertenmodus ----------------------------------------------------------
 
-/** Die vier Felder als Text, so wie sie in den Eingabefeldern stehen. */
+/**
+ * Die Felder als Text, so wie sie in den Eingabefeldern stehen. Der
+ * Reranker-Schalter steht als "1" oder "0" darin, damit alle Felder gleich
+ * behandelt werden koennen.
+ */
 type ExpertenEingabe = Record<VerarbeitungsFeld, string>;
 
 type ExpertenFehler = Partial<Record<VerarbeitungsFeld, string>>;
@@ -419,6 +433,8 @@ function vorgaben(preset: Preset): ExpertenEingabe {
     ueberlappung: String(preset.ueberlappung),
     topK: String(preset.topK),
     minScore: STANDARD_MIN_SCORE.toFixed(2),
+    rerank: "1",
+    minRerank: STANDARD_MIN_RERANK.toFixed(2),
   };
 }
 
@@ -459,6 +475,17 @@ function pruefeExperten(werte: ExpertenEingabe, preset: Preset): ExpertenFehler 
     fehler.minScore = `Zahl zwischen ${minSchwelle} und ${maxSchwelle}, z. B. 0,80.`;
   }
 
+  const minRerank = Number(werte.minRerank.trim().replace(",", "."));
+  const { min: minRelevanz, max: maxRelevanz } = VERARBEITUNG_GRENZEN.minRerank;
+  if (
+    werte.minRerank.trim() === "" ||
+    !Number.isFinite(minRerank) ||
+    minRerank < minRelevanz ||
+    minRerank > maxRelevanz
+  ) {
+    fehler.minRerank = `Zahl zwischen ${minRelevanz} und ${maxRelevanz}, z. B. 0,05.`;
+  }
+
   return fehler;
 }
 
@@ -469,14 +496,15 @@ function ganzzahl(text: string): number | null {
 }
 
 /**
- * Zugeklappt eine Zeile, aufgeklappt vier Zahlenfelder. Die Werte sind mit
- * dem Preset vorbelegt; wer nichts anfasst, bekommt eine gewoehnliche
- * Preset-Sammlung.
+ * Zugeklappt eine Zeile, aufgeklappt vier Zahlenfelder — mit Reranker zwei
+ * mehr. Die Werte sind mit dem Preset vorbelegt; wer nichts anfasst, bekommt
+ * eine gewoehnliche Preset-Sammlung.
  */
 function Expertenmodus({
   preset,
   werte,
   fehler,
+  rerankVerfuegbar,
   angefasst,
   onAendern,
   onZuruecksetzen,
@@ -484,6 +512,7 @@ function Expertenmodus({
   preset: Preset;
   werte: ExpertenEingabe;
   fehler: ExpertenFehler;
+  rerankVerfuegbar: boolean;
   angefasst: boolean;
   onAendern: (feld: VerarbeitungsFeld, wert: string) => void;
   onZuruecksetzen: () => void;
@@ -534,6 +563,18 @@ function Expertenmodus({
       inputMode: "decimal",
     },
   ];
+  const rerankAn = werte.rerank !== "0";
+  if (rerankVerfuegbar && rerankAn) {
+    felder.push({
+      id: "minRerank",
+      label: "Mindest-Relevanz (Reranker)",
+      zusatz: "0 bis 1",
+      step: 0.01,
+      min: VERARBEITUNG_GRENZEN.minRerank.min,
+      max: VERARBEITUNG_GRENZEN.minRerank.max,
+      inputMode: "decimal",
+    });
+  }
 
   return (
     <details className="experten">
@@ -545,6 +586,22 @@ function Expertenmodus({
         muessen vergleichbar lang bleiben, sonst hinge die Rangfolge der Treffer von der
         Laenge ab statt vom Inhalt. Ein Wechsel des Presets setzt die Werte zurueck.
       </p>
+
+      {rerankVerfuegbar && (
+        <label className="experten-schalter">
+          <input
+            type="checkbox"
+            checked={rerankAn}
+            onChange={(e) => onAendern("rerank", e.target.checked ? "1" : "0")}
+          />{" "}
+          Reranker verwenden
+          <span className="feld-zusatz">
+            {" "}
+            — ordnet die Treffer nach ihrer Relevanz zur Frage neu, statt nur nach
+            Aehnlichkeit der Einbettung. Kostet je Frage einen kurzen Zusatzschritt.
+          </span>
+        </label>
+      )}
 
       <div className="experten-raster">
         {felder.map((feld) => {
@@ -582,6 +639,7 @@ function Expertenmodus({
           Vorgabe {preset.label}: {preset.zielGroesse.toLocaleString("de-DE")} Zeichen ·{" "}
           {preset.ueberlappung} Ueberlappung · {preset.topK} Treffer · ab{" "}
           {dezimal.format(STANDARD_MIN_SCORE)}
+          {rerankVerfuegbar ? ` · Reranker an, Relevanz ab ${dezimal.format(STANDARD_MIN_RERANK)}` : ""}
         </span>
         <button
           type="button"

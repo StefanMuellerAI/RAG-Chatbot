@@ -110,12 +110,25 @@ export function isPresetId(wert: unknown): wert is PresetId {
  */
 export const STANDARD_MIN_SCORE = 0.82;
 
+/**
+ * Relevanzschwelle des Rerankers, 0 bis 1.
+ *
+ * bge-reranker-v2-m3 liefert normierte Werte: passende Abschnitte liegen
+ * meist deutlich ueber 0,1, unpassende nahe null. Die Schwelle sortiert nur
+ * das offensichtliche Rauschen aus; die Zahl der Belege begrenzt ohnehin das
+ * Kontextbudget des Sammlers.
+ */
+export const STANDARD_MIN_RERANK = 0.05;
+
 /** Die Werte, die der Expertenmodus je Sammlung uebersteuern kann. */
 export type VerarbeitungOverride = Partial<{
   zielGroesse: number;
   ueberlappung: number;
   topK: number;
   minScore: number;
+  /** Reranker fuer diese Sammlung; wirkt nur, wenn er global konfiguriert ist. */
+  rerank: boolean;
+  minRerank: number;
 }>;
 
 export type VerarbeitungsFeld = keyof VerarbeitungOverride;
@@ -125,13 +138,20 @@ export const VERARBEITUNGS_FELDER: readonly VerarbeitungsFeld[] = [
   "ueberlappung",
   "topK",
   "minScore",
+  "rerank",
+  "minRerank",
 ] as const;
 
 /**
  * Was fuer eine Sammlung tatsaechlich gilt: das Preset mit den Abweichungen
  * darueber. `angepasst` sagt, ob ueberhaupt eine Abweichung hinterlegt ist.
  */
-export type Verarbeitung = Preset & { minScore: number; angepasst: boolean };
+export type Verarbeitung = Preset & {
+  minScore: number;
+  rerank: boolean;
+  minRerank: number;
+  angepasst: boolean;
+};
 
 /**
  * Zulaessige Bereiche.
@@ -148,12 +168,14 @@ export type Verarbeitung = Preset & { minScore: number; angepasst: boolean };
  * topK: Jeder Treffer landet im Kontext des Modells. Mehr als 30 je Sammlung
  *   sprengen bei mehreren Sammlungen den Prompt, ohne die Antwort zu tragen.
  * minScore: Cosine-Aehnlichkeit, 0 bis 1.
+ * minRerank: Relevanz des Rerankers, 0 bis 1.
  */
 export const VERARBEITUNG_GRENZEN = {
   zielGroesse: { min: 200, max: 3_000 },
   ueberlappung: { min: 0 },
   topK: { min: 1, max: 30 },
   minScore: { min: 0, max: 1 },
+  minRerank: { min: 0, max: 1 },
 } as const;
 
 /** Hoechste zulaessige Ueberlappung fuer eine Abschnittsgroesse. */
@@ -174,6 +196,8 @@ export function effektiveVerarbeitung(sammlung: {
     ueberlappung: abweichung.ueberlappung ?? preset.ueberlappung,
     topK: abweichung.topK ?? preset.topK,
     minScore: abweichung.minScore ?? STANDARD_MIN_SCORE,
+    rerank: abweichung.rerank ?? true,
+    minRerank: abweichung.minRerank ?? STANDARD_MIN_RERANK,
     angepasst: VERARBEITUNGS_FELDER.some((feld) => abweichung[feld] !== undefined),
   };
 }
@@ -240,6 +264,13 @@ export function pruefeVerarbeitung(
     VERARBEITUNG_GRENZEN.minScore.min,
     VERARBEITUNG_GRENZEN.minScore.max,
   );
+  const rerank = jaNein(roh.rerank, "Der Reranker");
+  const minRerank = dezimal(
+    roh.minRerank,
+    "Die Mindest-Relevanz des Rerankers",
+    VERARBEITUNG_GRENZEN.minRerank.min,
+    VERARBEITUNG_GRENZEN.minRerank.max,
+  );
 
   const abweichung: VerarbeitungOverride = {};
   if (zielGroesse !== undefined && zielGroesse !== preset.zielGroesse) {
@@ -254,8 +285,23 @@ export function pruefeVerarbeitung(
   if (minScore !== undefined && minScore !== STANDARD_MIN_SCORE) {
     abweichung.minScore = minScore;
   }
+  if (rerank === false) {
+    abweichung.rerank = false;
+  }
+  if (minRerank !== undefined && minRerank !== STANDARD_MIN_RERANK) {
+    abweichung.minRerank = minRerank;
+  }
 
   return Object.keys(abweichung).length > 0 ? abweichung : null;
+}
+
+/** Ein Schalter kommt als boolean oder als "true"/"false" aus dem Formular. */
+function jaNein(wert: unknown, was: string): boolean | undefined {
+  if (fehlt(wert)) return undefined;
+  if (typeof wert === "boolean") return wert;
+  if (wert === "true" || wert === "1") return true;
+  if (wert === "false" || wert === "0") return false;
+  throw new ValidationError(`${was} muss an oder aus sein.`);
 }
 
 /** Eine fehlende Angabe (undefined, null, "") heisst: Preset-Wert behalten. */

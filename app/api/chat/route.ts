@@ -18,6 +18,7 @@ import { MissingConfigError } from "@/lib/env";
 import { findeModell } from "@/lib/modellkatalog";
 import { modellFuerWerkzeuge } from "@/lib/models";
 import { erwirbSperre, gibSperreFrei, gibFrageZurueck, pruefeFragekontingent } from "@/lib/ratelimit";
+import type { RerankMessung } from "@/lib/rerank";
 import { baueCypherWerkzeug, baueSqlWerkzeug, toStep, type ToolStep } from "@/lib/tools";
 import { verbucheFrage } from "@/lib/verbrauch";
 
@@ -116,6 +117,9 @@ async function fuehreLaufAus({ controller, kontext, input, request, cancellation
   let preflightMs: number | null = null;
   const modellaufrufe: Modellaufruf[] = [];
   const werkzeugMs: Record<string, number> = {};
+  /** Je Suchdurchgang eine Messung; leer, wenn kein Reranker konfiguriert ist. */
+  const rerankMessungen: RerankMessung[] = [];
+  const onRerank = (messung: RerankMessung) => { rerankMessungen.push(messung); };
   let releaseCapacity: CapacityLease | undefined;
   let run: ChatRun | undefined;
   let geschrieben = false;
@@ -229,7 +233,7 @@ async function fuehreLaufAus({ controller, kontext, input, request, cancellation
     if (direkt) {
       phase("retrieval", `Suche in ${namen} …`);
       suche = sucheInSammlungen(sammlungen, input.question, sammler, {
-        signal, onWait: () => phase("queued", "Warte auf freie Suchkapazitaet …"),
+        signal, onWait: () => phase("queued", "Warte auf freie Suchkapazitaet …"), onRerank,
       }).then(entries => ({ ok: true as const, entries }), (error: unknown) => ({ ok: false as const, error }));
     }
 
@@ -298,7 +302,7 @@ async function fuehreLaufAus({ controller, kontext, input, request, cancellation
         }
       } else {
         tools = {};
-        if (sammlungen.some(s => s.kind === "vector")) tools.dokumente_durchsuchen = baueSuchwerkzeug(kontext.userId, sammler, { sammlungen, signal, onStatus: phase });
+        if (sammlungen.some(s => s.kind === "vector")) tools.dokumente_durchsuchen = baueSuchwerkzeug(kontext.userId, sammler, { sammlungen, signal, onStatus: phase, onRerank });
         if (sammlungen.some(s => s.kind === "sql")) tools.sql_ausfuehren = baueSqlWerkzeug(kontext.userId, sammlungen, { signal, onStatus: phase });
         if (sammlungen.some(s => s.kind === "graph")) tools.cypher_ausfuehren = baueCypherWerkzeug(sammlungen, { signal, onStatus: phase });
       }
@@ -458,6 +462,7 @@ async function fuehreLaufAus({ controller, kontext, input, request, cancellation
       firstTokenMs, durationMs: Date.now() - startedAt, preflightMs, chatAdmissionMs, modelAdmissionMs, phases: timings,
       modelCalls: modellaufrufe, tools: werkzeugMs, steps: steps.length, modelCallsStarted, finishReason, usage, usageComplete,
       ...(ablehnung ? { reason: ablehnung.reason } : {}),
+      ...(rerankMessungen.length ? { rerank: rerankMessungen } : {}),
     }));
     send({ type: "done", status, modelInvoked, usage, usageComplete, ...(replayed ? { replayed: true } : {}) });
     connected = false;

@@ -139,7 +139,26 @@ Ohne diese Variable ist der Typ **Graph** beim Anlegen einer Sammlung ausgegraut
 Dokumente und Tabellen funktionieren unabhängig davon. Die Anwendung baut die
 Verbindung erst im Request auf, ein fehlender Wert bricht also keinen Build.
 
-### 7. Eigene Anbieter-Keys (optional)
+### 7. Reranker einschalten (optional)
+
+Die Vektorsuche findet, was ungefähr zur Frage passt; ein Reranker liest Frage und
+Abschnitt zusammen und ordnet die Kandidaten nach tatsächlicher Relevanz. Er läuft über
+Pinecone Inference mit demselben API-Key wie der Index und braucht keinen weiteren Dienst:
+
+```bash
+RERANK_MODEL=1      # Standardmodell bge-reranker-v2-m3 (mehrsprachig)
+```
+
+Ein anderer Wert wird als Modellkennung an Pinecone durchgereicht. Ohne die Variable
+bleibt alles beim Alten; mit ihr holt die Suche je Sammlung doppelt so viele Kandidaten
+(höchstens 30) mit leicht abgesenkter Kosinus-Schwelle, und der Reranker entscheidet
+Reihenfolge und Zuschnitt. Fällt der Aufruf aus oder dauert er länger als 2,5 Sekunden,
+gilt die Kosinus-Reihenfolge — die Antwort wartet nie auf den Reranker. Im Expertenmodus
+lässt er sich je Sammlung abschalten oder mit einer eigenen Mindest-Relevanz versehen; ob
+er sich für einen Bestand lohnt, zeigt `npm run pruefe:retrieval` (siehe
+[Prüfungen](#prüfungen)).
+
+### 8. Eigene Anbieter-Keys (optional)
 
 Wer Modelle von Anthropic oder OpenAI direkt statt über das Gateway ansprechen will,
 setzt ein Geheimnis für die Verschlüsselung der Keys und trägt die Keys danach im
@@ -152,7 +171,7 @@ PROVIDER_KEY_SECRET=$(openssl rand -base64 32)
 Ein Wechsel dieses Werts macht alle hinterlegten Keys unlesbar; sie müssen dann neu
 eingegeben werden.
 
-### 8. Lokal starten
+### 9. Lokal starten
 
 ```bash
 npm run dev
@@ -174,7 +193,8 @@ Der Frageweg hängt davon ab, welche Sammlungen ein Nutzer hat:
 
 1. **Nur Dokumentensammlungen, bis zu sechs** — Direktsuche ohne Werkzeugaufruf: Alle
    Sammlungen werden gleichzeitig durchsucht, die Treffer über alle Sammlungen nach
-   Ähnlichkeit geordnet und der Frage als Auszüge vorangestellt, bei mehreren Sammlungen
+   Ähnlichkeit — oder, wenn `RERANK_MODEL` gesetzt ist, nach der Relevanz des Rerankers —
+   geordnet und der Frage als Auszüge vorangestellt, bei mehreren Sammlungen
    mit Sammlungsangabe je Auszug. Findet die Suche nichts Passendes, wird das Modell gar
    nicht erst befragt — die App sagt dann, dass sie dazu nichts hat. Das ist Absicht: eine
    erfundene Antwort wäre schlimmer als keine.
@@ -457,7 +477,12 @@ Paragraphengrenzen, die zugehörige Überschrift bleibt am Abschnitt.
 
 **Expertenmodus** — Unter den Preset-Karten lässt sich beim Anlegen ein zugeklappter
 Bereich öffnen, in dem Abschnittsgröße, Überlappung, Treffer je Suche (topK) und die
-Mindest-Ähnlichkeit für diese Sammlung übersteuert werden können. Gespeichert wird nur die
+Mindest-Ähnlichkeit für diese Sammlung übersteuert werden können; mit konfiguriertem
+Reranker dazu der Schalter *Reranker verwenden* und die Mindest-Relevanz (Vorgabe 0,05 —
+bge-reranker-v2-m3 gibt passenden Abschnitten meist deutlich mehr, unpassenden nahe null).
+Der Reranker greift bei einer Frage nur, wenn keine der beteiligten Sammlungen ihn
+abgeschaltet hat; gemischt ginge die Reihenfolge über Sammlungen hinweg nicht, weil
+Kosinus-Ähnlichkeit und Rerank-Relevanz keine gemeinsame Skala haben. Gespeichert wird nur die
 Abweichung vom Preset (`collections.processing`, JSON); `effektiveVerarbeitung` in
 `lib/presets.ts` legt beides übereinander. Sammlungen ohne Abweichung folgen damit weiterhin
 späteren Anpassungen der Presets. Die Grenzen stehen in `VERARBEITUNG_GRENZEN`; die
@@ -478,6 +503,7 @@ npm run pruefe            # Chunks, Kontingente und Environment-Erkennung
 npm run pruefe:chunks     # die drei Zerlegungsstrategien
 npm run pruefe:kontingente # Grenzen der Pläne und Größenklassen
 npm run pruefe:env        # Aliase und OIDC der Environment-Variablen
+npm run pruefe:retrieval -- fragen.json   # Kosinus gegen Reranker auf einer echten Sammlung
 npm test                  # Vitest: CSV, Cypher-Skripte, SQL-Sperre, Werkzeuge, Katalog, Chunker, Modelle, Keys, Chat
 npm run typecheck
 npm run lint
@@ -496,6 +522,14 @@ streng.
 
 Die Kontingentprüfung testet ausdrücklich die Grenzen selbst — genau am Limit muss es noch
 gehen, einen Schritt darüber nicht mehr.
+
+Die Retrieval-Prüfung läuft gegen echte Dienste (`.env.local`): Eine JSON-Datei nennt eine
+Dokumentensammlung und Fragen mit den Dateien, aus denen die Antwort kommen muss —
+`{"collectionId": "…", "fragen": [{"frage": "…", "erwartet": ["gebuehren.pdf"]}]}`. Je Frage
+stehen Recall@k, MRR und die Dauer des Rerank-Aufrufs für die Kosinus-Reihenfolge und den
+Reranker nebeneinander. Das ist die Grundlage für die Entscheidung, `RERANK_MODEL` zu
+setzen: Zehn bis zwanzig Fragen, deren Antwort man kennt, reichen, um zu sehen, ob der
+zusätzliche Schritt die richtigen Belege nach oben holt.
 
 Mit den Sammlungstypen kam Vitest dazu (`tests/`). Dort liegt, was sich ohne Dienste
 prüfen lässt: das CSV-Lesen samt Typerkennung und deutscher Zahlen, das Zerlegen von
@@ -547,11 +581,12 @@ lib/
   collection-kinds.ts             die drei Typen: Labels, Endungen, Schema-Typen
   collections.ts · documents.ts   Sammlungen und Dokumente, Nutzer-ID stets in der Abfrage
   vector.ts                       Pinecone: schreiben, suchen, löschen
+  rerank.ts                       Reranker über Pinecone Inference, Rückfall auf Kosinus
   sqlstore.ts                     SQLite-Datei in Blob, sql.js, Lese-Sperre für SQL
   graphstore.ts                   FalkorDB: importieren, beschreiben, lesend abfragen
   csv.ts · cypher-script.ts       CSV → Tabelle, Skript → Statements, Grenzen
   ingest.ts                       Einspielen und Entfernen je Typ (ohne Request, ohne Sperre)
-  ai.ts                           Modellzugriff (direkt oder Gateway), Systemanweisung, Katalog, Suchwerkzeug
+  ai.ts                           Modellzugriff (direkt oder Gateway), Systemanweisung, Katalog, gemeinsamer Suchweg, Suchwerkzeug
   tools.ts · tools-types.ts       Werkzeuge sql_ausfuehren, cypher_ausfuehren, Schritt-Ereignisse
   presets.ts · chunk.ts           die drei Verarbeitungsarten
   extract.ts                      PDF · DOCX · XLSX → Text und Seitenzahl
@@ -718,7 +753,10 @@ Drei Zeitereignisse machen die Geschwindigkeit messbar, jeweils eine JSON-Zeile:
 
 - `chat_run` je Frage: `preflightMs` bis zum Modellstart, `firstTokenMs`, `durationMs`,
   je Modellaufruf `wartenMs`, `erstesTokenMs` und `dauerMs` (`modelCalls`), Dauer je
-  Werkzeug (`tools`), Phasenzeitpunkte, Modell, Tokenverbrauch samt Cache-Treffern.
+  Werkzeug (`tools`), Phasenzeitpunkte, Modell, Tokenverbrauch samt Cache-Treffern. Mit
+  Reranker je Suchdurchgang ein Eintrag unter `rerank` (`angewendet`, `dauerMs`,
+  `kandidaten`, `uebernommen`, bei Rückfall `fehler`) — steigt `dauerMs` oder häuft sich
+  `fehler`, schlägt sich das direkt in `preflightMs` nieder.
 - `page_render` je Seitenaufbau: Phasen `env`, `kontext`, `daten` und Gesamtdauer.
 - `action` je Server Action: Name, Erfolg, Dauer.
 

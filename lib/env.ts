@@ -101,6 +101,10 @@ function statisch(name: string): string | undefined {
       return nichtLeer(process.env.SQL_EXECUTOR_TOKEN);
     case "PROVIDER_KEY_SECRET":
       return nichtLeer(process.env.PROVIDER_KEY_SECRET);
+    case "RERANK_MODEL":
+      return nichtLeer(process.env.RERANK_MODEL);
+    case "GRAPH_EXTRAKTION_MODELL":
+      return nichtLeer(process.env.GRAPH_EXTRAKTION_MODELL);
     default:
       return undefined;
   }
@@ -268,6 +272,8 @@ const DIAGNOSE_KEYS = [
   "SQL_EXECUTOR_URL",
   "SQL_EXECUTOR_TOKEN",
   "PROVIDER_KEY_SECRET",
+  "RERANK_MODEL",
+  "GRAPH_EXTRAKTION_MODELL",
 ] as const;
 
 export type EnvDiagnose = {

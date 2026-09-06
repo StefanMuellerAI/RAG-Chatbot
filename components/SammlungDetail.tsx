@@ -94,6 +94,8 @@ type Eigenschaften = {
   dokumente: DocumentRecord[];
   /** Preset samt Abweichungen aus dem Expertenmodus. */
   verarbeitung: Verarbeitung;
+  /** Ohne RERANK_MODEL sagt die Anzeige nichts ueber den Reranker. */
+  rerankVerfuegbar: boolean;
 };
 
 type Vorgang = {
@@ -134,7 +136,7 @@ function abgleichen(vorgaenge: Vorgang[], dokumente: DocumentRecord[]): Vorgang[
   return naechste;
 }
 
-export default function SammlungDetail({ sammlung, dokumente, verarbeitung }: Eigenschaften) {
+export default function SammlungDetail({ sammlung, dokumente, verarbeitung, rerankVerfuegbar }: Eigenschaften) {
   const router = useRouter();
 
   const kind = sammlung.kind;
@@ -454,6 +456,11 @@ export default function SammlungDetail({ sammlung, dokumente, verarbeitung }: Ei
             {verarbeitung.zielGroesse.toLocaleString("de-DE")} Zeichen je Abschnitt ·{" "}
             {verarbeitung.ueberlappung} Zeichen Ueberlappung · {verarbeitung.topK} Treffer je
             Suche · Mindest-Aehnlichkeit {schwelle(verarbeitung.minScore)}
+            {rerankVerfuegbar
+              ? verarbeitung.rerank
+                ? ` · Reranker an, Relevanz ab ${schwelle(verarbeitung.minRerank)}`
+                : " · Reranker aus"
+              : ""}
             {verarbeitung.angepasst
               ? " · im Expertenmodus angepasst"
               : " · Vorgaben des Presets"}
