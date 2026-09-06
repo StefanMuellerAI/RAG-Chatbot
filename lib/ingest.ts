@@ -12,7 +12,14 @@ import type { DocumentRecord } from "./db/schema";
 import { leseDatei } from "./documents";
 import { ValidationError } from "./errors";
 import { ZEICHEN_JE_SEITE, ZEILEN_JE_SEITE } from "./extract";
-import { deleteGraph, describeGraph, importStatements } from "./graphstore";
+import {
+  graphArtefaktPfad,
+  graphElemente,
+  leseGraphDaten,
+  type GraphDaten,
+} from "./graph-extraktion";
+import { GRAPH_DOKUMENT_ENDUNGEN, istGraphDokument } from "./graph-ontologie";
+import { deleteGraph, describeGraph, importGraphDaten, importStatements } from "./graphstore";
 import {
   describeSchema,
   dropTable,
@@ -58,9 +65,16 @@ export type IngestErgebnis = {
  * die einzige verlaessliche Angabe — Browser melden fuer beide je nach System
  * einen leeren oder generischen Inhaltstyp.
  */
-export function assertAllowedExtension(kind: CollectionKind, filename: string): void {
+export function assertAllowedExtension(
+  kind: CollectionKind,
+  filename: string,
+  options: { extraktion?: boolean } = {},
+): void {
   const lower = filename.toLowerCase();
-  const erlaubt = KIND_EXTENSIONS[kind];
+  const erlaubt =
+    kind === "graph" && options.extraktion
+      ? [...KIND_EXTENSIONS.graph, ...GRAPH_DOKUMENT_ENDUNGEN]
+      : KIND_EXTENSIONS[kind];
 
   if (!erlaubt.some((endung) => lower.endsWith(endung))) {
     throw new ValidationError(
@@ -204,10 +218,44 @@ export async function ingestGraph(eingabe: GraphEingabe): Promise<IngestErgebnis
   return { units: statements.length, pageCount, schema };
 }
 
+export type GraphDatenEingabe = {
+  userId: string;
+  collectionId: string;
+  daten: GraphDaten;
+  /** Die uebrigen fertigen Dokumente der Sammlung — fuer den Neuaufbau bei einem Fehler. */
+  uebrige: DocumentRecord[];
+};
+
 /**
- * Baut den Graphen aus den genannten Skripten neu auf — in der Reihenfolge
+ * Extraktionsergebnis eines Dokuments in den Graphen einspielen — das
+ * Gegenstueck zu ingestGraph fuer Dokumente statt Skripte. Das Artefakt
+ * `_graph.json` muss vorher liegen; der Aufrufer schreibt es, damit ein
+ * Neuaufbau nach diesem Import dasselbe Ergebnis wiederfindet.
+ */
+export async function ingestGraphDaten(eingabe: GraphDatenEingabe): Promise<IngestErgebnis> {
+  try {
+    checkIngestionCapacity();
+    await importGraphDaten(eingabe.collectionId, eingabe.daten);
+  } catch (error) {
+    checkIngestionCapacity();
+    await rebuildGraph(eingabe.userId, eingabe.collectionId, eingabe.uebrige);
+    throw error;
+  }
+
+  checkIngestionCapacity();
+  const schema = await describeGraph(eingabe.collectionId);
+  checkIngestionCapacity();
+  await setzeSammlungsSchema(eingabe.userId, eingabe.collectionId, schema);
+
+  return { units: graphElemente(eingabe.daten), pageCount: 0, schema };
+}
+
+/**
+ * Baut den Graphen aus den genannten Dokumenten neu auf — in der Reihenfolge
  * ihres Hochladens, weil spaetere Skripte auf Knoten frueherer verweisen
- * koennen. Haelt das Schema danach fest; ohne Skripte wird es `null`.
+ * koennen. Skripte werden erneut eingespielt, extrahierte Dokumente aus ihrem
+ * `_graph.json` — das Modell wird dafuer nie erneut gefragt. Haelt das Schema
+ * danach fest; ohne Dokumente wird es `null`.
  */
 export async function rebuildGraph(
   userId: string,
@@ -224,14 +272,16 @@ export async function rebuildGraph(
   let eingespielt = 0;
   for (const satz of reihenfolge) {
     checkIngestionCapacity();
-    const strom = await leseDatei(satz.blobPath);
+    const extrahiert = istGraphDokument(satz.filename);
+    const strom = await leseDatei(extrahiert ? graphArtefaktPfad(satz.blobPath) : satz.blobPath);
     // Eine fehlende Datei kann nicht wiederhergestellt werden; der Rest soll
     // deshalb nicht ebenfalls fehlen.
     if (!strom) continue;
 
-    const skript = skriptAusPuffer(await new Response(strom).arrayBuffer());
+    const inhalt = skriptAusPuffer(await new Response(strom).arrayBuffer());
     checkIngestionCapacity();
-    await importStatements(collectionId, statementsZumImport(skript));
+    if (extrahiert) await importGraphDaten(collectionId, leseGraphDaten(inhalt));
+    else await importStatements(collectionId, statementsZumImport(inhalt));
     eingespielt += 1;
   }
 

@@ -1,5 +1,6 @@
 import type { PresetId } from "./db/schema";
 import { ValidationError } from "./errors";
+import { istGraphVorgaben, type GraphVorgaben } from "./graph-ontologie";
 
 /**
  * Verarbeitungspresets.
@@ -185,10 +186,13 @@ export function maxUeberlappung(zielGroesse: number): number {
 
 export function effektiveVerarbeitung(sammlung: {
   preset: string;
-  processing?: VerarbeitungOverride | null;
+  processing?: VerarbeitungOverride | GraphVorgaben | null;
 }): Verarbeitung {
   const preset = findPreset(sammlung.preset);
-  const abweichung = sammlung.processing ?? {};
+  // Graph-Sammlungen halten in derselben Spalte ihre Ontologie; fuer das
+  // Zerlegen von Text gelten dann die Preset-Werte.
+  const abweichung: VerarbeitungOverride =
+    sammlung.processing && !istGraphVorgaben(sammlung.processing) ? sammlung.processing : {};
 
   return {
     ...preset,

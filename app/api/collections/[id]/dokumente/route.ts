@@ -7,6 +7,8 @@ import { CYPHER_MAX_BYTES } from "@/lib/cypher-script";
 import { blobPfad, ladeDokumenteDerSammlung, legeDokumentAn } from "@/lib/documents";
 import { ValidationError } from "@/lib/errors";
 import { UnsupportedFileError, detectKind, istMp3 } from "@/lib/extract";
+import { graphExtraktionKonfiguriert } from "@/lib/graph-extraktion";
+import { istGraphDokument } from "@/lib/graph-ontologie";
 import { assertAllowedExtension } from "@/lib/ingest";
 import { pruefeNeuesDokument } from "@/lib/quota";
 import { transkriptionBereit } from "@/lib/transcribe";
@@ -60,8 +62,16 @@ export async function POST(request: Request, kontextparameter: Kontextparameter)
 
     // Format vor dem Kontingent: eine .doc-Datei soll gar nicht erst
     // hochgeladen werden, nur um danach an der Extraktion zu scheitern.
-    assertAllowedExtension(sammlung.kind, dateiname);
-    if (sammlung.kind === "vector") {
+    const extraktion = graphExtraktionKonfiguriert();
+    const dokumentImGraph = sammlung.kind === "graph" && istGraphDokument(dateiname);
+    if (dokumentImGraph && !extraktion) {
+      throw new ValidationError(
+        "Dokumente in Graph-Sammlungen brauchen ein Extraktionsmodell (GRAPH_EXTRAKTION_MODELL). " +
+          "Auf dieser Instanz nimmt die Sammlung nur Cypher-Skripte an.",
+      );
+    }
+    assertAllowedExtension(sammlung.kind, dateiname, { extraktion });
+    if (sammlung.kind === "vector" || dokumentImGraph) {
       try {
         detectKind(dateiname, eingabe.contentType);
       } catch (error) {
@@ -80,7 +90,8 @@ export async function POST(request: Request, kontextparameter: Kontextparameter)
     }
 
     pruefeNeuesDokument(sammlung, sammlung.sizeClass, groesse);
-    pruefeTypgrenze(sammlung.kind, groesse);
+    // Ein Dokument im Graphen unterliegt der Groessenklasse, nicht der Skriptgrenze.
+    if (!dokumentImGraph) pruefeTypgrenze(sammlung.kind, groesse);
 
     const docId = crypto.randomUUID();
     const pfad = blobPfad(kontext.userId, id, docId, dateiname);

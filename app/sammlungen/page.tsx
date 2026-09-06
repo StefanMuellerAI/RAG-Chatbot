@@ -4,6 +4,7 @@ import SammlungenBereich from "@/components/SammlungenBereich";
 import { requireKontextFuerSeite } from "@/lib/auth/user";
 import { erlaubteGroessenklassen, ladeSammlungen } from "@/lib/collections";
 import { graphConfigured, missingFor } from "@/lib/env";
+import { graphExtraktionKonfiguriert } from "@/lib/graph-extraktion";
 import { starteMessung } from "@/lib/messung";
 import { PRESETS } from "@/lib/presets";
 import { rerankKonfiguriert } from "@/lib/rerank";
@@ -34,6 +35,7 @@ export default async function SammlungenSeite() {
       klassen={klassen}
       presets={[...PRESETS]}
       graphVerfuegbar={graphConfigured()}
+      graphExtraktionVerfuegbar={graphExtraktionKonfiguriert()}
       rerankVerfuegbar={rerankKonfiguriert()}
       plan={{
         label: kontext.plan.label,

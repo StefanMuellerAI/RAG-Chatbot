@@ -5,6 +5,7 @@ import { ladeSammlung } from "@/lib/collections";
 import { ladeDokumenteDerSammlung } from "@/lib/documents";
 import { NotFoundError } from "@/lib/errors";
 import { starteMessung } from "@/lib/messung";
+import { graphExtraktionKonfiguriert } from "@/lib/graph-extraktion";
 import { effektiveVerarbeitung } from "@/lib/presets";
 import { rerankKonfiguriert } from "@/lib/rerank";
 
@@ -33,6 +34,7 @@ export default async function SammlungSeite({
       dokumente={daten.dokumente}
       verarbeitung={effektiveVerarbeitung(daten.sammlung)}
       rerankVerfuegbar={rerankKonfiguriert()}
+      graphExtraktionVerfuegbar={graphExtraktionKonfiguriert()}
     />
   );
 }

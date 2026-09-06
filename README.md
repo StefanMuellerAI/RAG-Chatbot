@@ -10,7 +10,7 @@ Eine Sammlung hat einen von drei Typen (siehe [Drei Arten von Sammlungen](#drei-
   Antwort zitiert Fundstellen.
 - **Tabellen** — CSV-Dateien werden zu Tabellen einer SQLite-Datenbank; das Modell
   schreibt SQL und rechnet mit den Zahlen statt sie zu schätzen.
-- **Graph** — Cypher-Skripte werden zu einem Graphen in FalkorDB; das Modell schreibt
+- **Graph** — Cypher-Skripte, optional auch PDF/DOCX/XLSX per Extraktion, werden zu einem Graphen in FalkorDB; das Modell schreibt
   Cypher für Fragen nach Beziehungen und Wegen.
 
 - **Anmeldung**: Clerk mit Registrierung, Einladungen, Nutzerkonten und Rollen
@@ -139,7 +139,24 @@ Ohne diese Variable ist der Typ **Graph** beim Anlegen einer Sammlung ausgegraut
 Dokumente und Tabellen funktionieren unabhängig davon. Die Anwendung baut die
 Verbindung erst im Request auf, ein fehlender Wert bricht also keinen Build.
 
-### 7. Reranker einschalten (optional)
+### 7. Graph-Extraktion einschalten (optional)
+
+Mit einem Extraktionsmodell nehmen Graph-Sammlungen neben Cypher-Skripten auch PDF, DOCX
+und XLSX an. Das Modell liest jeden Textabschnitt und liefert Knoten und Kanten als JSON,
+nie Cypher; die Anwendung spielt sie parametrisiert ein (siehe
+[Drei Arten von Sammlungen](#drei-arten-von-sammlungen)):
+
+```bash
+GRAPH_EXTRAKTION_MODELL=anthropic/claude-haiku-4-5   # eine Kennung aus dem Modellkatalog
+GRAPH_EXTRAKTION_MAX_SEITEN=300                      # je Dokument; ohne Wert 300
+```
+
+Ein Modellaufruf je rund 2.000 Zeichen — ein 300-seitiges Dokument sind etwa 500
+Aufrufe, die gegen `INGESTION_MODEL_REQUESTS_PER_MINUTE` zaehlen (Standard 30). Wer
+groessere Bestaende extrahiert, hebt den Wert an. Die Kosten stehen als `extraktion` in
+`usage_events` und in der Verbrauchsuebersicht des Admin-Bereichs.
+
+### 8. Reranker einschalten (optional)
 
 Die Vektorsuche findet, was ungefähr zur Frage passt; ein Reranker liest Frage und
 Abschnitt zusammen und ordnet die Kandidaten nach tatsächlicher Relevanz. Er läuft über
@@ -158,7 +175,7 @@ lässt er sich je Sammlung abschalten oder mit einer eigenen Mindest-Relevanz ve
 er sich für einen Bestand lohnt, zeigt `npm run pruefe:retrieval` (siehe
 [Prüfungen](#prüfungen)).
 
-### 8. Eigene Anbieter-Keys (optional)
+### 9. Eigene Anbieter-Keys (optional)
 
 Wer Modelle von Anthropic oder OpenAI direkt statt über das Gateway ansprechen will,
 setzt ein Geheimnis für die Verschlüsselung der Keys und trägt die Keys danach im
@@ -171,7 +188,7 @@ PROVIDER_KEY_SECRET=$(openssl rand -base64 32)
 Ein Wechsel dieses Werts macht alle hinterlegten Keys unlesbar; sie müssen dann neu
 eingegeben werden.
 
-### 9. Lokal starten
+### 10. Lokal starten
 
 ```bash
 npm run dev
@@ -278,7 +295,7 @@ Verbrauch einsehen.
 
 | | Dokumente (`vector`) | Tabellen (`sql`) | Graph (`graph`) |
 |---|---|---|---|
-| **Eingabe** | PDF, DOCX, XLSX, MP3 (wird transkribiert) | CSV mit Kopfzeile; `;` oder `,` als Trenner, Dezimalkomma wird erkannt | `.cypher`, `.cql`, `.txt` mit `CREATE`/`MERGE`-Statements, durch `;` getrennt |
+| **Eingabe** | PDF, DOCX, XLSX, MP3 (wird transkribiert) | CSV mit Kopfzeile; `;` oder `,` als Trenner, Dezimalkomma wird erkannt | `.cypher`, `.cql`, `.txt` mit `CREATE`/`MERGE`-Statements, durch `;` getrennt; mit `GRAPH_EXTRAKTION_MODELL` auch PDF, DOCX, XLSX |
 | **Speicher** | Pinecone-Namespace je Sammlung | SQLite-Datei in Blob (`files/<userId>/<collectionId>/_db/sammlung.sqlite`), isolierte Worker im privaten Vercel-SQL-Service | FalkorDB-Graph `c_<collectionId>` |
 | **Abfrage der KI** | `dokumente_durchsuchen` (semantische Suche) | `sql_ausfuehren` — SQLite-Dialekt, ein `SELECT`/`WITH` | `cypher_ausfuehren` — openCypher, `GRAPH.RO_QUERY` |
 | **Grenzen je Datei** | MB/Datei und Seiten der Größenklasse | zusätzlich 20 MB, 200.000 Zeilen, 200 Spalten; SQLite-Datei der Sammlung höchstens 50 MB | zusätzlich 5 MB, 5.000 Statements; FalkorDB-Free-Tier 100 MB für alle Graphen zusammen |
@@ -297,6 +314,38 @@ Spalte wird der engste passende Typ bestimmt (`INTEGER`, `REAL`, `TEXT`).
 früherer verweisen. Deshalb wird beim Löschen eines Skripts — und nach einem
 fehlgeschlagenen Import — der Graph aus den übrigen Skripten in Upload-Reihenfolge neu
 aufgebaut; ein halb eingespieltes Skript bleibt nie liegen.
+
+### Graphen aus Dokumenten
+
+Ist `GRAPH_EXTRAKTION_MODELL` gesetzt, nimmt eine Graph-Sammlung Dokumente an. Der Weg
+(`workflows/ingest.ts`, `lib/graph-extraktion.ts`):
+
+1. **Zerlegen** — Text wie bei Dokumentensammlungen gewinnen, in Abschnitte von rund 2.000
+   Zeichen ohne Ueberlappung legen und als `_abschnitte.json` neben die Datei schreiben.
+   Vorher greifen die Seitengrenze der Groessenklasse und `GRAPH_EXTRAKTION_MAX_SEITEN`.
+2. **Extrahieren** — je sechs Abschnitte ein Workflow-Schritt, je Abschnitt ein Modellaufruf
+   hinter der Budgetreservierung des Ingestion-Pools. Das Modell bekommt die **Ontologie**
+   der Sammlung (erlaubte Knotenarten und Beziehungstypen) und antwortet mit JSON: Knoten
+   mit Label und Name, Kanten zwischen Namen. Alles ausserhalb der Ontologie faellt weg,
+   Kanten ohne bekannte Endpunkte ebenso; eine unlesbare Antwort wird einmal wiederholt,
+   danach faellt nur dieser Abschnitt aus, nicht das Dokument.
+3. **Einspielen** — Ergebnisse zusammenfuehren (gleicher Schluessel `Label:name` = ein
+   Knoten), als `_graph.json` neben die Datei legen und unter der Sammlungssperre per
+   parametrisiertem `UNWIND … MERGE` einspielen. Labels und Typen stehen nur nach einer
+   Bezeichnerpruefung im Cypher-Text, alle Werte gehen als Parameter — eine Modellantwort
+   kann also keine Schreibbefehle einschleusen.
+
+Jede Datei wird ein Knoten `Quelle`, jeder Abschnitt ein Knoten `Abschnitt` mit Nummer,
+Fundstelle und Auszug; Entitaeten haengen per `ERWAEHNT_IN` daran, Abschnitte per
+`TEIL_VON` an ihrer Quelle. Das Modell bekommt diese Struktur in der Systemanweisung und
+kann damit Belege nennen. Ein Neuaufbau des Graphen (nach einem Fehler oder beim Entfernen
+eines Dokuments) spielt Skripte erneut und Dokumente aus ihrem `_graph.json` ein — das
+Modell wird dafuer nie erneut gefragt, und das Ergebnis ist dasselbe.
+
+Die Ontologie wird beim Anlegen festgelegt (Vorgabe: Person, Organisation, Ort, Ereignis,
+Vorschrift, Begriff, Datum, Betrag mit passenden Beziehungstypen) und laesst sich danach
+nicht aendern; der Schalter *Weitere Typen zulassen* erlaubt dem Modell, eigene Typen
+einzufuehren. Gespeichert wird nur eine Abweichung von der Vorgabe (`collections.processing`).
 
 ### Sicherheitsmodell der Werkzeuge
 
@@ -582,8 +631,10 @@ lib/
   collections.ts · documents.ts   Sammlungen und Dokumente, Nutzer-ID stets in der Abfrage
   vector.ts                       Pinecone: schreiben, suchen, löschen
   rerank.ts                       Reranker über Pinecone Inference, Rückfall auf Kosinus
+  graph-ontologie.ts              Ontologie einer Graph-Sammlung: Vorgabe, Prüfung, Herkunftsnamen
+  graph-extraktion.ts             Prompt, Antwort lesen, zusammenführen, Artefakte der Extraktion
   sqlstore.ts                     SQLite-Datei in Blob, sql.js, Lese-Sperre für SQL
-  graphstore.ts                   FalkorDB: importieren, beschreiben, lesend abfragen
+  graphstore.ts                   FalkorDB: importieren (Skripte, parametrisierte Extraktion), beschreiben, lesend abfragen
   csv.ts · cypher-script.ts       CSV → Tabelle, Skript → Statements, Grenzen
   ingest.ts                       Einspielen und Entfernen je Typ (ohne Request, ohne Sperre)
   ai.ts                           Modellzugriff (direkt oder Gateway), Systemanweisung, Katalog, gemeinsamer Suchweg, Suchwerkzeug
@@ -760,6 +811,11 @@ Drei Zeitereignisse machen die Geschwindigkeit messbar, jeweils eine JSON-Zeile:
 - `page_render` je Seitenaufbau: Phasen `env`, `kontext`, `daten` und Gesamtdauer.
 - `action` je Server Action: Name, Erfolg, Dauer.
 
+Die Graph-Extraktion schreibt je Schritt eine Zeile `[ingest <docId>] Abschnitte a–b: n
+Knoten, m Kanten`, mit der Zahl der ausserhalb der Ontologie verworfenen Eintraege und den
+Nummern unlesbarer Antworten. Haeufen sich verworfene Eintraege, passt die Ontologie nicht
+zum Material.
+
 Wer die Anwendung als träge empfindet, liest zuerst diese Zeilen: Sie zeigen, ob die
 Zeit im Vorlauf, beim Modell oder in einem Werkzeug vergeht.
 
@@ -805,10 +861,11 @@ Die alten Blobs bleiben unberührt und können nach einer Sichtprobe entfernt we
 - **Das Verarbeitungspreset lässt sich nachträglich nicht ändern.** Es müssten alle
   Dokumente der Sammlung neu zerlegt werden; einfacher ist eine neue Sammlung. Dasselbe
   gilt für den Typ einer Sammlung und für die Werte aus dem Expertenmodus.
-- **Graph-Import nur über Cypher-Skripte.** Kein CSV-zu-Graph, kein GraphML, kein
-  Neo4j-Dump. FalkorDB versteht eine Teilmenge von openCypher — Prozeduren wie `apoc.*`
-  gibt es nicht, und ein Skript, das darauf baut, scheitert beim Import mit der
-  Statement-Nummer.
+- **Graph-Import über Cypher-Skripte oder Extraktion aus Dokumenten.** Kein CSV-zu-Graph,
+  kein GraphML, kein Neo4j-Dump. FalkorDB versteht eine Teilmenge von openCypher —
+  Prozeduren wie `apoc.*` gibt es nicht, und ein Skript, das darauf baut, scheitert beim
+  Import mit der Statement-Nummer. Die Extraktion ist so gut wie das Modell: Sie findet,
+  was im Text steht, und ordnet es der Ontologie zu; MP3 wird dafuer nicht angenommen.
 - **SQL im SQLite-Dialekt.** Kein `ILIKE`, keine `::`-Casts, `strftime` statt
   `date_trunc`. Zellen kommen aus CSV als `INTEGER`, `REAL` oder `TEXT`; Datumswerte
   bleiben Text.

@@ -13,6 +13,7 @@ import {
   KIND_UNIT,
   type CollectionKind,
 } from "@/lib/collection-kinds";
+import { GRAPH_DOKUMENT_ENDUNGEN, effektiveOntologie } from "@/lib/graph-ontologie";
 import type { SammlungMitKlasse } from "@/lib/collections";
 import type { DocumentRecord } from "@/lib/db/schema";
 import type { Verarbeitung } from "@/lib/presets";
@@ -89,6 +90,19 @@ const TEXTE: Record<CollectionKind, Texte> = {
   },
 };
 
+/** Graph-Sammlung, wenn die Extraktion aus Dokumenten konfiguriert ist. */
+const TEXTE_GRAPH_MIT_EXTRAKTION: Texte = {
+  ...TEXTE.graph,
+  titel: "Graph aus Dokumenten oder Cypher-Skripten aufbauen",
+  hinweis:
+    "PDF, DOCX und XLSX werden gelesen; die KI gewinnt daraus Knoten und Kanten nach der " +
+    "Ontologie der Sammlung, samt Herkunft (Datei und Abschnitt). Cypher-Skripte (CREATE/MERGE, " +
+    "Neo4j-Stil) werden direkt eingespielt; CREATE CONSTRAINT und CREATE INDEX werden uebersprungen. " +
+    "Dokumente zaehlen mit ihren Seiten, Skripte mit 3.000 Zeichen je Seite.",
+  grenze: `Endungen ${[...KIND_EXTENSIONS.graph, ...GRAPH_DOKUMENT_ENDUNGEN].join(", ")} · Skripte max. 5 MB und 5.000 Statements`,
+  leer: "Noch nichts eingepflegt. Die KI kann in dieser Sammlung derzeit kein Cypher ausfuehren.",
+};
+
 type Eigenschaften = {
   sammlung: SammlungMitKlasse;
   dokumente: DocumentRecord[];
@@ -96,6 +110,8 @@ type Eigenschaften = {
   verarbeitung: Verarbeitung;
   /** Ohne RERANK_MODEL sagt die Anzeige nichts ueber den Reranker. */
   rerankVerfuegbar: boolean;
+  /** Mit GRAPH_EXTRAKTION_MODELL nimmt eine Graph-Sammlung auch Dokumente an. */
+  graphExtraktionVerfuegbar: boolean;
 };
 
 type Vorgang = {
@@ -136,13 +152,17 @@ function abgleichen(vorgaenge: Vorgang[], dokumente: DocumentRecord[]): Vorgang[
   return naechste;
 }
 
-export default function SammlungDetail({ sammlung, dokumente, verarbeitung, rerankVerfuegbar }: Eigenschaften) {
+export default function SammlungDetail({
+  sammlung, dokumente, verarbeitung, rerankVerfuegbar, graphExtraktionVerfuegbar,
+}: Eigenschaften) {
   const router = useRouter();
 
   const kind = sammlung.kind;
-  const endungen = KIND_EXTENSIONS[kind];
-  const texte = TEXTE[kind];
+  const mitExtraktion = kind === "graph" && graphExtraktionVerfuegbar;
+  const endungen = mitExtraktion ? [...KIND_EXTENSIONS.graph, ...GRAPH_DOKUMENT_ENDUNGEN] : KIND_EXTENSIONS[kind];
+  const texte = mitExtraktion ? TEXTE_GRAPH_MIT_EXTRAKTION : TEXTE[kind];
   const einheit = KIND_UNIT[kind];
+  const ontologie = kind === "graph" ? effektiveOntologie(sammlung) : null;
 
   const [liste, setListe] = useState(dokumente);
   const [vorgaenge, setVorgaenge] = useState<Vorgang[]>([]);
@@ -450,6 +470,15 @@ export default function SammlungDetail({ sammlung, dokumente, verarbeitung, rera
             </div>
           </div>
         </div>
+
+        {ontologie && graphExtraktionVerfuegbar && (
+          <p className="hinweis-text verarbeitung-werte">
+            Ontologie der Extraktion · Knotenarten: {ontologie.labels.join(", ")} · Beziehungen:{" "}
+            {ontologie.beziehungen.join(", ") || "—"}
+            {ontologie.frei ? " · weitere Typen erlaubt" : " · nur diese Typen"}
+            {sammlung.processing ? " · angepasst" : " · Vorgabe"}
+          </p>
+        )}
 
         {kind === "vector" && (
           <p className="hinweis-text verarbeitung-werte">

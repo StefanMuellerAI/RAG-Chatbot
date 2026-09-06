@@ -17,13 +17,30 @@ import {
   leseDateiFenster,
   loescheDatei,
   schliesseDokumentAb,
+  schreibeDatei,
   setzeDokumentStatus,
 } from "@/lib/documents";
 import { MissingConfigError } from "@/lib/env";
 import { QuotaError, ValidationError, fehlerMeldung } from "@/lib/errors";
 import { extractBlocks, istMp3 } from "@/lib/extract";
 import { chunkBlocks } from "@/lib/chunk";
-import { ersetzteDokumente, ingestGraph, ingestSql, rebuildGraph } from "@/lib/ingest";
+import {
+  EXTRAKTION_JE_SCHRITT,
+  EXTRAKTION_MAX_AUSGABE_TOKENS,
+  abschnitteArtefaktPfad,
+  abschnitteFuerExtraktion,
+  baueExtraktionsPrompt,
+  fuegeGraphteileZusammen,
+  graphArtefaktPfad,
+  graphExtraktionMaxSeiten,
+  graphExtraktionModell,
+  leseExtraktion,
+  verschmelze,
+  type Extraktionsabschnitt,
+  type Teilergebnis,
+} from "@/lib/graph-extraktion";
+import { effektiveOntologie, istGraphDokument, type Ontologie } from "@/lib/graph-ontologie";
+import { ersetzteDokumente, ingestGraph, ingestGraphDaten, ingestSql, rebuildGraph } from "@/lib/ingest";
 import { DEFAULT_MODEL_ID } from "@/lib/models";
 import { planeMp3Teile, type Mp3Teil } from "@/lib/mp3-teile";
 import { effektiveVerarbeitung, type Verarbeitung } from "@/lib/presets";
@@ -35,7 +52,7 @@ import {
   type TranskriptTeilErgebnis,
 } from "@/lib/transcribe";
 import { upsertChunks } from "@/lib/vector";
-import { verbucheIngestion } from "@/lib/verbrauch";
+import { verbucheExtraktion, verbucheIngestion } from "@/lib/verbrauch";
 
 /**
  * Dokumentverarbeitung als dauerhafter Ablauf.
@@ -69,6 +86,8 @@ type Vorbereitung = {
   maxTotalPages: number;
   seitenBisher: number;
   sammlungsName: string;
+  /** Ontologie der Graph-Extraktion; fuer andere Typen die Vorgabe, ungenutzt. */
+  ontologie: Ontologie;
 };
 
 /**
@@ -116,6 +135,7 @@ async function bereiteVor(docId: string): Promise<Vorbereitung> {
     maxTotalPages: zeile.klasse.maxTotalPages,
     seitenBisher: zeile.sammlung.pageCount,
     sammlungsName: zeile.sammlung.name,
+    ontologie: effektiveOntologie(zeile.sammlung),
   };
 }
 
@@ -620,6 +640,230 @@ export async function verarbeiteGraph(
   });
 }
 
+/**
+ * Dokument in einer Graph-Sammlung: Text gewinnen und in Abschnitte legen,
+ * je Handvoll Abschnitte ein Extraktionsschritt mit dem Modell, zum Schluss
+ * ein Schreibschritt unter der Sammlungssperre. Wie bei MP3s bleibt ein
+ * Fehler in Schritt 7 eine Wiederholung von Schritt 7, und der Ablaufspeicher
+ * haelt nur die kleinen Ergebnisse — die Abschnitte liegen als Artefakt neben
+ * der Datei.
+ */
+export async function verarbeiteGraphDokument(
+  docId: string,
+  vorbereitung: Vorbereitung,
+): Promise<{ seiten: number; abschnitte: number }> {
+  const plan = await planeGraphAbschnitte(docId, vorbereitung);
+  const schritte = Math.ceil(plan.anzahl / EXTRAKTION_JE_SCHRITT);
+  console.log(`[ingest ${docId}] ${plan.anzahl} Abschnitte in ${schritte} Extraktionsschritt(en)`);
+
+  const teile: Teilergebnis[] = [];
+  for (let von = 0; von < plan.anzahl; von += EXTRAKTION_JE_SCHRITT) {
+    const bis = Math.min(von + EXTRAKTION_JE_SCHRITT, plan.anzahl);
+    console.log(`[ingest ${docId}] Extraktion ${teile.length + 1}/${schritte} (Abschnitte ${von + 1}–${bis})`);
+    teile.push(await extrahiereGraphTeil(docId, vorbereitung, { von, bis }));
+  }
+
+  return schreibeGraphDokument(docId, vorbereitung, plan.seiten, teile);
+}
+
+async function planeGraphAbschnitte(
+  docId: string,
+  vorbereitung: Vorbereitung,
+): Promise<{ seiten: number; anzahl: number }> {
+  "use step";
+  return await ingestionCapacity(async () => {
+
+  console.log(`[ingest ${docId}] Extraktion von "${vorbereitung.filename}" fuer den Graphen`);
+
+  if (!graphExtraktionModell()) {
+    throw new FatalError("Die Graph-Extraktion ist auf dieser Instanz nicht konfiguriert (GRAPH_EXTRAKTION_MODELL).");
+  }
+
+  const puffer = await ladePuffer(vorbereitung);
+  checkIngestionCapacity();
+  const { bloecke, seiten } = await extractBlocks(puffer, vorbereitung.filename, vorbereitung.contentType);
+  checkIngestionCapacity();
+
+  // Seitengrenze der Groessenklasse und die Obergrenze der Extraktion, bevor
+  // ein einziger Modellaufruf laeuft.
+  seitenpruefung(vorbereitung, vorbereitung.seitenBisher)(seiten);
+  const hoechstens = graphExtraktionMaxSeiten();
+  if (seiten > hoechstens) {
+    throw new FatalError(
+      `Das Dokument hat ${seiten} Seiten; fuer die Graph-Extraktion sind hoechstens ${hoechstens} vorgesehen. ` +
+        `Bitte das Dokument teilen oder GRAPH_EXTRAKTION_MAX_SEITEN anheben.`,
+    );
+  }
+
+  const abschnitte = abschnitteFuerExtraktion(bloecke);
+  if (abschnitte.length === 0) {
+    throw new FatalError(
+      `Aus "${vorbereitung.filename}" liess sich kein Text gewinnen. Bei PDFs ist das ` +
+        `meist ein Scan ohne Texterkennung — eine per OCR durchsuchbare Fassung waere hier noetig.`,
+    );
+  }
+
+  const nummeriert: Extraktionsabschnitt[] = abschnitte.map((abschnitt, index) => ({
+    nummer: index + 1, text: abschnitt.text, ...(abschnitt.location ? { location: abschnitt.location } : {}),
+  }));
+  checkIngestionCapacity();
+  try {
+    await schreibeDatei(abschnitteArtefaktPfad(vorbereitung.blobPath), JSON.stringify(nummeriert), "application/json");
+  } catch (error) {
+    alsAblauffehler(error);
+  }
+
+  return { seiten, anzahl: nummeriert.length };
+
+  });
+}
+
+/** Zeitfenster je Modellaufruf; ein Abschnitt hat 2.000 Zeichen, mehr als eine Minute ist Stillstand. */
+const EXTRAKTION_AUFRUF_MS = 90_000;
+
+async function extrahiereGraphTeil(
+  docId: string,
+  vorbereitung: Vorbereitung,
+  bereich: { von: number; bis: number },
+): Promise<Teilergebnis> {
+  "use step";
+  return await ingestionCapacity(async ({ signal }) => {
+
+  const modellId = graphExtraktionModell();
+  if (!modellId) {
+    throw new FatalError("Die Graph-Extraktion ist auf dieser Instanz nicht konfiguriert (GRAPH_EXTRAKTION_MODELL).");
+  }
+
+  const strom = await leseDatei(abschnitteArtefaktPfad(vorbereitung.blobPath));
+  if (!strom) {
+    throw new FatalError("Die Abschnitte der Extraktion wurden nicht gefunden. Bitte das Dokument erneut verarbeiten.");
+  }
+  const alle = JSON.parse(await new Response(strom).text()) as Extraktionsabschnitt[];
+  const abschnitte = alle.slice(bereich.von, bereich.bis);
+  checkIngestionCapacity();
+
+  const languageModel = await modell(modellId);
+  const teile: Teilergebnis[] = [];
+  const verbrauch = { inputTokens: 0, outputTokens: 0, inputTokenDetails: { cacheReadTokens: 0 } };
+
+  try {
+    for (const abschnitt of abschnitte) {
+      const { instructions, prompt } = baueExtraktionsPrompt(vorbereitung.ontologie, abschnitt, { filename: vorbereitung.filename });
+      let ergebnis: Teilergebnis | undefined;
+      // Eine unlesbare Antwort ist meist ein Ausrutscher; ein zweiter Versuch
+      // lohnt sich. Bleibt sie unlesbar, faellt der Abschnitt aus, nicht das
+      // ganze Dokument — die Nummer landet im Ergebnis und im Log.
+      for (let versuch = 1; versuch <= 2 && !ergebnis; versuch += 1) {
+        checkIngestionCapacity();
+        const abortSignal = AbortSignal.any([signal, AbortSignal.timeout(EXTRAKTION_AUFRUF_MS)]);
+        await reserveModelCall(
+          modellId, tokenBound(instructions + prompt) + EXTRAKTION_MAX_AUSGABE_TOKENS,
+          { pool: "ingestion", signal: abortSignal },
+        );
+        const antwort = await generateText({
+          model: languageModel, instructions, prompt,
+          maxOutputTokens: EXTRAKTION_MAX_AUSGABE_TOKENS, maxRetries: 0, abortSignal,
+        });
+        verbrauch.inputTokens += antwort.usage.inputTokens ?? 0;
+        verbrauch.outputTokens += antwort.usage.outputTokens ?? 0;
+        verbrauch.inputTokenDetails.cacheReadTokens += antwort.usage.inputTokenDetails?.cacheReadTokens ?? 0;
+        try {
+          ergebnis = leseExtraktion(antwort.text, vorbereitung.ontologie, abschnitt);
+        } catch (error) {
+          if (!(error instanceof ValidationError)) throw error;
+          console.warn(`[ingest ${docId}] Abschnitt ${abschnitt.nummer}, Versuch ${versuch}: ${error.message}`);
+        }
+      }
+      teile.push(ergebnis ?? {
+        knoten: [], kanten: [], fehlgeschlagen: [abschnitt.nummer], verworfen: 0,
+        abschnitte: [{ nummer: abschnitt.nummer, fundstelle: abschnitt.location ?? null, auszug: abschnitt.text.replace(/\s+/g, " ").trim().slice(0, 240) }],
+      });
+    }
+  } catch (error) {
+    if (error instanceof RateLimitError) {
+      throw new RetryableError("Das Modellbudget der Verarbeitung ist ausgeschoepft.", { retryAfter: "60s" });
+    }
+    alsAblauffehler(error);
+  } finally {
+    // Auch ein halber Schritt hat gekostet; die Kennung des Schrittes haelt
+    // eine Wiederholung davon ab, dieselben Aufrufe doppelt zu buchen.
+    if (verbrauch.inputTokens + verbrauch.outputTokens > 0) {
+      await verbucheExtraktion(vorbereitung.userId, modellId, verbrauch, getStepMetadata().stepId);
+    }
+  }
+
+  const teil = verschmelze(teile);
+  console.log(
+    `[ingest ${docId}] Abschnitte ${bereich.von + 1}–${bereich.bis}: ${teil.knoten.length} Knoten, ${teil.kanten.length} Kanten` +
+      (teil.verworfen ? `, ${teil.verworfen} ausserhalb der Ontologie verworfen` : "") +
+      (teil.fehlgeschlagen.length ? `, unlesbar: ${teil.fehlgeschlagen.join(", ")}` : ""),
+  );
+  return teil;
+
+  });
+}
+
+/**
+ * Ergebnis zusammenfuehren, als `_graph.json` neben die Datei legen und unter
+ * der Sammlungssperre einspielen. Das Artefakt zuerst: Ein Neuaufbau nach dem
+ * Import muss dasselbe Ergebnis wiederfinden, ohne das Modell erneut zu fragen.
+ */
+async function schreibeGraphDokument(
+  docId: string,
+  vorbereitung: Vorbereitung,
+  seiten: number,
+  teile: Teilergebnis[],
+): Promise<{ seiten: number; abschnitte: number }> {
+  "use step";
+  return await ingestionCapacity(async () => {
+
+  const daten = fuegeGraphteileZusammen(teile, { docId, filename: vorbereitung.filename });
+  const unlesbar = teile.flatMap((teil) => teil.fehlgeschlagen);
+  if (daten.knoten.length === 0 && unlesbar.length > 0 && unlesbar.length >= daten.abschnitte.length) {
+    throw new FatalError("Das Modell hat zu keinem Abschnitt eine lesbare Antwort geliefert.");
+  }
+
+  const schluessel = sperrSchluessel(vorbereitung.collectionId);
+  const freigabe = await sperreSammlung(schluessel, randomUUID(), "Graph", "ein anderes Dokument eingespielt");
+
+  try {
+    const vorhanden = await ladeDokumenteDerSammlung(vorbereitung.userId, vorbereitung.collectionId);
+    checkIngestionCapacity();
+    const fertig = vorhanden.find((satz) => satz.id === docId && satz.status === "fertig");
+    if (fertig) return { seiten: fertig.pageCount, abschnitte: fertig.chunkCount };
+    const uebrige = vorhanden.filter((satz) => satz.id !== docId && satz.status === "fertig");
+
+    await schreibeDatei(graphArtefaktPfad(vorbereitung.blobPath), JSON.stringify(daten), "application/json");
+    checkIngestionCapacity();
+
+    // Wie bei Skripten: erst den Stand der fertigen Dokumente herstellen, dann
+    // dieses dazu. Ein frueherer, abgebrochener Versuch dieses Dokuments ist
+    // damit weggeraeumt, bevor es erneut eingespielt wird.
+    await rebuildGraph(vorbereitung.userId, vorbereitung.collectionId, uebrige);
+    checkIngestionCapacity();
+
+    const ergebnis = await ingestGraphDaten({
+      userId: vorbereitung.userId, collectionId: vorbereitung.collectionId, daten, uebrige,
+    });
+
+    checkIngestionCapacity();
+    await schliesseDokumentAb(docId, vorbereitung.collectionId, seiten, ergebnis.units);
+
+    console.log(
+      `[ingest ${docId}] ${daten.knoten.length} Knoten, ${daten.kanten.length} Kanten aus ${daten.abschnitte.length} Abschnitten, ${seiten} Seiten` +
+        (unlesbar.length ? ` (${unlesbar.length} Abschnitte ohne lesbare Antwort)` : ""),
+    );
+
+    return { seiten, abschnitte: ergebnis.units };
+  } catch (error) {
+    alsAblauffehler(error);
+  } finally {
+    await freigabe();
+  }
+
+  });
+}
+
 async function schliesseAb(
   docId: string,
   vorbereitung: Vorbereitung,
@@ -723,7 +967,9 @@ export async function verarbeiteDokument(docId: string): Promise<void> {
       vorbereitung.kind === "sql"
         ? await verarbeiteTabelle(docId, vorbereitung)
         : vorbereitung.kind === "graph"
-          ? await verarbeiteGraph(docId, vorbereitung)
+          ? istGraphDokument(vorbereitung.filename)
+            ? await verarbeiteGraphDokument(docId, vorbereitung)
+            : await verarbeiteGraph(docId, vorbereitung)
           : istMp3(vorbereitung.filename, vorbereitung.contentType)
             ? await verarbeiteAudio(docId, vorbereitung)
             : await extrahiereUndSchreibe(docId, vorbereitung);

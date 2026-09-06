@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, gte, ilike, or, sql, sum } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, ilike, inArray, or, sql, sum } from "drizzle-orm";
 import { getDb } from "./db";
 import {
   collections,
@@ -605,31 +605,35 @@ export async function ladeVerbrauch(): Promise<VerbrauchUebersicht> {
 
   // Drei unabhaengige Aggregationen — parallel, sonst zahlt jeder Aufruf der
   // Admin-Seite drei Datenbank-Roundtrips hintereinander.
+  // Kosten entstehen bei Fragen und bei der Graph-Extraktion; gezaehlt werden
+  // nur Fragen. Beides in einer Abfrage, damit die Summe die Rechnung trifft.
+  const mitKosten = inArray(usageEvents.kind, ["frage", "extraktion"]);
+  const nurFragen = sql<number>`count(*) filter (where ${usageEvents.kind} = 'frage')`.mapWith(Number);
   const [[heuteZeile], [zeitraumZeile], vielnutzer] = await Promise.all([
     db
       .select({
-        fragen: count(),
+        fragen: nurFragen,
         kosten: sum(usageEvents.costMicros).mapWith(Number),
       })
       .from(usageEvents)
-      .where(and(eq(usageEvents.day, heute), eq(usageEvents.kind, "frage"))),
+      .where(and(eq(usageEvents.day, heute), mitKosten)),
     db
       .select({
-        fragen: count(),
+        fragen: nurFragen,
         kosten: sum(usageEvents.costMicros).mapWith(Number),
       })
       .from(usageEvents)
-      .where(and(gte(usageEvents.day, vor30Tagen), eq(usageEvents.kind, "frage"))),
+      .where(and(gte(usageEvents.day, vor30Tagen), mitKosten)),
     db
       .select({
         userId: usageEvents.userId,
         email: users.email,
-        fragen: count(),
+        fragen: nurFragen,
         kostenMicros: sum(usageEvents.costMicros).mapWith(Number),
       })
       .from(usageEvents)
       .leftJoin(users, eq(users.clerkUserId, usageEvents.userId))
-      .where(and(gte(usageEvents.day, vor30Tagen), eq(usageEvents.kind, "frage")))
+      .where(and(gte(usageEvents.day, vor30Tagen), mitKosten))
       .groupBy(usageEvents.userId, users.email)
       .orderBy(desc(sum(usageEvents.costMicros)))
       .limit(20),

@@ -15,6 +15,7 @@ import {
 import type { CollectionKind, CollectionSchema } from "../collection-kinds";
 import type { Anbieter, KeyAnbieter } from "../models";
 import type { VerarbeitungOverride } from "../presets";
+import type { GraphVorgaben } from "../graph-ontologie";
 import type { ToolStep } from "../tools-types";
 
 /**
@@ -116,11 +117,13 @@ export const collections = pgTable(
     kind: text("kind").$type<CollectionKind>().notNull().default("vector"),
     /**
      * Abweichungen vom Preset aus dem Expertenmodus (siehe lib/presets.ts):
-     * Abschnittsgroesse, Ueberlappung, Treffer je Suche, Mindest-Aehnlichkeit.
-     * Nur fuer den Typ vector. null heisst: die Werte des Presets gelten —
+     * Abschnittsgroesse, Ueberlappung, Treffer je Suche, Mindest-Aehnlichkeit,
+     * Reranker. Fuer den Typ vector; null heisst: die Werte des Presets gelten —
      * auch dann noch, wenn das Preset spaeter nachjustiert wird.
+     * Fuer den Typ graph steht hier die Ontologie der Extraktion
+     * (lib/graph-ontologie.ts); null heisst: die Vorgabe gilt.
      */
-    processing: jsonb("processing").$type<VerarbeitungOverride>(),
+    processing: jsonb("processing").$type<VerarbeitungOverride | GraphVorgaben>(),
     /**
      * Struktur der Daten fuer sql- und graph-Sammlungen (Tabellen und
      * Spalten bzw. Labels und Kantentypen). Das Modell braucht sie, um SQL
@@ -252,7 +255,8 @@ export const usageEvents = pgTable(
     userId: text("user_id").notNull(),
     /** Kalendertag in UTC — Gruppierschluessel der Auswertung. */
     day: date("day").notNull(),
-    kind: text("kind").$type<"frage" | "ingestion">().notNull(),
+    /** frage: Chat-Antwort; ingestion: Dokument verarbeitet; extraktion: Modellaufrufe der Graph-Extraktion. */
+    kind: text("kind").$type<"frage" | "ingestion" | "extraktion">().notNull(),
     model: text("model"),
     inputTokens: integer("input_tokens").default(0).notNull(),
     outputTokens: integer("output_tokens").default(0).notNull(),

@@ -35,7 +35,8 @@ const collections = vi.hoisted(() => ({
 vi.mock("@/lib/collections", () => collections);
 
 const graphstore = vi.hoisted(() => ({
-  importStatements: vi.fn(async () => undefined),
+  importStatements: vi.fn<(collectionId: string, statements: string[]) => Promise<undefined>>(async () => undefined),
+  importGraphDaten: vi.fn<(collectionId: string, daten: GraphDaten) => Promise<undefined>>(async () => undefined),
   deleteGraph: vi.fn(async () => undefined),
   describeGraph: vi.fn(async () => ({
     kind: "graph" as const,
@@ -55,12 +56,15 @@ vi.mock("@/lib/vector", () => vector);
 
 import type { DocumentRecord } from "@/lib/db/schema";
 import { ValidationError } from "@/lib/errors";
+import type { GraphDaten } from "@/lib/graph-extraktion";
 import {
   assertAllowedExtension,
   entferneDokumentJeTyp,
   ersetzteDokumente,
   ingestGraph,
+  ingestGraphDaten,
   ingestSql,
+  rebuildGraph,
   seitenAusZeichen,
   seitenAusZeilen,
 } from "@/lib/ingest";
@@ -112,6 +116,15 @@ describe("assertAllowedExtension", () => {
     expect(() => assertAllowedExtension("graph", "graph.cql")).not.toThrow();
     expect(() => assertAllowedExtension("graph", "notizen.txt")).not.toThrow();
     expect(() => assertAllowedExtension("graph", "daten.csv")).toThrow(/Graph-Sammlung/);
+  });
+
+  it("laesst Dokumente in Graph-Sammlungen nur mit konfigurierter Extraktion zu", () => {
+    expect(() => assertAllowedExtension("graph", "Bericht.pdf")).toThrow(/Graph-Sammlung/);
+    expect(() => assertAllowedExtension("graph", "Bericht.pdf", { extraktion: true })).not.toThrow();
+    expect(() => assertAllowedExtension("graph", "tabelle.xlsx", { extraktion: true })).not.toThrow();
+    expect(() => assertAllowedExtension("graph", "sitzung.mp3", { extraktion: true })).toThrow(/Graph-Sammlung/);
+    expect(() => assertAllowedExtension("graph", "graph.cypher", { extraktion: true })).not.toThrow();
+    expect(() => assertAllowedExtension("vector", "daten.csv", { extraktion: true })).toThrow(ValidationError);
   });
 });
 
@@ -419,5 +432,73 @@ describe("Dokumentensammlung (vector)", () => {
     expect(vector.loescheDokumentChunks).toHaveBeenCalledWith(SAMMLUNG, "d", 7);
     expect(collections.setzeSammlungsSchema).not.toHaveBeenCalled();
     expect(blob.put).not.toHaveBeenCalled();
+  });
+});
+
+describe("Graph-Sammlung mit extrahierten Dokumenten", () => {
+  const graphDaten = (docId: string): GraphDaten => ({
+    version: 1, docId, filename: `${docId}.pdf`,
+    knoten: [{ schluessel: "Person:anna", label: "Person", name: "Anna", abschnitte: [1] }],
+    kanten: [],
+    abschnitte: [{ nummer: 1, fundstelle: "S. 1", auszug: "Anna" }],
+  });
+  const legeArtefaktAb = (satzId: string) => {
+    blob.dateien.set(
+      `files/${USER}/${SAMMLUNG}/${satzId}/_graph.json`,
+      new TextEncoder().encode(JSON.stringify(graphDaten(satzId))),
+    );
+  };
+
+  it("spielt beim Neuaufbau Skripte und Artefakte in Upload-Reihenfolge ein und ueberspringt fehlende", async () => {
+    const skript = satz({ id: "s1", filename: "basis.cypher", uploadedAt: new Date("2026-01-01T00:00:00Z") });
+    const dokument = satz({ id: "d1", filename: "d1.pdf", uploadedAt: new Date("2026-01-02T00:00:00Z") });
+    const ohneArtefakt = satz({ id: "d2", filename: "d2.pdf", uploadedAt: new Date("2026-01-03T00:00:00Z") });
+    const spaeter = satz({ id: "s2", filename: "mehr.cypher", uploadedAt: new Date("2026-01-04T00:00:00Z") });
+    blob.dateien.set(skript.blobPath, new TextEncoder().encode("CREATE (:Basis)"));
+    blob.dateien.set(spaeter.blobPath, new TextEncoder().encode("CREATE (:Mehr)"));
+    legeArtefaktAb("d1");
+    // Das Original des Dokuments liegt da, darf aber nie als Skript gelesen werden.
+    blob.dateien.set(dokument.blobPath, new TextEncoder().encode("%PDF-1.7 …"));
+
+    const reihenfolge: string[] = [];
+    graphstore.importStatements.mockImplementation(async (_id: string, statements: string[]) => { reihenfolge.push(...statements); });
+    graphstore.importGraphDaten.mockImplementation(async (_id: string, daten: GraphDaten) => { reihenfolge.push(`graph:${daten.docId}`); });
+
+    const schema = await rebuildGraph(USER, SAMMLUNG, [spaeter, ohneArtefakt, dokument, skript]);
+
+    expect(graphstore.deleteGraph).toHaveBeenCalledWith(SAMMLUNG);
+    expect(reihenfolge).toEqual(["CREATE (:Basis)", "graph:d1", "CREATE (:Mehr)"]);
+    expect(schema?.kind).toBe("graph");
+    expect(collections.setzeSammlungsSchema).toHaveBeenCalledWith(USER, SAMMLUNG, schema);
+  });
+
+  it("baut nach einem fehlgeschlagenen Import aus den uebrigen neu auf und reicht den Fehler weiter", async () => {
+    const uebrig = satz({ id: "s1", filename: "basis.cypher" });
+    blob.dateien.set(uebrig.blobPath, new TextEncoder().encode("CREATE (:Basis)"));
+    graphstore.importGraphDaten.mockRejectedValueOnce(new Error("Import (Knoten Person) fehlgeschlagen: boom"));
+
+    await expect(ingestGraphDaten({ userId: USER, collectionId: SAMMLUNG, daten: graphDaten("d1"), uebrige: [uebrig] }))
+      .rejects.toThrow(/boom/);
+
+    expect(graphstore.deleteGraph).toHaveBeenCalledTimes(1);
+    expect(graphstore.importStatements).toHaveBeenCalledWith(SAMMLUNG, ["CREATE (:Basis)"]);
+    expect(collections.setzeSammlungsSchema).toHaveBeenCalledTimes(1);
+  });
+
+  it("haelt nach dem Import das Schema fest und zaehlt Knoten und Kanten als Einheiten", async () => {
+    const daten: GraphDaten = {
+      ...graphDaten("d1"),
+      knoten: [
+        { schluessel: "Person:anna", label: "Person", name: "Anna", abschnitte: [1] },
+        { schluessel: "Organisation:amt", label: "Organisation", name: "Amt", abschnitte: [1] },
+      ],
+      kanten: [{ von: "Person:anna", vonLabel: "Person", typ: "ARBEITET_FUER", nach: "Organisation:amt", nachLabel: "Organisation", abschnitte: [1] }],
+    };
+    const ergebnis = await ingestGraphDaten({ userId: USER, collectionId: SAMMLUNG, daten, uebrige: [] });
+    expect(graphstore.importGraphDaten).toHaveBeenCalledWith(SAMMLUNG, daten);
+    expect(graphstore.deleteGraph).not.toHaveBeenCalled();
+    expect(ergebnis.units).toBe(3);
+    expect(ergebnis.pageCount).toBe(0);
+    expect(letztesSchema()).toEqual(ergebnis.schema);
   });
 });

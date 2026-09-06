@@ -76,6 +76,13 @@ describe("renewing ingestion capacity", () => {
 
   it("does not start a second real import statement after losing capacity", async () => {
     vi.stubEnv("FALKORDB_URL", "redis://example.invalid");
+    // Den (gemockten) Client mit echten Zeitgebern aufbauen: Das Aufloesen des
+    // Moduls im Testlaeufer ist echte Ein-/Ausgabe, die unter kuenstlichen
+    // Zeitgebern erst nach dem Heartbeat fertig wuerde — dann fiele die
+    // Kapazitaet weg, bevor das erste Statement ueberhaupt startet.
+    vi.useRealTimers();
+    await importStatements("collection_1", []);
+    vi.useFakeTimers(); vi.setSystemTime(0);
     redis.eval.mockImplementation(async (script: string) => script === RENEW_SCRIPT ? 0 : 1);
     graphQuery.mockReset().mockImplementation(async () => { await pause(61_000); return {}; });
     const running = expect(withIngestionCapacity(async () => importStatements("collection_1", ["CREATE (:First)", "CREATE (:Second)"]))).rejects.toThrow("Verarbeitungskapazitaet");

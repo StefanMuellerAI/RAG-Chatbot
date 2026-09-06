@@ -38,7 +38,8 @@ export const KIND_EXTENSIONS: Record<CollectionKind, readonly string[]> = {
 export const KIND_UNIT: Record<CollectionKind, string> = {
   vector: "Abschnitte",
   sql: "Zeilen",
-  graph: "Statements",
+  /** Statements eines Skripts bzw. Knoten und Kanten aus einem Dokument. */
+  graph: "Elemente",
 };
 
 export type SqlColumn = { name: string; type: "INTEGER" | "REAL" | "TEXT" };

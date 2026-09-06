@@ -52,6 +52,39 @@ export async function verbucheFrage(
   }
 }
 
+/**
+ * Verbucht die Modellaufrufe der Graph-Extraktion eines Dokuments — je
+ * Workflow-Schritt eine Zeile; eine Wiederholung des Schrittes trifft auf
+ * dieselbe Kennung und bucht nicht doppelt.
+ */
+export async function verbucheExtraktion(
+  userId: string,
+  modelId: string,
+  verbrauch: Tokenverbrauch | undefined,
+  idempotencyKey?: string,
+): Promise<void> {
+  const input = verbrauch?.inputTokens ?? 0;
+  const output = verbrauch?.outputTokens ?? 0;
+  const gecacht = verbrauch?.inputTokenDetails?.cacheReadTokens ?? 0;
+
+  try {
+    const modell = await findeModell(modelId);
+    await getDb().insert(usageEvents).values({
+      ...(idempotencyKey !== undefined ? { id: ingestionEventId(`${userId}:extraktion`, idempotencyKey) } : {}),
+      userId,
+      day: new Date().toISOString().slice(0, 10),
+      kind: "extraktion",
+      model: modelId,
+      inputTokens: input,
+      outputTokens: output,
+      cachedInputTokens: gecacht,
+      costMicros: costInMicros(modell, { input, output, cached: gecacht }),
+    }).onConflictDoNothing({ target: usageEvents.id });
+  } catch (error) {
+    console.error("Extraktion konnte nicht verbucht werden.", error);
+  }
+}
+
 /** Verbucht die Verarbeitung eines Dokuments — Kosten fallen dabei nicht an. */
 export async function verbucheIngestion(
   userId: string,

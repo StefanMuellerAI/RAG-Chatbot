@@ -125,6 +125,21 @@ describe("baueSystemanweisung", () => {
     expect(mitGraph).toContain("genau eine Sammlung");
   });
 
+  it("erklaert Herkunftsknoten nur bei Graphen, die aus Dokumenten entstanden sind", () => {
+    const extrahiert = beispielSammlung({
+      id: "c-graph-doc", name: "Akten", kind: "graph", documentCount: 1,
+      schema: {
+        kind: "graph", nodes: 12, relationships: 5, labels: ["Person", "Quelle", "Abschnitt"],
+        relationshipTypes: ["ARBEITET_FUER", "ERWAEHNT_IN", "TEIL_VON"], propertyKeys: ["name", "schluessel"],
+      },
+    });
+    const mitHerkunft = baueSystemanweisung([extrahiert]);
+    expect(mitHerkunft).toContain("ERWAEHNT_IN");
+    expect(mitHerkunft).toContain("(:Quelle {name})");
+    expect(mitHerkunft).toContain("Zaehle Quelle und Abschnitt nicht");
+    expect(baueSystemanweisung([graph])).not.toContain("ERWAEHNT_IN");
+  });
+
   it("nennt die Korrekturgrenze und die Herkunftsangabe", () => {
     const beides = baueSystemanweisung([tabellen, graph]);
 

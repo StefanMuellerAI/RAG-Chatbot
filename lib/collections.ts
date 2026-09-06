@@ -11,6 +11,7 @@ import type { Collection, PresetId, SizeClass } from "./db/schema";
 import { loescheUnterPraefix, sammlungsPraefix } from "./documents";
 import { graphConfigured } from "./env";
 import { NotFoundError, ValidationError } from "./errors";
+import { istStandardOntologie, pruefeOntologie, type GraphVorgaben } from "./graph-ontologie";
 import { deleteGraph } from "./graphstore";
 import {
   STANDARD_PRESET,
@@ -125,6 +126,8 @@ export type SammlungEingabe = {
   kind?: unknown;
   /** Expertenmodus: Abweichungen vom Preset. Nur fuer Dokumentensammlungen. */
   verarbeitung?: unknown;
+  /** Ontologie der Extraktion. Nur fuer Graph-Sammlungen; fehlt sie, gilt die Vorgabe. */
+  ontologie?: unknown;
 };
 
 /**
@@ -164,7 +167,7 @@ export async function erstelleSammlung(
   // Migration noch ein Sonderfall in findPreset noetig wird, bekommen diese
   // Sammlungen serverseitig den Standardwert.
   let preset: PresetId;
-  let processing: VerarbeitungOverride | null = null;
+  let processing: VerarbeitungOverride | GraphVorgaben | null = null;
   if (kind === "vector") {
     if (!isPresetId(eingabe.preset)) {
       throw new ValidationError(
@@ -175,6 +178,12 @@ export async function erstelleSammlung(
     processing = pruefeVerarbeitung(findPreset(preset), eingabe.verarbeitung);
   } else {
     preset = STANDARD_PRESET;
+    // Die Ontologie gilt fuer alle Dokumente der Sammlung; nur eine Abweichung
+    // von der Vorgabe wird gespeichert, damit spaetere Vorgaben greifen.
+    if (kind === "graph" && eingabe.ontologie !== undefined && eingabe.ontologie !== null) {
+      const ontologie = pruefeOntologie(eingabe.ontologie);
+      processing = istStandardOntologie(ontologie) ? null : { ontologie };
+    }
   }
 
   // Groessenklasse und Anzahl der Sammlungen in einem Roundtrip. Beide

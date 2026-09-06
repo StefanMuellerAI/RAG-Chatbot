@@ -12,6 +12,15 @@ import {
 import type { SammlungMitKlasse } from "@/lib/collections";
 import type { SizeClass } from "@/lib/db/schema";
 import {
+  BEZIEHUNG_MUSTER,
+  LABEL_MUSTER,
+  ONTOLOGIE_MAX_EINTRAEGE,
+  PROVENIENZ,
+  STANDARD_BEZIEHUNGEN,
+  STANDARD_LABELS,
+  alsZeilen,
+} from "@/lib/graph-ontologie";
+import {
   STANDARD_MIN_RERANK,
   STANDARD_MIN_SCORE,
   VERARBEITUNG_GRENZEN,
@@ -27,6 +36,8 @@ type Eigenschaften = {
   presets: Preset[];
   /** Ohne FALKORDB_URL lassen sich keine Graph-Sammlungen anlegen. */
   graphVerfuegbar: boolean;
+  /** Mit GRAPH_EXTRAKTION_MODELL nehmen Graph-Sammlungen Dokumente an und haben eine Ontologie. */
+  graphExtraktionVerfuegbar: boolean;
   /** Ohne RERANK_MODEL zeigt der Expertenmodus keine Reranker-Felder. */
   rerankVerfuegbar: boolean;
   plan: { label: string; maxCollections: number; maxSizeClassId: string };
@@ -40,6 +51,8 @@ type NeueSammlung = {
   sizeClassId: string;
   /** Expertenmodus; null, wenn die Werte des Presets gelten sollen. */
   verarbeitung: VerarbeitungOverride | null;
+  /** Ontologie einer Graph-Sammlung; null, wenn die Vorgabe gelten soll. */
+  ontologie: OntologieEingabe | null;
 };
 
 export default function SammlungenBereich({
@@ -47,6 +60,7 @@ export default function SammlungenBereich({
   klassen,
   presets,
   graphVerfuegbar,
+  graphExtraktionVerfuegbar,
   rerankVerfuegbar,
   plan,
 }: Eigenschaften) {
@@ -117,6 +131,7 @@ export default function SammlungenBereich({
             klassen={klassen}
             presets={presets}
             graphVerfuegbar={graphVerfuegbar}
+            graphExtraktionVerfuegbar={graphExtraktionVerfuegbar}
             rerankVerfuegbar={rerankVerfuegbar}
             gesperrt={laueft}
             onAbbrechen={() => setFormularOffen(false)}
@@ -179,6 +194,7 @@ function Anlegeformular({
   klassen,
   presets,
   graphVerfuegbar,
+  graphExtraktionVerfuegbar,
   rerankVerfuegbar,
   gesperrt,
   onAbbrechen,
@@ -187,6 +203,7 @@ function Anlegeformular({
   klassen: SizeClass[];
   presets: Preset[];
   graphVerfuegbar: boolean;
+  graphExtraktionVerfuegbar: boolean;
   rerankVerfuegbar: boolean;
   gesperrt: boolean;
   onAbbrechen: () => void;
@@ -202,6 +219,10 @@ function Anlegeformular({
   // null: Der Expertenmodus wurde nicht angefasst, es gelten die Werte des
   // Presets. Sonst die Eingaben als Text, so wie sie in den Feldern stehen.
   const [experten, setExperten] = useState<ExpertenEingabe | null>(null);
+  // null: Die Ontologie wurde nicht angefasst, es gilt die Vorgabe.
+  const [ontologie, setOntologie] = useState<OntologieEingabe | null>(null);
+  const ontologieWerte = ontologie ?? ONTOLOGIE_VORGABE;
+  const ontologieFehler = kind === "graph" && graphExtraktionVerfuegbar ? pruefeOntologieEingabe(ontologieWerte) : {};
 
   const aktivesPreset = presets.find((eintrag) => eintrag.id === preset) ?? presets[0];
   const expertenWerte = experten ?? (aktivesPreset ? vorgaben(aktivesPreset) : null);
@@ -210,7 +231,8 @@ function Anlegeformular({
   const expertenGueltig =
     kind !== "vector" || Object.keys(expertenFehler).length === 0;
 
-  const bereit = name.trim().length >= 2 && sizeClassId && expertenGueltig && !gesperrt;
+  const bereit =
+    name.trim().length >= 2 && sizeClassId && expertenGueltig && Object.keys(ontologieFehler).length === 0 && !gesperrt;
 
   function waehlePreset(id: Preset["id"]) {
     setPreset(id);
@@ -295,7 +317,11 @@ function Anlegeformular({
                   onChange={() => setKind(eintrag)}
                 />
                 <span className="wahlkarte-titel">{KIND_LABEL[eintrag]}</span>
-                <span className="wahlkarte-kurz">{KIND_DESCRIPTION[eintrag]}</span>
+                <span className="wahlkarte-kurz">
+                  {eintrag === "graph" && graphExtraktionVerfuegbar
+                    ? "Cypher-Skripte oder Dokumente (PDF, DOCX, XLSX), aus denen die KI Knoten und Kanten gewinnt; die KI schreibt Cypher."
+                    : KIND_DESCRIPTION[eintrag]}
+                </span>
                 {nichtVerfuegbar && (
                   <span className="wahlkarte-beispiele">
                     Nicht verfuegbar: FALKORDB_URL ist auf dieser Instanz nicht gesetzt.
@@ -306,6 +332,16 @@ function Anlegeformular({
           })}
         </div>
       </fieldset>
+
+      {kind === "graph" && graphExtraktionVerfuegbar && (
+        <Ontologieformular
+          werte={ontologieWerte}
+          fehler={ontologieFehler}
+          angefasst={ontologie !== null}
+          onAendern={(aenderung) => setOntologie({ ...ontologieWerte, ...aenderung })}
+          onZuruecksetzen={() => setOntologie(null)}
+        />
+      )}
 
       {/* Das Preset steuert das Zerlegen von Text — fuer Tabellen und Graphen
           gibt es nichts zu waehlen, der Server setzt dort den Standardwert. */}
@@ -397,6 +433,7 @@ function Anlegeformular({
               preset,
               sizeClassId,
               verarbeitung: verarbeitung(),
+              ontologie: kind === "graph" ? ontologie : null,
             })
           }
         >
@@ -648,6 +685,148 @@ function Expertenmodus({
           onClick={onZuruecksetzen}
         >
           Auf Preset zuruecksetzen
+        </button>
+      </div>
+    </details>
+  );
+}
+
+// --- Ontologie (Graph-Extraktion) -------------------------------------------
+
+/** Listen als Text, eine Zeile je Eintrag — so stehen sie im Formular. */
+type OntologieEingabe = { labels: string; beziehungen: string; frei: boolean };
+
+type OntologieFehler = Partial<Record<"labels" | "beziehungen", string>>;
+
+const ONTOLOGIE_VORGABE: OntologieEingabe = {
+  labels: alsZeilen(STANDARD_LABELS),
+  beziehungen: alsZeilen(STANDARD_BEZIEHUNGEN),
+  frei: false,
+};
+
+function eintraege(text: string): string[] {
+  return text.split(/[,\n;]/).map((eintrag) => eintrag.trim()).filter(Boolean);
+}
+
+/**
+ * Plausibilitaet im Browser; verbindlich prueft der Server (pruefeOntologie
+ * in lib/graph-ontologie.ts) mit denselben Mustern.
+ */
+function pruefeOntologieEingabe(werte: OntologieEingabe): OntologieFehler {
+  const fehler: OntologieFehler = {};
+  const reserviert = Object.values(PROVENIENZ) as string[];
+
+  const labels = eintraege(werte.labels);
+  if (labels.length === 0) fehler.labels = "Mindestens eine Knotenart, z. B. Person.";
+  else if (labels.length > ONTOLOGIE_MAX_EINTRAEGE) fehler.labels = `Hoechstens ${ONTOLOGIE_MAX_EINTRAEGE} Knotenarten.`;
+  else {
+    const falsch = labels.find((label) => !LABEL_MUSTER.test(label) || reserviert.includes(label));
+    if (falsch) fehler.labels = `„${falsch}“: Grossbuchstabe am Anfang, dann Buchstaben, Ziffern oder Unterstrich, ohne Umlaute; Quelle und Abschnitt sind reserviert.`;
+  }
+
+  const beziehungen = eintraege(werte.beziehungen);
+  if (beziehungen.length > ONTOLOGIE_MAX_EINTRAEGE) fehler.beziehungen = `Hoechstens ${ONTOLOGIE_MAX_EINTRAEGE} Beziehungstypen.`;
+  else {
+    const falsch = beziehungen.find((typ) => !BEZIEHUNG_MUSTER.test(typ) || reserviert.includes(typ));
+    if (falsch) fehler.beziehungen = `„${falsch}“: Grossbuchstaben, Ziffern und Unterstrich, ohne Umlaute, z. B. ARBEITET_FUER.`;
+  }
+
+  return fehler;
+}
+
+/**
+ * Zugeklappt eine Zeile, aufgeklappt zwei Listen und ein Schalter. Die
+ * Vorgabe passt fuer Verwaltungs- und Unternehmensunterlagen; wer anderes
+ * modelliert, traegt seine Typen ein. Die Ontologie gilt fuer alle Dokumente
+ * der Sammlung und laesst sich nachtraeglich nicht aendern — der Graph
+ * entsteht aus ihr, und ein Wechsel machte die vorhandenen Knoten
+ * unvergleichbar mit den neuen.
+ */
+function Ontologieformular({
+  werte,
+  fehler,
+  angefasst,
+  onAendern,
+  onZuruecksetzen,
+}: {
+  werte: OntologieEingabe;
+  fehler: OntologieFehler;
+  angefasst: boolean;
+  onAendern: (aenderung: Partial<OntologieEingabe>) => void;
+  onZuruecksetzen: () => void;
+}) {
+  return (
+    <details className="experten">
+      <summary>Ontologie der Extraktion{angefasst ? " · angepasst" : ""}</summary>
+
+      <p className="feld-zusatz">
+        Welche Knotenarten und Beziehungstypen die KI aus Dokumenten gewinnen darf. Die
+        Vorgabe deckt Personen, Organisationen, Orte, Ereignisse, Vorschriften, Begriffe,
+        Daten und Betraege ab. Die Wahl gilt fuer die ganze Sammlung und laesst sich
+        spaeter nicht aendern. Cypher-Skripte sind davon unabhaengig.
+      </p>
+
+      <div className="experten-raster">
+        <div className="feld">
+          <label htmlFor="ontologie-labels">
+            Knotenarten <span className="feld-zusatz">eine je Zeile</span>
+          </label>
+          <textarea
+            id="ontologie-labels"
+            rows={6}
+            value={werte.labels}
+            aria-invalid={fehler.labels ? true : undefined}
+            aria-describedby={fehler.labels ? "ontologie-labels-fehler" : undefined}
+            onChange={(e) => onAendern({ labels: e.target.value })}
+          />
+          {fehler.labels && (
+            <p id="ontologie-labels-fehler" className="feld-fehler">{fehler.labels}</p>
+          )}
+        </div>
+        <div className="feld">
+          <label htmlFor="ontologie-beziehungen">
+            Beziehungstypen <span className="feld-zusatz">einer je Zeile</span>
+          </label>
+          <textarea
+            id="ontologie-beziehungen"
+            rows={6}
+            value={werte.beziehungen}
+            aria-invalid={fehler.beziehungen ? true : undefined}
+            aria-describedby={fehler.beziehungen ? "ontologie-beziehungen-fehler" : undefined}
+            onChange={(e) => onAendern({ beziehungen: e.target.value })}
+          />
+          {fehler.beziehungen && (
+            <p id="ontologie-beziehungen-fehler" className="feld-fehler">{fehler.beziehungen}</p>
+          )}
+        </div>
+      </div>
+
+      <label className="experten-schalter">
+        <input
+          type="checkbox"
+          checked={werte.frei}
+          onChange={(e) => onAendern({ frei: e.target.checked })}
+        />{" "}
+        Weitere Typen zulassen
+        <span className="feld-zusatz">
+          {" "}
+          — die KI darf Knotenarten und Beziehungstypen ergaenzen, die im Text vorkommen,
+          aber oben fehlen. Ergibt einen reicheren, aber weniger einheitlichen Graphen.
+        </span>
+      </label>
+
+      <div className="experten-fuss">
+        <span className="feld-zusatz">
+          Herkunft vergibt die Anwendung selbst: je Datei ein Knoten „Quelle“, je Textabschnitt
+          ein Knoten „Abschnitt“.
+        </span>
+        <button
+          type="button"
+          className="knopf-schlicht"
+          disabled={!angefasst}
+          onClick={onZuruecksetzen}
+        >
+          Auf Vorgabe zuruecksetzen
         </button>
       </div>
     </details>

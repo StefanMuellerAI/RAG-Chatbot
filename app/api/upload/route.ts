@@ -10,6 +10,7 @@ import { collections, documents } from "@/lib/db/schema";
 import { DB_ORDNER, pfadGehoertNutzer } from "@/lib/documents";
 import { requireEnv } from "@/lib/env";
 import { SUPPORTED_MIME_TYPES } from "@/lib/extract";
+import { istGraphDokument } from "@/lib/graph-ontologie";
 
 export const runtime = "nodejs";
 
@@ -107,7 +108,12 @@ export async function POST(request: Request) {
           throw new Error("Die Sammlung zu diesem Upload existiert nicht mehr.");
         }
 
-        const erlaubt = ERLAUBT[sammlung.kind];
+        // Ein Dokument in einer Graph-Sammlung (Extraktion) folgt den Regeln
+        // fuer Dokumente; die Ankuendigung hat die Endung bereits geprueft.
+        const erlaubt =
+          sammlung.kind === "graph" && istGraphDokument(angekuendigt.filename)
+            ? ERLAUBT.vector
+            : ERLAUBT[sammlung.kind];
         const angekuendigteGroesse = angekuendigt.sizeBytes + 1024;
 
         return {

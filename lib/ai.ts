@@ -13,6 +13,7 @@ import {
   type Anbieter,
   type KeyAnbieter,
 } from "./models";
+import { PROVENIENZ } from "./graph-ontologie";
 import { effektiveVerarbeitung, findPreset } from "./presets";
 import { ordneNeu, rerankKonfiguriert, type Kandidat, type RerankMessung } from "./rerank";
 import { ladeKey } from "./provider-keys";
@@ -132,6 +133,17 @@ const REGELN_CYPHER = `Zu Graph-Sammlungen (Werkzeug cypher_ausfuehren):
 - Keine Aggregation innerhalb von Pattern-Comprehensions.
 - Keine Schreiboperationen (CREATE, MERGE, SET, DELETE, REMOVE).`;
 
+/**
+ * Nur fuer Graphen, die (auch) aus Dokumenten extrahiert wurden: Sie tragen
+ * Herkunftsknoten, die das Modell fuer Belege nutzen und aus Zaehlungen
+ * heraushalten soll.
+ */
+const REGELN_HERKUNFT = `Zu Graphen aus Dokumenten:
+- Jede Datei ist ein Knoten (:Quelle {name}), jeder Textabschnitt ein Knoten (:Abschnitt {nummer, fundstelle, auszug}); Inhalte haengen daran: (inhalt)-[:ERWAEHNT_IN]->(:Abschnitt)-[:TEIL_VON]->(:Quelle).
+- Knoten aus Dokumenten haben name (Bezeichnung), schluessel (Label:name in Kleinschreibung) und oft beschreibung; Kanten tragen abschnitte (IDs der Belege).
+- Nenne bei Aussagen aus dem Graphen die Datei und die Fundstelle, wenn die Frage danach verlangt: ueber ERWAEHNT_IN und TEIL_VON erreichbar.
+- Zaehle Quelle und Abschnitt nicht als Inhalte mit, wenn nach Personen, Organisationen oder anderen Entitaeten gefragt ist.`;
+
 const REGELN_WERKZEUGE = `Zu SQL und Cypher allgemein:
 - Schlaegt eine Abfrage fehl, lies die Fehlermeldung, korrigiere die Abfrage und versuche es hoechstens zweimal erneut.
 - Nenne in der Antwort, aus welcher Sammlung die Zahlen stammen. Gib sie so wieder, wie sie zurueckkamen; die Belegnummern in eckigen Klammern gelten nur fuer Auszuege aus Dokumenten.`;
@@ -155,9 +167,20 @@ export function baueSystemanweisung(sammlungen: SammlungMitKlasse[]): string {
   }
   if (hatSql) bloecke.push(REGELN_SQL);
   if (hatGraph) bloecke.push(REGELN_CYPHER);
+  if (hatHerkunft(sammlungen)) bloecke.push(REGELN_HERKUNFT);
   bloecke.push(REGELN_WERKZEUGE);
 
   return bloecke.join("\n\n");
+}
+
+/** Hat mindestens ein Graph Herkunftsknoten, also extrahierte Dokumente? */
+function hatHerkunft(sammlungen: SammlungMitKlasse[]): boolean {
+  return sammlungen.some(
+    (sammlung) =>
+      sammlung.kind === "graph" &&
+      sammlung.schema?.kind === "graph" &&
+      sammlung.schema.labels.includes(PROVENIENZ.quelle),
+  );
 }
 
 /** Mehr Schema-Text je Sammlung wuerde den Prompt bei vielen Tabellen sprengen. */

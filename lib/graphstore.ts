@@ -3,6 +3,8 @@ import { checkIngestionCapacity } from "./capacity";
 import type { CollectionSchema } from "./collection-kinds";
 import { MissingConfigError, optionalEnv } from "./env";
 import { ValidationError } from "./errors";
+import type { GraphDaten, GraphKante, GraphKnoten } from "./graph-extraktion";
+import { BEZIEHUNG_MUSTER, LABEL_MUSTER, PROVENIENZ } from "./graph-ontologie";
 
 /**
  * Graph-Sammlungen in FalkorDB: jede Sammlung ist ein eigener Graph
@@ -79,6 +81,161 @@ export async function importStatements(collectionId: string, statements: string[
     }
   }
 }
+
+/** Zeilen je UNWIND; mehr verlaengert nur die Einzelabfrage, ohne schneller zu sein. */
+const IMPORT_ZEILEN_JE_ABFRAGE = 300;
+
+/**
+ * Was der Client als Parameter annimmt — hier nachgebildet statt aus
+ * `falkordb/dist/...` importiert: Ein Pfad in das Paket hinein liesse den
+ * Testlaeufer das Paket eifrig aufloesen, und das Modul soll ohne FalkorDB
+ * importierbar bleiben.
+ */
+type QueryParam = null | string | number | boolean | QueryParam[] | { [key: string]: QueryParam };
+
+/**
+ * Spielt ein Extraktionsergebnis parametrisiert ein.
+ *
+ * Kein Statement stammt aus einer Modellantwort: Labels und Beziehungstypen
+ * werden gegen ein striktes Bezeichnermuster geprueft, bevor sie in den
+ * Cypher-Text gelangen; alle Werte gehen als Parameter. MERGE auf dem
+ * Schluessel je Label fuehrt dieselbe Entitaet aus mehreren Dokumenten zu
+ * einem Knoten zusammen. Jede Datei bekommt einen Quelle-Knoten, jeder
+ * Abschnitt einen Abschnitt-Knoten; Entitaeten haengen per ERWAEHNT_IN
+ * daran — so kann eine Antwort spaeter Datei und Fundstelle nennen.
+ *
+ * Wiederholbar: Ein zweiter Durchlauf trifft ueberall auf MERGE.
+ */
+export async function importGraphDaten(collectionId: string, daten: GraphDaten): Promise<void> {
+  checkIngestionCapacity();
+  const graph = await graphOf(collectionId);
+  const fuehreAus = async (cypher: string, params: Record<string, QueryParam>, was: string) => {
+    checkIngestionCapacity();
+    try {
+      await graph.query(cypher, { params, TIMEOUT: WRITE_TIMEOUT_MS });
+    } catch (error) {
+      throw new ValidationError(
+        `Import (${was}) fehlgeschlagen: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+
+  const { quelle, abschnitt, erwaehntIn, teilVon } = PROVENIENZ;
+
+  await fuehreAus(
+    `MERGE (q:${quelle} {docId: $docId}) SET q.name = $filename`,
+    { docId: daten.docId, filename: daten.filename },
+    "Quelle",
+  );
+
+  await sichereIndex(graph, abschnitt, "id");
+  for (const zeilen of stapel(daten.abschnitte)) {
+    await fuehreAus(
+      `UNWIND $zeilen AS a ` +
+        `MERGE (s:${abschnitt} {id: a.id}) ` +
+        `SET s.docId = $docId, s.nummer = a.nummer, s.fundstelle = a.fundstelle, s.auszug = a.auszug ` +
+        `WITH s MATCH (q:${quelle} {docId: $docId}) MERGE (s)-[:${teilVon}]->(q)`,
+      {
+        docId: daten.docId,
+        zeilen: zeilen.map((a) => ({
+          id: abschnittId(daten.docId, a.nummer), nummer: a.nummer, fundstelle: a.fundstelle ?? null, auszug: a.auszug,
+        })),
+      },
+      "Abschnitte",
+    );
+  }
+
+  for (const [label, knoten] of gruppiere(daten.knoten, (k) => k.label)) {
+    pruefeBezeichner(label, LABEL_MUSTER, "Label");
+    await sichereIndex(graph, label, "schluessel");
+    for (const zeilen of stapel(knoten)) {
+      await fuehreAus(
+        `UNWIND $zeilen AS k ` +
+          `MERGE (n:${label} {schluessel: k.schluessel}) ` +
+          `ON CREATE SET n.name = k.name ` +
+          `SET n.beschreibung = coalesce(k.beschreibung, n.beschreibung)`,
+        { zeilen: zeilen.map((k) => ({ schluessel: k.schluessel, name: k.name, beschreibung: k.beschreibung ?? null })) },
+        `Knoten ${label}`,
+      );
+    }
+    const erwaehnungen = knoten.flatMap((k) =>
+      k.abschnitte.map((nummer) => ({ schluessel: k.schluessel, abschnitt: abschnittId(daten.docId, nummer) })),
+    );
+    for (const zeilen of stapel(erwaehnungen)) {
+      await fuehreAus(
+        `UNWIND $zeilen AS e ` +
+          `MATCH (n:${label} {schluessel: e.schluessel}) MATCH (s:${abschnitt} {id: e.abschnitt}) ` +
+          `MERGE (n)-[:${erwaehntIn}]->(s)`,
+        { zeilen },
+        `Herkunft ${label}`,
+      );
+    }
+  }
+
+  for (const [gruppe, kanten] of gruppiere(daten.kanten, (k) => `${k.vonLabel}|${k.typ}|${k.nachLabel}`)) {
+    const [vonLabel, typ, nachLabel] = gruppe.split("|");
+    pruefeBezeichner(vonLabel, LABEL_MUSTER, "Label");
+    pruefeBezeichner(nachLabel, LABEL_MUSTER, "Label");
+    pruefeBezeichner(typ, BEZIEHUNG_MUSTER, "Beziehungstyp");
+    for (const zeilen of stapel(kanten)) {
+      await fuehreAus(
+        `UNWIND $zeilen AS k ` +
+          `MATCH (a:${vonLabel} {schluessel: k.von}) MATCH (b:${nachLabel} {schluessel: k.nach}) ` +
+          `MERGE (a)-[r:${typ}]->(b) ` +
+          `ON CREATE SET r.abschnitte = k.abschnitte ` +
+          `ON MATCH SET r.abschnitte = r.abschnitte + [x IN k.abschnitte WHERE NOT x IN r.abschnitte]`,
+        {
+          zeilen: zeilen.map((k) => ({
+            von: k.von, nach: k.nach, abschnitte: k.abschnitte.map((nummer) => abschnittId(daten.docId, nummer)),
+          })),
+        },
+        `Kanten ${typ}`,
+      );
+    }
+  }
+}
+
+function abschnittId(docId: string, nummer: number): string {
+  return `${docId}#${nummer}`;
+}
+
+function pruefeBezeichner(wert: string, muster: RegExp, was: string): void {
+  if (!muster.test(wert)) throw new ValidationError(`${was} „${wert}“ ist kein zulaessiger Bezeichner.`);
+}
+
+/**
+ * Ein Bereichsindex je Label auf dem Schluessel; ohne ihn liefe jedes MERGE
+ * ueber alle Knoten des Labels. Ein vorhandener Index ist kein Fehler.
+ */
+async function sichereIndex(graph: Awaited<ReturnType<typeof graphOf>>, label: string, eigenschaft: string): Promise<void> {
+  pruefeBezeichner(label, LABEL_MUSTER, "Label");
+  checkIngestionCapacity();
+  try {
+    await graph.query(`CREATE INDEX FOR (n:${label}) ON (n.${eigenschaft})`, { TIMEOUT: WRITE_TIMEOUT_MS });
+  } catch (error) {
+    const meldung = error instanceof Error ? error.message : String(error);
+    if (!/already indexed|already exists/i.test(meldung)) throw error;
+  }
+}
+
+function gruppiere<T>(eintraege: T[], schluessel: (eintrag: T) => string): Map<string, T[]> {
+  const gruppen = new Map<string, T[]>();
+  for (const eintrag of eintraege) {
+    const key = schluessel(eintrag);
+    const gruppe = gruppen.get(key);
+    if (gruppe) gruppe.push(eintrag);
+    else gruppen.set(key, [eintrag]);
+  }
+  return gruppen;
+}
+
+function* stapel<T>(eintraege: T[]): Generator<T[]> {
+  for (let i = 0; i < eintraege.length; i += IMPORT_ZEILEN_JE_ABFRAGE) {
+    yield eintraege.slice(i, i + IMPORT_ZEILEN_JE_ABFRAGE);
+  }
+}
+
+export type { GraphKante, GraphKnoten };
 
 export async function deleteGraph(collectionId: string): Promise<void> {
   checkIngestionCapacity();

@@ -12,6 +12,8 @@ import {
   loescheDatei,
 } from "@/lib/documents";
 import { NotFoundError, ValidationError } from "@/lib/errors";
+import { abschnitteArtefaktPfad, graphArtefaktPfad } from "@/lib/graph-extraktion";
+import { istGraphDokument } from "@/lib/graph-ontologie";
 import { entferneDokumentJeTyp } from "@/lib/ingest";
 import { erwirbSperre, gibSperreFrei, sperrSchluessel } from "@/lib/ratelimit";
 
@@ -99,6 +101,18 @@ export async function DELETE(request: Request, kontextparameter: Kontextparamete
           const { BLOB_READ_WRITE_TOKEN } = requireEnv("BLOB_READ_WRITE_TOKEN");
           await del(aktuell.blobPath, { token: BLOB_READ_WRITE_TOKEN, abortSignal: ingestionSignal() });
           checkIngestionCapacity();
+          if (kind === "graph" && istGraphDokument(aktuell.filename)) {
+            // Die Artefakte der Extraktion liegen neben der Datei; ohne sie
+            // koennte ein spaeterer Neuaufbau das Dokument nicht mehr finden —
+            // und soll es auch nicht.
+            await del(
+              [graphArtefaktPfad(aktuell.blobPath), abschnitteArtefaktPfad(aktuell.blobPath)],
+              { token: BLOB_READ_WRITE_TOKEN, abortSignal: ingestionSignal() },
+            ).catch(() => {
+              // Fehlende Artefakte sind kein Grund, die Loeschung abzubrechen.
+            });
+            checkIngestionCapacity();
+          }
           // Readiness and original files remain protected until metadata deletion
           // commits, so the next graph owner cannot replay this deleted script.
           await entferneDokumentSatz(aktuell);
