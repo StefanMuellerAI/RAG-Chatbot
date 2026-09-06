@@ -1,12 +1,47 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   GLOBAL_KONTINGENT_SCRIPT,
   NUTZER_KONTINGENT_SCRIPT,
+  ausZwischenspeicher,
   fensterSchluessel,
   tagesSchluessel,
+  verwirfProzessZwischenspeicher,
+  verwirfZwischenspeicher,
 } from "@/lib/ratelimit";
+
+describe("Zwischenspeicher im Prozess", () => {
+  afterEach(() => { verwirfProzessZwischenspeicher(); vi.useRealTimers(); });
+
+  it("liefert einen frisch geladenen Wert 15 Sekunden lang ohne erneutes Laden", async () => {
+    vi.useFakeTimers();
+    const laden = vi.fn(async () => ({ plan: "S" }));
+    expect(await ausZwischenspeicher("test:kontext", 60, laden)).toEqual({ plan: "S" });
+    expect(await ausZwischenspeicher("test:kontext", 60, laden)).toEqual({ plan: "S" });
+    expect(laden).toHaveBeenCalledOnce();
+    vi.advanceTimersByTime(15_001);
+    await ausZwischenspeicher("test:kontext", 60, laden);
+    expect(laden).toHaveBeenCalledTimes(2);
+  });
+
+  it("haelt sich an eine kuerzere Lebensdauer des Aufrufers", async () => {
+    vi.useFakeTimers();
+    const laden = vi.fn(async () => 1);
+    await ausZwischenspeicher("test:kurz", 5, laden);
+    vi.advanceTimersByTime(5_001);
+    await ausZwischenspeicher("test:kurz", 5, laden);
+    expect(laden).toHaveBeenCalledTimes(2);
+  });
+
+  it("vergisst einen Wert sofort, wenn er verworfen wird", async () => {
+    const laden = vi.fn(async () => "alt");
+    await ausZwischenspeicher("test:verwerfen", 60, laden);
+    await verwirfZwischenspeicher("test:verwerfen");
+    laden.mockResolvedValue("neu");
+    expect(await ausZwischenspeicher("test:verwerfen", 60, laden)).toBe("neu");
+  });
+});
 
 describe("Kontingent-Schluessel", () => {
   it("leitet aktuelles und vorheriges Fenster aus dem Zeitpunkt ab", () => {

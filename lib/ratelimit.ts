@@ -213,18 +213,23 @@ export async function ausZwischenspeicher<T>(
   lebensdauerSekunden: number,
   laden: () => Promise<T>,
 ): Promise<T> {
+  const lokal = prozessZwischenspeicher.get(schluessel);
+  if (lokal && lokal.gueltigBis > Date.now()) return lokal.wert as T;
+
   let redis: Redis;
   try {
     redis = getRedis();
   } catch {
-    // Ohne Redis laeuft die Anwendung weiter, nur ohne Zwischenspeicher. Ein
-    // fehlender Cache darf nie zum Ausfall fuehren.
-    return laden();
+    // Ohne Redis laeuft die Anwendung weiter, nur ohne geteilten Zwischenspeicher.
+    // Ein fehlender Cache darf nie zum Ausfall fuehren.
+    return merkeImProzess(schluessel, await laden(), lebensdauerSekunden);
   }
 
   try {
     const gespeichert = await redis.get<T>(schluessel);
-    if (gespeichert !== null && gespeichert !== undefined) return gespeichert;
+    if (gespeichert !== null && gespeichert !== undefined) {
+      return merkeImProzess(schluessel, gespeichert, lebensdauerSekunden);
+    }
   } catch {
     // Lesefehler: einfach frisch laden.
   }
@@ -237,16 +242,55 @@ export async function ausZwischenspeicher<T>(
     // Schreibfehler aendern am Ergebnis nichts.
   }
 
-  return frisch;
+  return merkeImProzess(schluessel, frisch, lebensdauerSekunden);
+}
+
+/**
+ * Zwischenspeicher je Instanz vor Redis.
+ *
+ * Der Redis-Cache spart die Datenbank, kostet aber selbst einen Roundtrip je
+ * Anfrage. Fluid-Instanzen leben lange genug, dass sich ein kurzes Gedaechtnis
+ * im Prozess lohnt: Nutzerkontext, Modellkatalog und Einladungen kommen dann
+ * fuer 15 Sekunden ohne Netz. Eine Aenderung im Admin greift auf anderen
+ * Instanzen um hoechstens diese Spanne spaeter — weniger als die Minute, die
+ * der Redis-Cache ohnehin erlaubt.
+ */
+const PROZESS_LEBENSDAUER_MS = 15_000;
+const PROZESS_HOECHSTENS = 2_000;
+const prozessZwischenspeicher = new Map<string, { wert: unknown; gueltigBis: number }>();
+
+function merkeImProzess<T>(schluessel: string, wert: T, lebensdauerSekunden: number): T {
+  if (prozessZwischenspeicher.size >= PROZESS_HOECHSTENS) {
+    const jetzt = Date.now();
+    for (const [name, eintrag] of prozessZwischenspeicher) {
+      if (eintrag.gueltigBis <= jetzt) prozessZwischenspeicher.delete(name);
+    }
+    // Immer noch voll: den aeltesten Eintrag opfern, Map haelt die Einfuegereihenfolge.
+    if (prozessZwischenspeicher.size >= PROZESS_HOECHSTENS) {
+      const aeltester = prozessZwischenspeicher.keys().next().value;
+      if (aeltester !== undefined) prozessZwischenspeicher.delete(aeltester);
+    }
+  }
+  prozessZwischenspeicher.set(schluessel, {
+    wert,
+    gueltigBis: Date.now() + Math.min(PROZESS_LEBENSDAUER_MS, lebensdauerSekunden * 1000),
+  });
+  return wert;
 }
 
 /** Verwirft einen zwischengespeicherten Wert, etwa nach einer Planaenderung. */
 export async function verwirfZwischenspeicher(schluessel: string): Promise<void> {
+  prozessZwischenspeicher.delete(schluessel);
   try {
     await getRedis().del(schluessel);
   } catch {
     // Der Wert verfaellt ohnehin von selbst.
   }
+}
+
+/** Nur fuer Tests: leert das Gedaechtnis dieser Instanz. */
+export function verwirfProzessZwischenspeicher(): void {
+  prozessZwischenspeicher.clear();
 }
 
 export function kontextSchluessel(userId: string): string {
