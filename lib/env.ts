@@ -95,6 +95,10 @@ function statisch(name: string): string | undefined {
       return nichtLeer(process.env.GLOBAL_QUESTIONS_PER_MINUTE);
     case "FALKORDB_URL":
       return nichtLeer(process.env.FALKORDB_URL);
+    case "SQL_EXECUTOR_URL":
+      return nichtLeer(process.env.SQL_EXECUTOR_URL);
+    case "SQL_EXECUTOR_TOKEN":
+      return nichtLeer(process.env.SQL_EXECUTOR_TOKEN);
     case "PROVIDER_KEY_SECRET":
       return nichtLeer(process.env.PROVIDER_KEY_SECRET);
     default:
@@ -154,6 +158,11 @@ export function optionalEnv(name: string): string | undefined {
  */
 export function graphConfigured(): boolean {
   return read("FALKORDB_URL") !== undefined;
+}
+
+/** Konfiguration des SQL-Dienstes; prueft keine Erreichbarkeit. */
+export function sqlExecutorConfigured(): boolean {
+  return read("SQL_EXECUTOR_URL") !== undefined && read("SQL_EXECUTOR_TOKEN") !== undefined;
 }
 
 /**
@@ -256,6 +265,8 @@ const DIAGNOSE_KEYS = [
   "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY",
   "CLERK_WEBHOOK_SIGNING_SECRET",
   "FALKORDB_URL",
+  "SQL_EXECUTOR_URL",
+  "SQL_EXECUTOR_TOKEN",
   "PROVIDER_KEY_SECRET",
 ] as const;
 

@@ -17,7 +17,7 @@ Eine Sammlung hat einen von drei Typen (siehe [Drei Arten von Sammlungen](#drei-
 - **Antworten**: Modell je Plan aus einem im Admin gepflegten Katalog — über das Vercel AI
   Gateway oder, mit eigenem Key, direkt bei Anthropic bzw. OpenAI
 - **Vektorsuche**: Pinecone Serverless, ein Namespace je Sammlung, Embedding im Dienst
-- **Tabellen**: SQLite-Datei je Sammlung in Vercel Blob, abgefragt durch einen separaten SQL-Dienst mit terminierbaren Workern
+- **Tabellen**: SQLite-Datei je Sammlung in Vercel Blob, abgefragt durch einen privaten SQL-Service im selben Vercel-Projekt mit terminierbaren Workern
 - **Graphen**: FalkorDB, ein Graph je Sammlung (optional, über `FALKORDB_URL`)
 - **Datenbank**: Neon Postgres mit Drizzle
 - **Dateiablage**: Vercel Blob (privat, mandantenpräfigiert)
@@ -84,8 +84,14 @@ nicht unbesehen alle Migrationen erneut ausführen. `0004` ergänzt serverseitig
 Chat-Generierungen, Status und Feedback; sie muss vor dem neuen App-Deployment angewendet
 werden. [Rollout-Anleitung](docs/scaling-and-chat.md#migration-und-rollout).
 
-Für SQL-Abfragen zusätzlich den [SQL-Dienst](services/sql/README.md) betreiben und
-`SQL_EXECUTOR_URL` sowie `SQL_EXECUTOR_TOKEN` in der App setzen.
+Für lokale SQL-Abfragen zusätzlich den [SQL-Dienst](services/sql/README.md) starten
+und `SQL_EXECUTOR_URL=http://127.0.0.1:8080` sowie denselben `SQL_EXECUTOR_TOKEN`
+in App und Dienst setzen. Auf Vercel deployt `vercel.json` den SQL-Container als
+privaten Service im selben Projekt; dessen URL wird automatisch über ein
+Service-Binding gesetzt. Dort `SQL_EXECUTOR_TOKEN` mit mindestens 32 Zeichen,
+den vorhandenen `BLOB_READ_WRITE_TOKEN` und `PORT=8080` für die jeweilige Umgebung
+hinterlegen. Für Vercel-Befehle CLI 59.11.7 verwenden, etwa `npx vercel@59.11.7`;
+CLI 53.4.0 unterstützt dieses Setup noch nicht. [Deployment-Details](services/sql/README.md#deployment-auf-vercel).
 
 ### 3. Pinecone-Index anlegen
 
@@ -232,7 +238,7 @@ Verbrauch einsehen.
 | | Dokumente (`vector`) | Tabellen (`sql`) | Graph (`graph`) |
 |---|---|---|---|
 | **Eingabe** | PDF, DOCX, XLSX, MP3 (wird transkribiert) | CSV mit Kopfzeile; `;` oder `,` als Trenner, Dezimalkomma wird erkannt | `.cypher`, `.cql`, `.txt` mit `CREATE`/`MERGE`-Statements, durch `;` getrennt |
-| **Speicher** | Pinecone-Namespace je Sammlung | SQLite-Datei in Blob (`files/<userId>/<collectionId>/_db/sammlung.sqlite`), isolierte Worker im separaten SQL-Dienst | FalkorDB-Graph `c_<collectionId>` |
+| **Speicher** | Pinecone-Namespace je Sammlung | SQLite-Datei in Blob (`files/<userId>/<collectionId>/_db/sammlung.sqlite`), isolierte Worker im privaten Vercel-SQL-Service | FalkorDB-Graph `c_<collectionId>` |
 | **Abfrage der KI** | `dokumente_durchsuchen` (semantische Suche) | `sql_ausfuehren` — SQLite-Dialekt, ein `SELECT`/`WITH` | `cypher_ausfuehren` — openCypher, `GRAPH.RO_QUERY` |
 | **Grenzen je Datei** | MB/Datei und Seiten der Größenklasse | zusätzlich 20 MB, 200.000 Zeilen, 200 Spalten; SQLite-Datei der Sammlung höchstens 50 MB | zusätzlich 5 MB, 5.000 Statements; FalkorDB-Free-Tier 100 MB für alle Graphen zusammen |
 | **Löschen einer Datei** | Abschnitte per Präfix `<docId>#` aus dem Namespace | Tabelle gedroppt, Datei zurückgeschrieben | Graph gelöscht und aus den übrigen Skripten neu aufgebaut |

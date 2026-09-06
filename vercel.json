@@ -1,6 +1,31 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "fluid": true,
+  "services": {
+    "web": {
+      "root": ".",
+      "framework": "nextjs",
+      "bindings": [
+        {
+          "type": "service",
+          "service": "sql",
+          "format": "url",
+          "env": "SQL_EXECUTOR_URL"
+        }
+      ]
+    },
+    "sql": {
+      "root": "services/sql",
+      "runtime": "container",
+      "entrypoint": "Dockerfile.vercel",
+      "functions": {
+        "**": { "maxDuration": 30 }
+      }
+    }
+  },
+  "rewrites": [
+    { "source": "/(.*)", "destination": { "service": "web" } }
+  ],
   "crons": [
     {
       "path": "/api/cron/aufraeumen",

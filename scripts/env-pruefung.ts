@@ -1,4 +1,10 @@
-import { missingFor, requireEnv, MissingConfigError, envDiagnose } from "../lib/env";
+import {
+  missingFor,
+  requireEnv,
+  MissingConfigError,
+  envDiagnose,
+  sqlExecutorConfigured,
+} from "../lib/env";
 
 /**
  * Pruefung der Environment-Erkennung.
@@ -24,6 +30,8 @@ const SCHLUESSEL = [
   "KV_REST_API_URL",
   "KV_REST_API_TOKEN",
   "BLOB_READ_WRITE_TOKEN",
+  "SQL_EXECUTOR_URL",
+  "SQL_EXECUTOR_TOKEN",
 ] as const;
 
 const original: Record<string, string | undefined> = {};
@@ -128,6 +136,46 @@ pruefe("Diagnose sieht PINECONE_API_KEY", diagnose.gesetzt.includes("PINECONE_AP
 pruefe(
   "Diagnose listet den OIDC-Header-Namen, auch wenn er hier fehlt",
   diagnose.leer.includes("x-vercel-oidc-token"),
+);
+
+setzen({});
+pruefe("SQL-Dienst ohne URL und Token nicht konfiguriert", !sqlExecutorConfigured());
+const sqlFehlt = await envDiagnose();
+pruefe(
+  "Diagnose nennt fehlende SQL-Variablen",
+  sqlFehlt.leer.includes("SQL_EXECUTOR_URL") && sqlFehlt.leer.includes("SQL_EXECUTOR_TOKEN"),
+);
+
+setzen({ SQL_EXECUTOR_URL: "https://sql.example" });
+pruefe("SQL-Dienst braucht neben URL auch Token", !sqlExecutorConfigured());
+setzen({ SQL_EXECUTOR_TOKEN: "sql-test-token" });
+pruefe("SQL-Dienst braucht neben Token auch URL", !sqlExecutorConfigured());
+setzen({ SQL_EXECUTOR_URL: "https://sql.example", SQL_EXECUTOR_TOKEN: "" });
+pruefe("leerer SQL-Token zaehlt als fehlend", !sqlExecutorConfigured());
+setzen({ SQL_EXECUTOR_URL: "", SQL_EXECUTOR_TOKEN: "sql-test-token" });
+pruefe("leere SQL-URL zaehlt als fehlend", !sqlExecutorConfigured());
+
+setzen({ SQL_EXECUTOR_URL: "https://sql.example", SQL_EXECUTOR_TOKEN: "sql-test-token" });
+pruefe("SQL-Dienst mit URL und Token konfiguriert", sqlExecutorConfigured());
+const sqlGesetzt = await envDiagnose();
+pruefe(
+  "Diagnose nennt gesetzte SQL-Variablen ohne ihre Werte",
+  sqlGesetzt.gesetzt.includes("SQL_EXECUTOR_URL") &&
+    sqlGesetzt.gesetzt.includes("SQL_EXECUTOR_TOKEN") &&
+    !JSON.stringify(sqlGesetzt).includes("https://sql.example") &&
+    !JSON.stringify(sqlGesetzt).includes("sql-test-token"),
+);
+
+setzen({
+  DATABASE_URL: "postgres://neon.example/db",
+  AI_GATEWAY_API_KEY: "gateway-test-key",
+  PINECONE_API_KEY: "pc-key",
+  UPSTASH_REDIS_REST_URL: "https://example.upstash.io",
+  UPSTASH_REDIS_REST_TOKEN: "redis-test-token",
+});
+pruefe(
+  "Chat braucht fuer andere Sammlungstypen keinen SQL-Dienst",
+  (await missingFor("chat")).length === 0,
 );
 
 for (const name of SCHLUESSEL) {

@@ -16,7 +16,7 @@ flowchart LR
   API --> LLM[Modellanbieter]
   API --> Vector[Pinecone]
   API --> Graph[FalkorDB]
-  API --> SQL[Separater SQL-Dienst]
+  API -->|Privates Service-Binding| SQL[SQL-Service im selben Vercel-Projekt]
   SQL --> Worker[Begrenzte, terminierbare Worker]
   SQL --> Blob[(Private SQLite-Dateien in Blob)]
   Upload[Vercel Workflow: Uploads] --> Redis
@@ -25,11 +25,15 @@ flowchart LR
   Upload --> Graph
 ```
 
-SQL wird im Chat ausschließlich über `SQL_EXECUTOR_URL` ausgeführt. Der Dienst validiert
-den autorisierten Sammlungspfad, revalidiert gecachte Daten mit der Blob-ETag und führt
-Abfragen in terminierbaren Workern aus. Dateigröße, Workerzeit, Warteschlange und
-Ergebnisse sind begrenzt. Speichergrenzen müssen zusätzlich im Containeranbieter gesetzt
-werden. Details und Startbefehle: [SQL-Dienst](../services/sql/README.md).
+SQL wird im Chat ausschließlich über `SQL_EXECUTOR_URL` ausgeführt. In Vercel erzeugt
+das private Binding des Next.js-Service `web` diese URL für den SQL-Service `sql`
+im selben Deployment. Nur `web` ist öffentlich geroutet. Der SQL-Dienst prüft weiterhin
+den Bearer-Token, validiert den autorisierten Sammlungspfad, revalidiert gecachte Daten
+mit der Blob-ETag und führt Abfragen in terminierbaren Workern aus. Dateigröße,
+Workerzeit, Warteschlange und Ergebnisse sind begrenzt. Vercel begrenzt die
+SQL-Function auf 30 Sekunden und verwendet unter Fluid standardmäßig 2 GB/1 vCPU;
+die lokalen Compose-Grenzen von 1 GiB/2 CPUs werden dort nicht übernommen. Details
+und Startbefehle: [SQL-Dienst](../services/sql/README.md).
 
 Graphabfragen erhalten vor der Ausführung maximal `LIMIT 200`; kleinere Limits bleiben
 erhalten. `UNION` wird abgewiesen, weil frühere Zweige sonst unbeschränkt rechnen könnten.
@@ -49,11 +53,18 @@ werden neue Abfragen kurzzeitig abgewiesen; halbe Graphen werden nicht als Quell
    erneut ausführen**: den bereits vorhandenen Schemastand abgleichen und `0004` einmalig
    mit dem etablierten Migrationsverfahren anwenden. Auf einer neuen Datenbank kann
    `npm run db:migrate` alle Migrationen ausführen, danach `npm run db:seed`.
-2. SQL-Dienst mit Node 24 oder dem mitgelieferten Container starten. Privaten Blob-Token
-   und einen mindestens 32 Zeichen langen `SQL_EXECUTOR_TOKEN` als Secrets hinterlegen.
-   HTTPS-Adresse und denselben Diensttoken in der Chat-App konfigurieren. Healthcheck
-   und eine echte Abfrage einer Testsammlung prüfen. Ohne Dienst gibt es keinen lokalen
-   Fallback für SQL-Fragen; Uploads behalten SQLite/Blob bei.
+2. Im Vercel-Projekt den privaten `BLOB_READ_WRITE_TOKEN`, einen zufälligen
+   `SQL_EXECUTOR_TOKEN` mit mindestens 32 Zeichen und `PORT=8080` für die Zielumgebung
+   hinterlegen. Aus dem Repository-Hauptverzeichnis mit Vercel CLI 59.11.7 deployen,
+   etwa `npx vercel@59.11.7`; die alte CLI 53.4.0 unterstützt private Bindings und die
+   Container-Konfiguration nicht. Die gemeinsame `services`-Konfiguration baut den
+   SQL-Container aus `services/sql/Dockerfile.vercel` neben Next.js. `SQL_EXECUTOR_URL`
+   kommt automatisch aus dem privaten Binding und wird nicht manuell gesetzt.
+   Preview-Umgebungen brauchen entsprechende eigene Variablen. Eine echte Abfrage
+   einer Testsammlung über die Chat-App prüfen; `/healthz` ist intern erreichbar.
+   Lokal bleibt Node 24 bzw. Docker Compose mit einer expliziten lokalen Dienst-URL
+   möglich. Ohne Dienst gibt es keinen Fallback für SQL-Fragen; Uploads behalten
+   SQLite/Blob bei.
 3. Redis-, Modell- und Dienstbudgets aus `.env.example` auf bestätigte Quoten abstimmen.
    Die konservativen Modellstandards von 120 Aufrufen/min und 1 Mio. reservierten
    Tokens/min reichen nicht für den Zielbetrieb. Kapazität je tatsächlicher Modell-ID,
