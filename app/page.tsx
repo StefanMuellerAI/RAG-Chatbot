@@ -3,14 +3,19 @@ import { connection } from "next/server";
 import ChatBereich from "@/components/ChatBereich";
 import NichtBereit from "@/components/NichtBereit";
 import { requireKontextFuerSeite } from "@/lib/auth/user";
-import { ladeSammlungen, ladeSammlungsStatus } from "@/lib/collections";
+import { ladeChatSeite } from "@/lib/chat-pages";
+import type { Startzustand } from "@/lib/chatVerlauf";
 import { missingFor } from "@/lib/env";
 import { starteMessung } from "@/lib/messung";
 import { leseTagesstand } from "@/lib/ratelimit";
 
 export const dynamic = "force-dynamic";
 
-export default async function ChatSeite() {
+export default async function ChatSeite({
+  searchParams,
+}: {
+  searchParams: Promise<{ chat?: string }>;
+}) {
   // Request-Zeit, nicht Build-Zeit: sonst waeren die Server-Variablen leer,
   // obwohl sie in Vercel gesetzt sind.
   await connection();
@@ -21,13 +26,40 @@ export default async function ChatSeite() {
 
   const kontext = await requireKontextFuerSeite("/");
   messung.phase("kontext");
-  const [sammlungen, verbraucht, sammlungsStatus] = await Promise.all([
-    ladeSammlungen(kontext.userId),
+  // Sammlungen, Verarbeitungsstand, Chatliste und der per Adresse gewaehlte
+  // Chat kommen in einem Datenbank-Batch; der Tagesstand parallel aus Redis.
+  const { chat } = await searchParams;
+  const [seite, verbraucht] = await Promise.all([
+    ladeChatSeite(kontext.userId, chat ?? null),
     leseTagesstand(kontext.userId),
-    ladeSammlungsStatus(kontext.userId),
   ]);
+  const { sammlungen, status: sammlungsStatus } = seite;
   messung.phase("daten");
-  messung.ende({ sammlungen: sammlungen.length });
+  messung.ende({ sammlungen: sammlungen.length, chats: seite.chats.chats.length });
+
+  const start: Startzustand = {
+    chats: seite.chats.chats,
+    nextCursor: seite.chats.nextCursor,
+    aktiverChat: seite.aktiverChat
+      ? {
+          chat: seite.aktiverChat.chat,
+          nextCursor: seite.aktiverChat.nextCursor,
+          // Nur, was der Browser auch ueber die API bekaeme: keine Roh-Spalten.
+          messages: seite.aktiverChat.messages.map((nachricht) => ({
+            id: nachricht.id,
+            role: nachricht.role,
+            content: nachricht.content,
+            sources: nachricht.sources ?? undefined,
+            steps: nachricht.steps ?? undefined,
+            status: nachricht.status,
+            requestId: nachricht.requestId,
+            fehler: nachricht.fehler,
+            feedback: nachricht.feedback ?? null,
+            request: nachricht.request ?? null,
+          })),
+        }
+      : null,
+  };
 
   return (
     <>
@@ -46,7 +78,7 @@ export default async function ChatSeite() {
         </p>
       )}
 
-      <ChatBereich key={kontext.userId} userId={kontext.userId} sammlungen={sammlungen.map((sammlung) => ({
+      <ChatBereich key={kontext.userId} userId={kontext.userId} start={start} sammlungen={sammlungen.map((sammlung) => ({
         id: sammlung.id,
         name: sammlung.name,
         kind: sammlung.kind,

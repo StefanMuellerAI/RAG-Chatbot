@@ -44,6 +44,43 @@ function ladestand(id: string, teil: Partial<ChatLadestand>) {
 }
 export const getSnapshot = () => stand;
 export const getServerSnapshot = () => LEER;
+
+/** Vom Server mitgelieferter Verlauf: Chatliste und, bei Deep-Link, der aktive Chat. */
+export type Startzustand = {
+  chats: Chat[]; nextCursor: string | null;
+  aktiverChat: { chat: Chat; messages: Nachricht[]; nextCursor: string | null } | null;
+};
+
+/** Reiner Zustand aus dem Startzustand, auch als Server-Snapshot fuer die Hydration. */
+export function standAus(start: Startzustand): Stand {
+  const aktiv = start.aktiverChat;
+  return {
+    ...LEER,
+    chats: aktiv ? sortiert([aktiv.chat, ...start.chats.filter((chat) => chat.id !== aktiv.chat.id)]) : start.chats,
+    nextCursor: start.nextCursor,
+    geladen: true,
+    aktiveId: aktiv?.chat.id ?? null,
+    nachrichten: aktiv ? { [aktiv.chat.id]: aktiv.messages } : {},
+    chatLadestand: aktiv
+      ? { [aktiv.chat.id]: { status: "ready", mehrLaedt: false, nextCursor: aktiv.nextCursor, fehler: null } }
+      : {},
+  };
+}
+
+/**
+ * Uebernimmt den serverseitig geladenen Verlauf, aber nur in einen leeren
+ * Speicher: Kommt die Seite aus dem Router-Cache zurueck, ist der Speicher
+ * frischer als ihre Daten. Ohne Benachrichtigung, weil dies vor dem ersten
+ * Rendern geschieht und noch niemand abonniert hat.
+ */
+export function hydriere(userId: string, start: Startzustand): void {
+  if (konto === userId && stand.geladen) return;
+  konto = userId;
+  generation += 1;
+  abrufe.clear();
+  anlegen = null;
+  stand = standAus(start);
+}
 export function subscribe(fn: () => void) {
   abonnenten.add(fn);
   return () => { abonnenten.delete(fn); };

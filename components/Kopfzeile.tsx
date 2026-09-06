@@ -1,26 +1,19 @@
 import { Show, SignInButton, UserButton } from "@clerk/nextjs";
 import Link from "next/link";
+import { Suspense } from "react";
 import TabNav from "@/components/TabNav";
 import { getKontext } from "@/lib/auth/user";
 
 /**
  * Kopfbereich samt Reitern und Kontomenue.
  *
- * Serverkomponente, weil der Admin-Reiter nur erscheinen darf, wenn der Nutzer
- * die Rolle wirklich hat — und die steht in Postgres, nicht im Browser.
+ * Der Admin-Reiter darf nur erscheinen, wenn der Nutzer die Rolle wirklich hat,
+ * und die steht in Postgres, nicht im Browser. Diese Abfrage liegt in einer
+ * eigenen Suspense-Grenze: Das Geruest der Seite geht sofort an den Browser,
+ * die Reiter folgen, sobald der Kontext da ist. Vorher wartete jede Seite mit
+ * dem ersten Byte auf diesen Aufruf.
  */
-export default async function Kopfzeile() {
-  // Der Kopfbereich steht auch ueber der Anmeldeseite. Dort gibt es keinen
-  // Nutzer, und bei einer frisch aufgesetzten Umgebung womoeglich noch keine
-  // Datenbank. Beides darf die Seite nicht mitreissen, sonst kommt niemand
-  // mehr bis zum Anmeldeformular.
-  let istAdmin = false;
-  try {
-    istAdmin = (await getKontext())?.isAdmin ?? false;
-  } catch {
-    istAdmin = false;
-  }
-
+export default function Kopfzeile() {
   return (
     <>
       <header className="kopf">
@@ -47,8 +40,24 @@ export default async function Kopfzeile() {
       </header>
 
       <Show when="signed-in">
-        <TabNav istAdmin={istAdmin} />
+        <Suspense fallback={<TabNav istAdmin={false} />}>
+          <Reiter />
+        </Suspense>
       </Show>
     </>
   );
+}
+
+async function Reiter() {
+  // Der Kopfbereich steht auch ueber der Anmeldeseite. Dort gibt es keinen
+  // Nutzer, und bei einer frisch aufgesetzten Umgebung womoeglich noch keine
+  // Datenbank. Beides darf die Seite nicht mitreissen, sonst kommt niemand
+  // mehr bis zum Anmeldeformular.
+  let istAdmin = false;
+  try {
+    istAdmin = (await getKontext())?.isAdmin ?? false;
+  } catch {
+    istAdmin = false;
+  }
+  return <TabNav istAdmin={istAdmin} />;
 }

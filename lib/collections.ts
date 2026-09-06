@@ -39,15 +39,23 @@ export type SammlungMitKlasse = Collection & { sizeClass: SizeClass };
 export type SammlungsStatus = { ready: number; pending: number; failed: number };
 
 /** One tenant-filtered aggregation; documents_user_idx supports the predicate. */
-export async function ladeSammlungsStatus(userId: string): Promise<Record<string, SammlungsStatus>> {
-  const rows = await getDb().select({
+export function sammlungsStatusAbfrage(userId: string) {
+  return getDb().select({
     collectionId: documents.collectionId,
     ready: sql<number>`count(*) filter (where ${documents.status} = 'fertig')`.mapWith(Number),
     pending: sql<number>`count(*) filter (where ${documents.status} in ('wartet', 'laeuft'))`.mapWith(Number),
     failed: sql<number>`count(*) filter (where ${documents.status} = 'fehler')`.mapWith(Number),
   }).from(documents).where(eq(documents.userId, userId)).groupBy(documents.collectionId);
+}
 
+export function zuSammlungsStatus(
+  rows: { collectionId: string; ready: number; pending: number; failed: number }[],
+): Record<string, SammlungsStatus> {
   return Object.fromEntries(rows.map(({ collectionId, ...status }) => [collectionId, status]));
+}
+
+export async function ladeSammlungsStatus(userId: string): Promise<Record<string, SammlungsStatus>> {
+  return zuSammlungsStatus(await sammlungsStatusAbfrage(userId));
 }
 
 /**

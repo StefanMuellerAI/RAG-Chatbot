@@ -1,12 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import ChatPanel, { type ChatSammlung } from "@/components/ChatPanel";
 import VerlaufListe from "@/components/VerlaufListe";
 import {
-  getServerSnapshot, getSnapshot, initialisiere, ladeNachrichten, ladeWeitereChats,
-  merkeAntwort, nachrichtenVon, neuerChat, subscribe, verwerfeFehler, waehleChat,
-  type Nachricht, type Quelle,
+  getServerSnapshot, getSnapshot, hydriere, initialisiere, ladeNachrichten, ladeWeitereChats,
+  merkeAntwort, nachrichtenVon, neuerChat, standAus, subscribe, verwerfeFehler, waehleChat,
+  type Nachricht, type Quelle, type Startzustand,
 } from "@/lib/chatVerlauf";
 import { leseChatStrom } from "@/lib/chat-client";
 import type { ToolStep } from "@/lib/tools-types";
@@ -17,8 +17,16 @@ type Anfrage = {
 };
 type Lauf = { chatId: string | null; user: Nachricht; assistant: Nachricht; angenommen: boolean };
 
-export default function ChatBereich({ sammlungen = [], userId }: { sammlungen?: ChatSammlung[]; userId: string }) {
-  const stand = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+export default function ChatBereich({ sammlungen = [], userId, start }: {
+  sammlungen?: ChatSammlung[]; userId: string; start?: Startzustand;
+}) {
+  // Der serverseitig geladene Verlauf kommt vor dem ersten Rendern in den
+  // Speicher, nur im Browser und nur in einen leeren Speicher. Der
+  // Server-Snapshot zeigt fuer die Hydration dieselben Daten, damit die Liste
+  // ohne Nachladen und ohne Flackern steht.
+  if (start && typeof window !== "undefined") hydriere(userId, start);
+  const serverStand = useMemo(() => (start ? standAus(start) : getServerSnapshot()), [start]);
+  const stand = useSyncExternalStore(subscribe, getSnapshot, () => serverStand);
   const { chats, aktiveId, geladen, fehler, listeLaedt, nextCursor, chatLadestand } = stand;
   const [lauf, setLauf] = useState<Lauf | null>(null);
   const [laeuft, setLaeuft] = useState(false);

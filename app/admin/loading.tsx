@@ -1,7 +1,7 @@
 export default function Loading() {
   return (
-    <div className="karte chat-ladeansicht" role="status" aria-label="Chat wird geladen">
-      <p>Ihr Chat wird geladen …</p>
+    <div className="karte chat-ladeansicht" role="status" aria-label="Administration wird geladen">
+      <p>Administration wird geladen …</p>
       <div className="chat-skelett" aria-hidden="true"><div /><div /><div /></div>
     </div>
   );
