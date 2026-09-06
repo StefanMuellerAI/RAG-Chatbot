@@ -41,7 +41,12 @@ vi.mock("@/lib/ai", () => ({
   },
   baueKatalog: () => "Katalog", baueKontextblock: () => "Kontext",
   baueSuchwerkzeug: () => ({}), baueSystemanweisung: () => "System",
-  modell: mocks.model, sucheMitSchwelle: mocks.search,
+  modell: mocks.model, sucheMitSchwelle: mocks.search, MAX_DIREKTSUCHE: 6,
+  sucheInSammlungen: async (sammlungen: { name: string }[], frage: string, sammler: { fuegeHinzu(hits: unknown[], name: string): unknown[] }, options: { signal?: AbortSignal }) => {
+    const entries: unknown[] = [];
+    for (const sammlung of sammlungen) entries.push(...sammler.fuegeHinzu(await mocks.search(sammlung, frage, options.signal), sammlung.name));
+    return entries;
+  },
 }));
 vi.mock("ai", () => ({ streamText: mocks.streamText, isStepCount: (count: number) => count }));
 
@@ -310,6 +315,28 @@ describe("Chat-API: Stream, Speichern und Fehler", () => {
     expect(mocks.quota).not.toHaveBeenCalled();
     expect(mocks.search).not.toHaveBeenCalled();
     expect(mocks.model).not.toHaveBeenCalled();
+  });
+
+  it("durchsucht mehrere Dokumentensammlungen parallel und ohne Werkzeugschritt", async () => {
+    const zweite = { ...collection, id: "66666666-6666-4666-8666-666666666666", name: "Satzung" };
+    mocks.collections.mockResolvedValue([collection, zweite]);
+    const output = await events(await POST(request()));
+    expect(mocks.search).toHaveBeenCalledTimes(2);
+    expect(mocks.search).toHaveBeenCalledWith(zweite, body.question, expect.any(AbortSignal));
+    expect(mocks.streamText).toHaveBeenCalledOnce();
+    expect(mocks.streamText.mock.calls[0][0].tools).toBeUndefined();
+    expect(output.find((event) => event.type === "status" && event.phase === "retrieval")).toMatchObject({ message: expect.stringContaining("Satzung") });
+    expect(output.at(-1)).toMatchObject({ type: "done", status: "completed", modelInvoked: true });
+  });
+
+  it("startet die Suche vor Kontingent und Zulassung und verwirft sie bei Ablehnung", async () => {
+    mocks.quota.mockRejectedValue(new RateLimitError(30));
+    const output = await events(await POST(request()));
+    expect(mocks.search).toHaveBeenCalledOnce();
+    expect(mocks.search.mock.invocationCallOrder[0]).toBeLessThan(mocks.quota.mock.invocationCallOrder[0]);
+    expect(output.some((event) => event.type === "sources")).toBe(false);
+    expect(mocks.streamText).not.toHaveBeenCalled();
+    expect(output.at(-1)).toMatchObject({ type: "done", status: "failed", modelInvoked: false });
   });
 
   it("filtert erlaubte Sammlungen auf den ausdruecklich ausgewaehlten Umfang", async () => {

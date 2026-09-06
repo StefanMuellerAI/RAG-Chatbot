@@ -2,11 +2,11 @@ import { randomUUID } from "node:crypto";
 import { isStepCount, streamText, type ModelMessage, type ToolSet } from "ai";
 import { beschreibeFehler, errorResponse, readJson } from "@/lib/api";
 import {
-  Fundstellensammler, SYSTEM_ANWEISUNG, baueKatalog, baueKontextblock, baueSuchwerkzeug,
-  baueSystemanweisung, modell, sucheMitSchwelle,
+  Fundstellensammler, MAX_DIREKTSUCHE, SYSTEM_ANWEISUNG, baueKatalog, baueKontextblock, baueSuchwerkzeug,
+  baueSystemanweisung, modell, sucheInSammlungen, type Fundstelle,
 } from "@/lib/ai";
 import { requireKontext, type Kontext } from "@/lib/auth/user";
-import { acquireCapacity, reserveModelCall, withCapacity, type CapacityLease } from "@/lib/capacity";
+import { acquireCapacity, reserveModelCall, type CapacityLease } from "@/lib/capacity";
 import { AnswerBudget, chatRequestSchema, tokenBound, type ChatRequest, type GenerationStatus } from "@/lib/chat-contract";
 import { fitAnswerMessages } from "@/lib/chat-answer-context";
 import {
@@ -55,7 +55,8 @@ type Modellaufruf = {
  * Vor dem ersten Modellaufruf liegen drei Wartezeiten statt sechzehn:
  *
  *   1. Vorlauf lesen (ein Datenbank-Batch) und Chat-Sperre, parallel.
- *   2. Lauf schreiben, Kontingent, Zulassung und Modellkatalog, parallel.
+ *   2. Lauf schreiben, Kontingent, Zulassung und Modellkatalog, parallel —
+ *      und bei reinen Dokumentensammlungen gleichzeitig die Suche.
  *   3. Modellbudget reservieren, je Aufruf.
  *
  * Ablehnungen vor dem Start (fremder Chat, laufende Antwort im selben Chat)
@@ -193,6 +194,21 @@ async function fuehreLaufAus({ controller, kontext, input, request, cancellation
     run = plan.run;
     sendeStart(run);
 
+    // Reine Dokumentensammlungen werden deterministisch und parallel durchsucht,
+    // und zwar schon jetzt: Die Suche haengt nicht am Kontingent; lehnt es ab,
+    // wird ihr Ergebnis verworfen. Ein Modellaufruf nur zur Wahl der
+    // Sammlung entfaellt. Mit Tabellen oder Graphen entscheidet weiter das Modell.
+    const direkt = sammlungen.length > 0 && sammlungen.length <= MAX_DIREKTSUCHE
+      && sammlungen.every(s => s.kind === "vector");
+    const namen = sammlungen.map(s => `„${s.name}“`).join(", ");
+    let suche: Promise<{ ok: true; entries: { fundstelle: Fundstelle; volltext: string }[] } | { ok: false; error: unknown }> | undefined;
+    if (direkt) {
+      phase("retrieval", `Suche in ${namen} …`);
+      suche = sucheInSammlungen(sammlungen, input.question, sammler, {
+        signal, onWait: () => phase("queued", "Warte auf freie Suchkapazitaet …"),
+      }).then(entries => ({ ok: true as const, entries }), (error: unknown) => ({ ok: false as const, error }));
+    }
+
     // 2. Schreiben, Kontingent, Zulassung und Katalog, gleichzeitig. Faellt das
     //    Kontingent durch, wird das Warten auf Zulassung sofort abgebrochen; eine
     //    trotzdem erhaltene Zulassung gibt der Abschluss wieder frei.
@@ -230,11 +246,10 @@ async function fuehreLaufAus({ controller, kontext, input, request, cancellation
     if (!sammlungen.length) {
       text("Sie haben noch keine Sammlung angelegt. Unter **Sammlungen** koennen Sie Dateien einpflegen und anschliessend Fragen stellen.");
     } else {
-      const direct = sammlungen.length === 1 && sammlungen[0].kind === "vector";
       const hasQueries = sammlungen.some(s => s.kind !== "vector");
-      modelId = direct ? planModel.id : modellFuerWerkzeuge(planModel.id);
+      modelId = suche ? planModel.id : modellFuerWerkzeuge(planModel.id);
       const budget = new AnswerBudget(input.detail);
-      let instructions = direct ? SYSTEM_ANWEISUNG : `${baueSystemanweisung(sammlungen)}\n\n${baueKatalog(sammlungen)}`;
+      let instructions = suche ? SYSTEM_ANWEISUNG : `${baueSystemanweisung(sammlungen)}\n\n${baueKatalog(sammlungen)}`;
       instructions += input.detail === "detailed"
         ? "\nErklaere die Antwort ausfuehrlich, soweit die Quellen das erlauben."
         : "\nAntworte kompakt in hoechstens 180 Woertern. Beginne mit dem Ergebnis und nenne dann nur die wesentlichen Belege.";
@@ -242,17 +257,19 @@ async function fuehreLaufAus({ controller, kontext, input, request, cancellation
       let tools: ToolSet | undefined;
       let found = true;
 
-      if (direct) {
-        phase("retrieval", `Suche in „${sammlungen[0].name}“ …`);
-        const hits = await withCapacity("retrieval", () => sucheMitSchwelle(sammlungen[0], input.question, signal), { signal });
-        const entries = sammler.fuegeHinzu(hits, sammlungen[0].name);
+      if (suche) {
+        const ergebnis = await suche;
+        if (!ergebnis.ok) throw ergebnis.error;
+        const entries = ergebnis.entries;
         send({ type: "sources", sources: sammler.alle });
         phase("retrieval", `${entries.length} Fundstellen gefunden.`);
         if (!entries.length) {
           found = false;
-          text(`Dazu finde ich keine passenden Fundstellen in „${sammlungen[0].name}“. Bitte grenzen Sie die Frage ein oder pruefen Sie die hinterlegten Dateien.`);
+          text(`Dazu finde ich keine passenden Fundstellen in ${namen}. Bitte grenzen Sie die Frage ein oder pruefen Sie die hinterlegten Dateien.`);
         } else {
-          modelMessages = [...vorlauf.history.slice(0, -1), { role: "user", content: `${baueKontextblock(entries)}\n\nFrage: ${input.question}` }];
+          modelMessages = [...vorlauf.history.slice(0, -1), {
+            role: "user", content: `${baueKontextblock(entries, sammlungen.length > 1)}\n\nFrage: ${input.question}`,
+          }];
         }
       } else {
         tools = {};

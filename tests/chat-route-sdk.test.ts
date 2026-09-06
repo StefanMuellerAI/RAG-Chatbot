@@ -42,7 +42,7 @@ vi.mock("@/lib/ai", () => ({
   baueKatalog: () => "Hundehalter: Tabelle mit Kennzahlen.",
   baueKontextblock: () => "Kontext", baueSuchwerkzeug: () => ({}),
   baueSystemanweisung: () => "Frage die Tabellen ab und beantworte die Nutzerfrage.",
-  modell: mocks.model, sucheMitSchwelle: vi.fn(),
+  modell: mocks.model, sucheMitSchwelle: vi.fn(), sucheInSammlungen: vi.fn(), MAX_DIREKTSUCHE: 6,
 }));
 
 // The real SDK owns prepareStep, tool execution, onStepEnd and finish-step order.

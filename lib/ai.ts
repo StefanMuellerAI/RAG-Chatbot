@@ -273,9 +273,20 @@ export class Fundstellensammler {
     hits: Hit[],
     sammlungsname: string,
   ): { fundstelle: Fundstelle; volltext: string }[] {
+    return this.uebernimm(hits.map((hit) => ({ hit, sammlungsname })));
+  }
+
+  /**
+   * Treffer aus mehreren Sammlungen in einem Zug: Die Reihenfolge entscheidet
+   * die Aehnlichkeit ueber alle Sammlungen hinweg, nicht die Reihenfolge der
+   * Sammlungen. Sonst bekaeme die zuerst genannte das ganze Zeichenbudget.
+   */
+  uebernimm(
+    treffer: { hit: Hit; sammlungsname: string }[],
+  ): { fundstelle: Fundstelle; volltext: string }[] {
     const neu: { fundstelle: Fundstelle; volltext: string }[] = [];
 
-    for (const hit of [...hits].sort((a, b) => b.score - a.score)) {
+    for (const { hit, sammlungsname } of [...treffer].sort((a, b) => b.hit.score - a.hit.score)) {
       if (this.remaining <= 0 || this.treffer.length >= 20) break;
       // Zwei Suchdurchgaenge liefern haeufig ueberlappende Abschnitte. Eine
       // doppelte Fundstelle wuerde die Liste unter der Antwort aufblaehen und
@@ -410,6 +421,41 @@ export async function sucheMitSchwelle(
   return hits.filter((hit) => hit.score >= verarbeitung.minScore);
 }
 
+/** Hoechstens so viele Dokumentensammlungen werden ohne Werkzeug parallel durchsucht. */
+export const MAX_DIREKTSUCHE = 6;
+
+/**
+ * Durchsucht mehrere Dokumentensammlungen gleichzeitig und ordnet die Treffer
+ * ueber alle Sammlungen nach Aehnlichkeit.
+ *
+ * Der Weg ohne Werkzeug: Bei reinen Dokumentensammlungen braucht es keinen
+ * Modellaufruf, um zu entscheiden, wo gesucht wird. Die Schwelle je Sammlung
+ * sortiert Rauschen aus, die Aehnlichkeit entscheidet ueber die Reihenfolge.
+ * Das spart einen vollstaendigen Modelldurchlauf je Frage.
+ */
+export async function sucheInSammlungen(
+  sammlungen: SammlungMitKlasse[],
+  suchbegriff: string,
+  sammler: Fundstellensammler,
+  options: { signal?: AbortSignal; onWait?: () => void } = {},
+): Promise<{ fundstelle: Fundstelle; volltext: string }[]> {
+  const ergebnisse = await Promise.all(
+    sammlungen.map(async (sammlung) => ({
+      sammlung,
+      hits: await withCapacity(
+        "retrieval",
+        () => sucheMitSchwelle(sammlung, suchbegriff, options.signal),
+        options,
+      ),
+    })),
+  );
+  return sammler.uebernimm(
+    ergebnisse.flatMap(({ sammlung, hits }) =>
+      hits.map((hit) => ({ hit, sammlungsname: sammlung.name })),
+    ),
+  );
+}
+
 /**
  * Kontextblock fuer den Weg ohne Werkzeug.
  *
@@ -421,13 +467,19 @@ export async function sucheMitSchwelle(
  */
 export function baueKontextblock(
   eintraege: { fundstelle: Fundstelle; volltext: string }[],
+  mehrereSammlungen = false,
 ): string {
   const auszuege = eintraege.map(({ fundstelle, volltext }) => {
     const quelle = fundstelle.location
       ? `${fundstelle.filename}, ${fundstelle.location}`
       : fundstelle.filename;
-    return `[${fundstelle.n}] Quelle: ${quelle}\n${volltext}`;
+    // Bei mehreren Sammlungen soll das Modell sagen koennen, woher ein Beleg stammt.
+    const sammlung = mehrereSammlungen ? ` (Sammlung: ${fundstelle.collectionName})` : "";
+    return `[${fundstelle.n}] Quelle: ${quelle}${sammlung}\n${volltext}`;
   });
 
-  return `Auszuege aus der Dokumentensammlung:\n\n${auszuege.join("\n\n---\n\n")}`;
+  const kopf = mehrereSammlungen
+    ? "Auszuege aus den Dokumentensammlungen:"
+    : "Auszuege aus der Dokumentensammlung:";
+  return `${kopf}\n\n${auszuege.join("\n\n---\n\n")}`;
 }
