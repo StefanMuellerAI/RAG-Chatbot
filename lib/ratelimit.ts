@@ -1,4 +1,3 @@
-import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
 import { optionalEnv, requireEnv } from "./env";
 import { QuotaError, RateLimitError } from "./errors";
@@ -25,6 +24,10 @@ import { QuotaError, RateLimitError } from "./errors";
  * Redis und nicht Postgres, weil hier je Frage mindestens ein Schreibvorgang
  * anfaellt. Bei 5.000 Fragen pro Minute waere das eine Schreiblast, die auf der
  * Datenbank nichts zu suchen hat.
+ *
+ * Alle drei Schranken werden in EINEM Netz-Roundtrip geprueft: zwei
+ * Lua-Skripte in einer Pipeline. Vorher waren es vier Aufrufe nacheinander,
+ * und jeder davon kostete die volle Latenz zwischen Function und Redis.
  */
 
 let redisZwischenspeicher: Redis | null = null;
@@ -42,89 +45,129 @@ export function getRedis(): Redis {
   return redisZwischenspeicher;
 }
 
+// --- Kontingente --------------------------------------------------------------
+
+/** Zehn Fragen je Nutzer im gleitenden Minutenfenster. */
+const KURZ_LIMIT = 10;
+const FENSTER_MS = 60_000;
 /**
- * Kurzfenster je Nutzer.
+ * 36 Stunden: laenger als ein Tag, damit ein Zeitzonenversatz den Zaehler
+ * nicht vorzeitig verwirft.
+ */
+const TAG_LEBENSDAUER_SEKUNDEN = 36 * 60 * 60;
+
+/**
+ * Nutzerschranken in einem Skript: Kurzfenster und Tageskontingent.
  *
  * Gleitendes Fenster statt Token-Bucket: Wer zehn Fragen in einer Sekunde
  * abschickt, soll nicht neunzig Sekunden warten, sondern gleichmaessig
- * gebremst werden.
+ * gebremst werden. Das vorherige Fenster zaehlt anteilig mit, gewichtet nach
+ * dem Rest des aktuellen Fensters.
+ *
+ * KEYS[1] aktuelles Kurzfenster, KEYS[2] vorheriges, KEYS[3] Tageszaehler.
+ * ARGV[1] Kurzlimit, ARGV[2] Fensterlaenge ms, ARGV[3] Zeitpunkt ms,
+ * ARGV[4] Tageslimit, ARGV[5] Lebensdauer des Tageszaehlers in Sekunden.
+ *
+ * Rueckgabe: {1, tagesstand} bei Zulassung; {0, resetMs}, wenn das
+ * Kurzfenster voll ist; {-1, tagesstand}, wenn das Tageskontingent erschoepft
+ * ist. Zaehler werden nur bei Zulassung erhoeht: Eine abgewiesene Frage kostet
+ * nichts.
  */
-let kurzfensterZwischenspeicher: Ratelimit | null = null;
+export const NUTZER_KONTINGENT_SCRIPT = `
+local fenster = tonumber(ARGV[2]); local jetzt = tonumber(ARGV[3])
+local vergangen = jetzt % fenster
+local gewicht = (fenster - vergangen) / fenster
+local stand = tonumber(redis.call('GET', KEYS[2]) or '0') * gewicht + tonumber(redis.call('GET', KEYS[1]) or '0')
+if stand >= tonumber(ARGV[1]) then return {0, jetzt - vergangen + fenster} end
+local tag = tonumber(redis.call('GET', KEYS[3]) or '0')
+if tag >= tonumber(ARGV[4]) then return {-1, tag} end
+redis.call('INCR', KEYS[1]); redis.call('PEXPIRE', KEYS[1], fenster * 2)
+tag = redis.call('INCR', KEYS[3])
+if tag == 1 then redis.call('EXPIRE', KEYS[3], tonumber(ARGV[5])) end
+return {1, tag}`;
 
-function getKurzfenster(): Ratelimit {
-  kurzfensterZwischenspeicher ??= new Ratelimit({
-    redis: getRedis(),
-    limiter: Ratelimit.slidingWindow(10, "60 s"),
-    prefix: "wa:kurz",
-    // Zaehlt im Hintergrund weiter, ohne die Antwort aufzuhalten.
-    analytics: false,
-  });
-  return kurzfensterZwischenspeicher;
+/**
+ * Globale Notbremse, gleitendes Fenster ueber alle Nutzer. Ein eigenes
+ * Skript, weil ihre Schluessel nicht im Hash-Slot eines Nutzers liegen
+ * koennen. KEYS[1] aktuelles Fenster, KEYS[2] vorheriges; ARGV[1] Limit,
+ * ARGV[2] Fensterlaenge ms, ARGV[3] Zeitpunkt ms.
+ * Rueckgabe: {1, 0} bei Zulassung, {0, resetMs} sonst.
+ */
+export const GLOBAL_KONTINGENT_SCRIPT = `
+local fenster = tonumber(ARGV[2]); local jetzt = tonumber(ARGV[3])
+local vergangen = jetzt % fenster
+local gewicht = (fenster - vergangen) / fenster
+local stand = tonumber(redis.call('GET', KEYS[2]) or '0') * gewicht + tonumber(redis.call('GET', KEYS[1]) or '0')
+if stand >= tonumber(ARGV[1]) then return {0, jetzt - vergangen + fenster} end
+redis.call('INCR', KEYS[1]); redis.call('PEXPIRE', KEYS[1], fenster * 2)
+return {1, 0}`;
+
+function globalesLimit(): number {
+  const obergrenze = Number(optionalEnv("GLOBAL_QUESTIONS_PER_MINUTE") ?? "5000");
+  return Number.isFinite(obergrenze) && obergrenze > 0 ? obergrenze : 5000;
 }
 
-let globalZwischenspeicher: Ratelimit | null = null;
-
-function getGlobal(): Ratelimit {
-  if (!globalZwischenspeicher) {
-    const obergrenze = Number(optionalEnv("GLOBAL_QUESTIONS_PER_MINUTE") ?? "5000");
-    globalZwischenspeicher = new Ratelimit({
-      redis: getRedis(),
-      limiter: Ratelimit.slidingWindow(
-        Number.isFinite(obergrenze) && obergrenze > 0 ? obergrenze : 5000,
-        "60 s",
-      ),
-      prefix: "wa:global",
-      analytics: false,
-    });
-  }
-  return globalZwischenspeicher;
+/** Aktuelles und vorheriges Fenster eines gleitenden Zaehlers. */
+export function fensterSchluessel(praefix: string, jetzt: number): [string, string] {
+  const fenster = Math.floor(jetzt / FENSTER_MS);
+  return [`${praefix}:${fenster}`, `${praefix}:${fenster - 1}`];
 }
+
+/**
+ * Tageszaehler eines Nutzers. Der Hash-Tag haelt ihn im selben Slot wie seine
+ * Kurzfenster, damit ein Skript beide anfassen darf.
+ */
+export function tagesSchluessel(userId: string, tag = tagesschluessel()): string {
+  return `wa:tag:{${userId}}:${tag}`;
+}
+
+type Skriptergebnis = [number, number];
 
 /**
  * Prueft alle drei Schranken und erhoeht den Tageszaehler.
  *
- * Reihenfolge mit Absicht: erst das billige Kurzfenster, dann die globale
- * Bremse, zuletzt das Tageskontingent. Der Tageszaehler wird nur erhoeht, wenn
- * die Frage tatsaechlich gestellt werden darf — sonst wuerde eine abgewiesene
- * Anfrage Kontingent verbrauchen.
+ * Reihenfolge der Auswertung mit Absicht: erst das Kurzfenster, dann das
+ * Tageskontingent, zuletzt die globale Bremse. Die Skripte laufen in einer
+ * Pipeline und zaehlen unabhaengig voneinander; was ein Skript gezaehlt hat,
+ * obwohl das andere ablehnt, wird zurueckgegeben, denn die Frage wird nicht
+ * gestellt.
  */
 export async function pruefeFragekontingent(
   userId: string,
   maxProTag: number,
 ): Promise<{ verbraucht: number; grenze: number }> {
-  const kurz = await getKurzfenster().limit(userId);
-  if (!kurz.success) {
-    throw new RateLimitError(sekundenBis(kurz.reset));
-  }
-
-  const global = await getGlobal().limit("alle");
-  if (!global.success) {
-    throw new RateLimitError(sekundenBis(global.reset));
-  }
-
-  const schluessel = `wa:tag:${userId}:${tagesschluessel()}`;
   const redis = getRedis();
+  const jetzt = Date.now();
+  const [kurzAktuell, kurzVorher] = fensterSchluessel(`wa:kurz:{${userId}}`, jetzt);
+  const [globalAktuell, globalVorher] = fensterSchluessel("wa:global:{alle}", jetzt);
+  const tag = tagesSchluessel(userId);
 
-  const verbraucht = await redis.incr(schluessel);
+  const pipeline = redis.pipeline();
+  pipeline.eval(
+    NUTZER_KONTINGENT_SCRIPT,
+    [kurzAktuell, kurzVorher, tag],
+    [KURZ_LIMIT, FENSTER_MS, jetzt, maxProTag, TAG_LEBENSDAUER_SEKUNDEN],
+  );
+  pipeline.eval(GLOBAL_KONTINGENT_SCRIPT, [globalAktuell, globalVorher], [globalesLimit(), FENSTER_MS, jetzt]);
+  const [nutzer, global] = await pipeline.exec<[Skriptergebnis, Skriptergebnis]>();
 
-  // Ablauf nur beim ersten Zaehlerstand setzen. Bei jedem Aufruf neu gesetzt
-  // wuerde das Fenster mitwandern und der Zaehler nie zurueckgehen.
-  if (verbraucht === 1) {
-    // 36 Stunden: laenger als ein Tag, damit ein Zeitzonenversatz den Zaehler
-    // nicht vorzeitig verwirft.
-    await redis.expire(schluessel, 36 * 60 * 60);
-  }
-
-  if (verbraucht > maxProTag) {
+  if (nutzer[0] !== 1) {
+    if (global[0] === 1) await redis.decr(globalAktuell).catch(() => undefined);
+    if (nutzer[0] === 0) throw new RateLimitError(sekundenBis(nutzer[1]));
     throw new QuotaError(
       `Ihr Tageskontingent von ${maxProTag} Fragen ist erschoepft. ` +
         `Morgen steht es wieder zur Verfuegung; fuer mehr braucht es einen hoeheren Plan.`,
-      verbraucht - 1,
+      nutzer[1],
       maxProTag,
     );
   }
 
-  return { verbraucht, grenze: maxProTag };
+  if (global[0] !== 1) {
+    await redis.pipeline().decr(kurzAktuell).decr(tag).exec().catch(() => undefined);
+    throw new RateLimitError(sekundenBis(global[1]));
+  }
+
+  return { verbraucht: nutzer[1], grenze: maxProTag };
 }
 
 /**
@@ -136,7 +179,7 @@ export async function pruefeFragekontingent(
  */
 export async function gibFrageZurueck(userId: string): Promise<void> {
   try {
-    await getRedis().decr(`wa:tag:${userId}:${tagesschluessel()}`);
+    await getRedis().decr(tagesSchluessel(userId));
   } catch {
     // Ein misslungener Rueckgabeversuch darf die Fehlerbehandlung, in der er
     // steckt, nicht ihrerseits zum Scheitern bringen.
@@ -146,7 +189,7 @@ export async function gibFrageZurueck(userId: string): Promise<void> {
 /** Aktueller Stand des Tageskontingents, ohne es zu erhoehen. */
 export async function leseTagesstand(userId: string): Promise<number> {
   try {
-    const wert = await getRedis().get<number>(`wa:tag:${userId}:${tagesschluessel()}`);
+    const wert = await getRedis().get<number>(tagesSchluessel(userId));
     return typeof wert === "number" ? wert : 0;
   } catch {
     return 0;

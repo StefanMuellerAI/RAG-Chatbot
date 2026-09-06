@@ -50,15 +50,28 @@ export async function ladeSammlungsStatus(userId: string): Promise<Record<string
   return Object.fromEntries(rows.map(({ collectionId, ...status }) => [collectionId, status]));
 }
 
-export async function ladeSammlungen(userId: string): Promise<SammlungMitKlasse[]> {
-  const zeilen = await getDb()
+/**
+ * Die Sammlungen eines Nutzers samt Groessenklasse als Abfrage — ohne sie
+ * auszufuehren. So kann der Chat-Vorlauf sie in einem Batch mit den uebrigen
+ * Lesevorgaengen schicken, statt einen eigenen Roundtrip zu bezahlen.
+ */
+export function sammlungenAbfrage(userId: string) {
+  return getDb()
     .select({ sammlung: collections, sizeClass: sizeClasses })
     .from(collections)
     .innerJoin(sizeClasses, eq(collections.sizeClassId, sizeClasses.id))
     .where(eq(collections.userId, userId))
     .orderBy(asc(collections.name));
+}
 
+export function zuSammlungen(
+  zeilen: { sammlung: Collection; sizeClass: SizeClass }[],
+): SammlungMitKlasse[] {
   return zeilen.map((zeile) => ({ ...zeile.sammlung, sizeClass: zeile.sizeClass }));
+}
+
+export async function ladeSammlungen(userId: string): Promise<SammlungMitKlasse[]> {
+  return zuSammlungen(await sammlungenAbfrage(userId));
 }
 
 export async function ladeSammlung(

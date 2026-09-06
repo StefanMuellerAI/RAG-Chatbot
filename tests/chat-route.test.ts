@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  requireKontext: vi.fn(), existingRun: vi.fn(), beginGeneration: vi.fn(),
+  requireKontext: vi.fn(), existingRun: vi.fn(), vorlauf: vi.fn(), previous: vi.fn(),
+  plane: vi.fn(), schreibeGeneration: vi.fn(),
   generationContext: vi.fn(), saveGeneration: vi.fn(), collections: vi.fn(),
   acquireCapacity: vi.fn(), reserveModelCall: vi.fn(), releaseCapacity: vi.fn(),
   lock: vi.fn(), unlock: vi.fn(), quota: vi.fn(), refund: vi.fn(), usage: vi.fn(),
@@ -15,10 +16,9 @@ vi.mock("@/lib/auth/user", () => ({
   NotAdminError: class NotAdminError extends Error {},
 }));
 vi.mock("@/lib/chat-generation", () => ({
-  existingRun: mocks.existingRun, beginGeneration: mocks.beginGeneration,
-  generationContext: mocks.generationContext, saveGeneration: mocks.saveGeneration,
+  existingRun: mocks.existingRun, ladeVorlauf: mocks.vorlauf, planeGeneration: mocks.plane,
+  schreibeGeneration: mocks.schreibeGeneration, saveGeneration: mocks.saveGeneration,
 }));
-vi.mock("@/lib/collections", () => ({ ladeSammlungen: mocks.collections }));
 vi.mock("@/lib/modellkatalog", () => ({ findeModell: mocks.modelConfig }));
 vi.mock("@/lib/models", () => ({ modellFuerWerkzeuge: (model: string) => model }));
 vi.mock("@/lib/capacity", () => ({
@@ -142,7 +142,14 @@ beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => {});
   mocks.requireKontext.mockResolvedValue({ userId: "user-a", plan: { modelId: "test/model", maxQuestionsPerDay: 100 } });
   mocks.existingRun.mockResolvedValue(null);
-  mocks.beginGeneration.mockResolvedValue(run);
+  // Der Vorlauf kommt aus einem Batch; die Einzelteile bleiben je Test einstellbar.
+  mocks.previous.mockReturnValue(null);
+  mocks.vorlauf.mockImplementation(async () => ({
+    previous: mocks.previous(), history: await mocks.generationContext(), sammlungen: await mocks.collections(),
+  }));
+  mocks.plane.mockImplementation((_userId: string, _request: unknown, previous: { run: typeof run } | null) =>
+    ({ run: previous?.run ?? run, neu: !previous }));
+  mocks.schreibeGeneration.mockResolvedValue(true);
   mocks.generationContext.mockResolvedValue([{ role: "user", content: body.question }]);
   mocks.saveGeneration.mockResolvedValue(undefined);
   mocks.collections.mockResolvedValue([collection]);
@@ -174,8 +181,8 @@ describe("Chat-API: Autorisierung und stabile Anfragekennungen", () => {
   it("weist unangemeldete Anfragen vor jeder weiteren Arbeit ab", async () => {
     mocks.requireKontext.mockRejectedValue(new NotSignedInError());
     expect((await POST(request())).status).toBe(401);
-    expect(mocks.existingRun).not.toHaveBeenCalled();
-    expect(mocks.beginGeneration).not.toHaveBeenCalled();
+    expect(mocks.vorlauf).not.toHaveBeenCalled();
+    expect(mocks.schreibeGeneration).not.toHaveBeenCalled();
     expect(mocks.quota).not.toHaveBeenCalled();
   });
 
@@ -185,52 +192,61 @@ describe("Chat-API: Autorisierung und stabile Anfragekennungen", () => {
     { ...body, collectionIds: ["invalid"] },
   ])("weist ungueltige Eingaben vor Persistenz und Kontingent ab", async (input) => {
     expect((await POST(request(input))).status).toBe(400);
-    expect(mocks.beginGeneration).not.toHaveBeenCalled();
+    expect(mocks.schreibeGeneration).not.toHaveBeenCalled();
     expect(mocks.quota).not.toHaveBeenCalled();
   });
 
-  it("gibt einen fremden Chat nicht frei", async () => {
-    mocks.existingRun.mockRejectedValue(new NotFoundError("Der Chat"));
-    expect((await POST(request())).status).toBe(404);
-    expect(mocks.lock).not.toHaveBeenCalled();
+  it("gibt einen fremden Chat nicht frei und laesst die parallel genommene Sperre nicht liegen", async () => {
+    mocks.vorlauf.mockRejectedValue(new NotFoundError("Der Chat"));
+    const output = await events(await POST(request()));
+    expect(output[0]).toMatchObject({ type: "status", phase: "queued" });
+    expect(output.find((event) => event.type === "error")).toMatchObject({
+      reason: "nicht_gefunden", message: expect.stringContaining("nicht gefunden"),
+    });
+    expect(output.at(-1)).toMatchObject({ type: "done", status: "failed", modelInvoked: false });
+    expect(mocks.schreibeGeneration).not.toHaveBeenCalled();
+    expect(mocks.quota).not.toHaveBeenCalled();
     expect(mocks.streamText).not.toHaveBeenCalled();
+    expect(mocks.unlock).toHaveBeenCalledOnce();
   });
 
   it("liefert eine abgeschlossene Anfrage ohne neue Modellarbeit und Kontingent zurueck", async () => {
-    mocks.existingRun.mockResolvedValue({
+    mocks.previous.mockReturnValue({
       run: { ...run, status: "completed" },
       answer: { content: "Gespeicherte Antwort", sources: [hit], steps: [] },
     });
     const output = await events(await POST(request()));
     expect(output).toContainEqual({ type: "text", delta: "Gespeicherte Antwort" });
     expect(output.at(-1)).toMatchObject({ type: "done", status: "completed", modelInvoked: false, replayed: true });
-    expect(mocks.beginGeneration).not.toHaveBeenCalled();
+    expect(mocks.schreibeGeneration).not.toHaveBeenCalled();
     expect(mocks.quota).not.toHaveBeenCalled();
     expect(mocks.model).not.toHaveBeenCalled();
-    expect(mocks.lock).not.toHaveBeenCalled();
+    // Die Sperre wird parallel zum Lesen genommen und danach wieder freigegeben.
+    expect(mocks.unlock).toHaveBeenCalledOnce();
   });
 
-  it("weist eine gleichzeitige Anfrage im selben Chat mit 409 ab", async () => {
+  it("weist eine gleichzeitige Anfrage im selben Chat als Fehler mit Wartezeit ab", async () => {
     mocks.lock.mockResolvedValue(false);
-    const response = await POST(request());
-    expect(response.status).toBe(409);
-    expect(response.headers.get("Retry-After")).toBe("3");
-    expect((await response.json()).code).toBe("bereits_aktiv");
-    expect(mocks.beginGeneration).not.toHaveBeenCalled();
+    const output = await events(await POST(request()));
+    expect(output.find((event) => event.type === "error")).toMatchObject({ reason: "bereits_aktiv", retryAfter: 3 });
+    expect(output.some((event) => event.type === "start")).toBe(false);
+    expect(output.at(-1)).toMatchObject({ type: "done", status: "failed", modelInvoked: false });
+    expect(mocks.schreibeGeneration).not.toHaveBeenCalled();
     expect(mocks.quota).not.toHaveBeenCalled();
     expect(mocks.unlock).not.toHaveBeenCalled();
   });
 
-  it("wiederholt kein Modell, wenn die erste Anfrage zwischen Lesen und Sperrerwerb fertig wird", async () => {
-    mocks.existingRun.mockResolvedValueOnce(null).mockResolvedValueOnce({
+  it("wiederholt kein Modell, wenn die erste Anfrage zwischen Lesen und Schreiben fertig wird", async () => {
+    mocks.schreibeGeneration.mockResolvedValue(false);
+    mocks.existingRun.mockResolvedValue({
       run: { ...run, status: "completed" },
       answer: { content: "Inzwischen gespeicherte Antwort", sources: [hit], steps: [] },
     });
-    mocks.beginGeneration.mockResolvedValue({ ...run, status: "completed" });
     const output = await events(await POST(request()));
     expect(output).toContainEqual({ type: "text", delta: "Inzwischen gespeicherte Antwort" });
     expect(output.at(-1)).toMatchObject({ type: "done", status: "completed", modelInvoked: false, replayed: true });
-    expect(mocks.quota).not.toHaveBeenCalled();
+    // Das Kontingent lief parallel zum Schreiben und geht zurueck: es gab keine neue Antwort.
+    expect(mocks.refund).toHaveBeenCalledOnce();
     expect(mocks.model).not.toHaveBeenCalled();
     expect(mocks.saveGeneration).not.toHaveBeenCalled();
     expect(mocks.unlock).toHaveBeenCalledOnce();
@@ -243,7 +259,7 @@ describe("Chat-API: Stream, Speichern und Fehler", () => {
     const error = new ResourceBusyError();
     mocks.parts = [{ type: "tool-error", toolName: "cypher_ausfuehren", input: { cypher: "MATCH (n) RETURN n" }, error }];
     const output = await events(await POST(request()));
-    expect(output).toContainEqual({ type: "error", message: error.message, code: "failed", retryAfter: 5 });
+    expect(output.find((event) => event.type === "error")).toEqual({ type: "error", message: error.message, code: "failed", reason: "sammlung_belegt", retryAfter: 5 });
     expect(JSON.stringify(output)).not.toContain("Zu viele Anfragen");
     expect(output.at(-1)).toMatchObject({ type: "done", status: "failed" });
     expect(mocks.streamText).toHaveBeenCalledOnce();
@@ -257,7 +273,8 @@ describe("Chat-API: Stream, Speichern und Fehler", () => {
     expect(output).toContainEqual(expect.objectContaining({ type: "error", retryAfter: 30, message: expect.stringContaining("Zu viele Anfragen") }));
     expect(output.at(-1)).toMatchObject({ type: "done", status: "failed", modelInvoked: false });
     expect(mocks.streamText).not.toHaveBeenCalled();
-    expect(mocks.acquireCapacity).not.toHaveBeenCalled();
+    // Die Zulassung laeuft parallel zum Kontingent und wird sofort wieder freigegeben.
+    expect(mocks.releaseCapacity).toHaveBeenCalledOnce();
     expect(mocks.refund).not.toHaveBeenCalled();
   });
 
@@ -277,7 +294,8 @@ describe("Chat-API: Stream, Speichern und Fehler", () => {
     const output = await events(await POST(request()), (event) => {
       if (event.type === "done") expect(saved).toBe(true);
     });
-    expect(output[0]).toMatchObject({ type: "start", requestId: REQUEST_ID, userMessageId: USER_MESSAGE_ID, assistantMessageId: ASSISTANT_MESSAGE_ID });
+    expect(output[0]).toMatchObject({ type: "status", phase: "queued" });
+    expect(output.find((event) => event.type === "start")).toMatchObject({ requestId: REQUEST_ID, userMessageId: USER_MESSAGE_ID, assistantMessageId: ASSISTANT_MESSAGE_ID });
     expect(output.at(-1)).toMatchObject({ type: "done", status: "completed", modelInvoked: true, usage: { inputTokens: 100, outputTokens: 10 } });
     expect(mocks.saveGeneration).toHaveBeenLastCalledWith(run, expect.objectContaining({ content: "Eine belegte Antwort.", status: "completed", sources: [hit] }));
     expect(mocks.releaseCapacity).toHaveBeenCalledOnce();
@@ -325,8 +343,21 @@ describe("Chat-API: Stream, Speichern und Fehler", () => {
   });
 
   it("speichert beim Schliessen des Empfaengerstreams den Abbruch und gibt Sperren frei", async () => {
+    // Das Modell wartet, bis der Empfaenger weg ist: erst dann darf die Generierung weiterlaufen.
+    let freigeben!: () => void;
+    const tor = new Promise<void>((resolve) => { freigeben = resolve; });
+    mocks.model.mockImplementation(async () => { await tor; return {}; });
     const response = await POST(request());
-    await response.body?.cancel();
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let gelesen = "";
+    while (!gelesen.includes('"type":"start"')) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      gelesen += decoder.decode(value, { stream: true });
+    }
+    await reader.cancel();
+    freigeben();
     await vi.waitFor(() => {
       expect(mocks.saveGeneration).toHaveBeenLastCalledWith(run, expect.objectContaining({ status: "aborted" }));
       expect(mocks.unlock).toHaveBeenCalledOnce();
