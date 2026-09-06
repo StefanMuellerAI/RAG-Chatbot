@@ -2,7 +2,7 @@ import { tool } from "ai";
 import { z } from "zod";
 import { KIND_LABEL, type CollectionKind } from "./collection-kinds";
 import type { SammlungMitKlasse } from "./collections";
-import { fehlerMeldung, RateLimitError, ToolUnavailableError } from "./errors";
+import { fehlerMeldung, RateLimitError, ResourceBusyError, ToolUnavailableError } from "./errors";
 import { MissingConfigError } from "./env";
 import { runReadOnlyCypher } from "./graphstore";
 import { runSql } from "./sql-executor";
@@ -166,6 +166,9 @@ export function baueSqlWerkzeug(userId: string, sammlungen: SammlungMitKlasse[],
  */
 export function baueCypherWerkzeug(sammlungen: SammlungMitKlasse[], options: ToolOptions = {}) {
   const fest = festeSammlung(sammlungen);
+  // One model step can execute several queries in parallel. Queries for the
+  // same collection must take turns before acquiring capacity or the Redis lock.
+  const pending = new Map<string, Promise<void>>();
 
   return tool({
     description:
@@ -187,7 +190,7 @@ export function baueCypherWerkzeug(sammlungen: SammlungMitKlasse[], options: Too
       try {
         options.signal?.throwIfAborted();
         options.onStatus?.("graph", `Beziehungen in „${wahl.sammlung.name}“ werden ausgewertet …`);
-        const ergebnis = await withCapacity("graph", async () => {
+        const ergebnis = await withCollectionTurn(pending, wahl.sammlung.id, options.signal, () => withCapacity("graph", async () => {
           // Rebuilds clear the graph before replaying scripts. A short exclusive
           // collection lock prevents chat answers from using that partial state.
           const key = sperrSchluessel(wahl.sammlung.id);
@@ -199,19 +202,19 @@ export function baueCypherWerkzeug(sammlungen: SammlungMitKlasse[], options: Too
             if (error instanceof MissingConfigError) throw error;
             throw new ToolUnavailableError("Die Graph-Sperre ist derzeit nicht erreichbar. Bitte erneut versuchen.");
           }
-          if (!acquired) throw new RateLimitError(5);
+          if (!acquired) throw new ResourceBusyError();
           try {
             options.signal?.throwIfAborted();
             // Keep room for FalkorDB's 10-second read timeout after Redis latency.
-            if (Date.now() + 15_000 >= expiresAt) throw new RateLimitError(5);
+            if (Date.now() + 15_000 >= expiresAt) throw new ResourceBusyError("Die Abfrage konnte nicht rechtzeitig gestartet werden. Bitte erneut versuchen.");
             const result = await runReadOnlyCypher(wahl.sammlung.id, cypher);
             options.signal?.throwIfAborted();
-            if (Date.now() >= expiresAt) throw new RateLimitError(5);
+            if (Date.now() >= expiresAt) throw new ResourceBusyError("Die Abfrage hat zu lange gedauert. Bitte erneut versuchen.");
             return result;
           } finally { await gibSperreFrei(key, owner); }
         }, {
           signal: options.signal, onWait: () => options.onStatus?.("queued", "Warte auf freie Graphkapazitaet …"),
-        });
+        }));
         options.signal?.throwIfAborted();
         const { rows, capped } = capRows(ergebnis.rows, 6000);
         return {
@@ -223,11 +226,40 @@ export function baueCypherWerkzeug(sammlungen: SammlungMitKlasse[], options: Too
           truncated: ergebnis.truncated || capped,
         };
       } catch (error) {
-        if (options.signal?.aborted || error instanceof RateLimitError || error instanceof ToolUnavailableError || error instanceof MissingConfigError) throw error;
+        if (options.signal?.aborted || error instanceof RateLimitError || error instanceof ResourceBusyError || error instanceof ToolUnavailableError || error instanceof MissingConfigError) throw error;
         return { ok: false, error: fehlerMeldung(error) };
       }
     },
   });
+}
+
+async function withCollectionTurn<T>(
+  pending: Map<string, Promise<void>>,
+  id: string,
+  signal: AbortSignal | undefined,
+  work: () => Promise<T>,
+): Promise<T> {
+  signal?.throwIfAborted();
+  const previous = pending.get(id) ?? Promise.resolve();
+  let release!: () => void;
+  const finished = new Promise<void>(resolve => { release = resolve; });
+  // Keep an aborted waiter in the chain until its predecessor has finished.
+  const tail = previous.then(() => finished);
+  pending.set(id, tail);
+  let stop: (() => void) | undefined;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      stop = () => reject(signal?.reason);
+      signal?.addEventListener("abort", stop, { once: true });
+      previous.then(resolve);
+    });
+    signal?.throwIfAborted();
+    return await work();
+  } finally {
+    if (stop) signal?.removeEventListener("abort", stop);
+    release();
+    void tail.then(() => { if (pending.get(id) === tail) pending.delete(id); });
+  }
 }
 
 export function isToolName(wert: unknown): wert is ToolName {

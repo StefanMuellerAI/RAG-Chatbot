@@ -7,7 +7,7 @@ import { acquireCapacity, reserveModelCall, withCapacity } from "@/lib/capacity"
 import { AnswerBudget, chatRequestSchema, tokenBound, type GenerationStatus } from "@/lib/chat-contract";
 import { beginGeneration, existingRun, generationContext, saveGeneration } from "@/lib/chat-generation";
 import { ladeSammlungen } from "@/lib/collections";
-import { RateLimitError, ToolUnavailableError, ValidationError } from "@/lib/errors";
+import { RateLimitError, ResourceBusyError, ToolUnavailableError, ValidationError } from "@/lib/errors";
 import { MissingConfigError } from "@/lib/env";
 import { findeModell } from "@/lib/modellkatalog";
 import { modellFuerWerkzeuge } from "@/lib/models";
@@ -181,7 +181,7 @@ export async function POST(request: Request) {
                   else if (part.type === "tool-result" || part.type === "tool-error") {
                     // The SDK turns a rejected execute() into tool-error. Overload
                     // must still end the run, not trigger more model/tool attempts.
-                    if (part.type === "tool-error" && (part.error instanceof RateLimitError
+                    if (part.type === "tool-error" && (part.error instanceof RateLimitError || part.error instanceof ResourceBusyError
                       || part.error instanceof ToolUnavailableError || part.error instanceof MissingConfigError)) throw part.error;
                     const step = toStep(sammlungen, part.toolName, part.input,
                       part.type === "tool-result" ? part.output : undefined,
@@ -207,7 +207,7 @@ export async function POST(request: Request) {
           status = signal.aborted && !deadline.aborted ? "aborted" : "failed";
           const message = status === "aborted" ? "Die Antwort wurde gestoppt und ist unvollstaendig." : readableError(error, deadline.aborted);
           if (!content) content = message;
-          send({ type: "error", message, code: status, ...(error instanceof RateLimitError ? { retryAfter: error.retryAfterSeconds } : {}) });
+          send({ type: "error", message, code: status, ...(error instanceof RateLimitError || error instanceof ResourceBusyError ? { retryAfter: error.retryAfterSeconds } : {}) });
         } finally {
           try { phase("saving", "Antwort wird gespeichert …"); await persist(true); }
           catch {
@@ -238,7 +238,7 @@ export async function POST(request: Request) {
 
 function readableError(error: unknown, timedOut: boolean): string {
   if (timedOut) return "Die Antwort hat zu lange gedauert und wurde beendet. Bitte die Frage eingrenzen oder erneut versuchen.";
-  if (error instanceof RateLimitError || error instanceof ValidationError) return error.message;
+  if (error instanceof RateLimitError || error instanceof ResourceBusyError || error instanceof ValidationError) return error.message;
   if (error instanceof ToolUnavailableError) return "Der Abfragedienst ist derzeit nicht verfuegbar. Bitte in einem Moment erneut versuchen.";
   if (error instanceof MissingConfigError) return "Ein benoetigter Dienst ist noch nicht eingerichtet. Bitte die Administration informieren.";
   const status = (error as { statusCode?: number })?.statusCode;

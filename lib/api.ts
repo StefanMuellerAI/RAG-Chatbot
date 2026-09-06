@@ -1,6 +1,6 @@
 import { NotAdminError, NotSignedInError } from "./auth/user";
 import { MissingConfigError } from "./env";
-import { NotFoundError, QuotaError, RateLimitError, ValidationError } from "./errors";
+import { NotFoundError, QuotaError, RateLimitError, ResourceBusyError, ValidationError } from "./errors";
 
 export type Fehlerbild = {
   status: number;
@@ -83,6 +83,14 @@ export function beschreibeFehler(error: unknown): Fehlerbild {
         current: error.current,
         limit: error.limit,
       },
+    };
+  }
+
+  if (error instanceof ResourceBusyError) {
+    return {
+      status: 409,
+      body: { error: error.message, code: "sammlung_belegt" },
+      headers: { "Retry-After": String(error.retryAfterSeconds) },
     };
   }
 

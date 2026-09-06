@@ -47,7 +47,7 @@ vi.mock("ai", () => ({ streamText: mocks.streamText, isStepCount: (count: number
 
 import { POST } from "@/app/api/chat/route";
 import { NotSignedInError } from "@/lib/auth/user";
-import { NotFoundError, RateLimitError } from "@/lib/errors";
+import { NotFoundError, RateLimitError, ResourceBusyError } from "@/lib/errors";
 
 const CHAT_ID = "11111111-1111-4111-8111-111111111111";
 const REQUEST_ID = "22222222-2222-4222-8222-222222222222";
@@ -197,6 +197,29 @@ describe("Chat-API: Autorisierung und stabile Anfragekennungen", () => {
 });
 
 describe("Chat-API: Stream, Speichern und Fehler", () => {
+  it("meldet eine belegte Graphsammlung ohne dem Nutzer zu viele Anfragen vorzuwerfen", async () => {
+    mocks.collections.mockResolvedValue([{ ...collection, kind: "graph" }]);
+    const error = new ResourceBusyError();
+    mocks.parts = [{ type: "tool-error", toolName: "cypher_ausfuehren", input: { cypher: "MATCH (n) RETURN n" }, error }];
+    const output = await events(await POST(request()));
+    expect(output).toContainEqual({ type: "error", message: error.message, code: "failed", retryAfter: 5 });
+    expect(JSON.stringify(output)).not.toContain("Zu viele Anfragen");
+    expect(output.at(-1)).toMatchObject({ type: "done", status: "failed" });
+    expect(mocks.streamText).toHaveBeenCalledOnce();
+    expect(mocks.refund).toHaveBeenCalledOnce();
+    expect(mocks.unlock).toHaveBeenCalledOnce();
+  });
+
+  it("behaelt echte Nutzerlimits bei und startet dann weder Modell noch Werkzeuge", async () => {
+    mocks.quota.mockRejectedValue(new RateLimitError(30));
+    const output = await events(await POST(request()));
+    expect(output).toContainEqual(expect.objectContaining({ type: "error", retryAfter: 30, message: expect.stringContaining("Zu viele Anfragen") }));
+    expect(output.at(-1)).toMatchObject({ type: "done", status: "failed", modelInvoked: false });
+    expect(mocks.streamText).not.toHaveBeenCalled();
+    expect(mocks.acquireCapacity).not.toHaveBeenCalled();
+    expect(mocks.refund).not.toHaveBeenCalled();
+  });
+
   it("beendet den Stream bei einer vom SDK umgewandelten Werkzeug-Ueberlastung", async () => {
     mocks.collections.mockResolvedValue([{ ...collection, kind: "sql" }]);
     mocks.parts = [{ type: "tool-error", toolName: "sql_ausfuehren", input: { sql: "SELECT 1" }, error: new RateLimitError(3) }];

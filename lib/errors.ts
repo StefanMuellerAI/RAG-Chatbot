@@ -33,6 +33,16 @@ export class RateLimitError extends Error {
   }
 }
 
+/** Eine Sammlung wird gerade verwendet oder veraendert; kein Nutzerlimit. */
+export class ResourceBusyError extends Error {
+  readonly retryAfterSeconds = 5;
+
+  constructor(message = "Die Sammlung wird gerade verarbeitet. Bitte in wenigen Sekunden erneut versuchen.") {
+    super(message);
+    this.name = "ResourceBusyError";
+  }
+}
+
 /** Infrastructure failure: correcting a generated query cannot fix this. */
 export class ToolUnavailableError extends Error {
   constructor(message = "Der Abfragedienst ist derzeit nicht erreichbar. Bitte erneut versuchen.") {

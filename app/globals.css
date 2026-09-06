@@ -1538,7 +1538,16 @@ fieldset.auswahl .feld-zusatz {
 .chat-status:not(:empty) { padding-bottom: 9px; }
 .chat-fehlermeldung { color: var(--rot-dunkel); font-size: 13px; padding-bottom: 8px; }
 .chat-nach-unten { display: block; margin: -28px auto 8px; position: relative; background: var(--weiss); border: 1px solid var(--grau-300); box-shadow: 0 2px 5px #0001; }
-.chat-wissensbasis { font-size: 13px; color: var(--grau-600); overflow-wrap: anywhere; }
+.chat-wissensbasis {
+  width: fit-content;
+  max-width: 100%;
+  margin-inline: auto;
+  padding-inline-start: 1.25em;
+  text-align: left;
+  font-size: 13px;
+  color: var(--grau-600);
+  overflow-wrap: anywhere;
+}
 .chat-vorschlaege { display: grid; gap: 8px; max-width: 580px; margin: 20px auto 0; text-align: left; }
 .chat-vorschlaege .knopf-schlicht { padding: 12px 14px; text-align: left; border: 1px solid var(--grau-300); background: var(--weiss); white-space: normal; }
 .nachricht-aktionen { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 10px; white-space: normal; }

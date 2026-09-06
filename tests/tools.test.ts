@@ -10,7 +10,9 @@ const speicher = vi.hoisted(() => ({
   bytes: null as Uint8Array | null,
   geladen: [] as { userId: string; collectionId: string }[],
   cypherCalls: [] as string[],
-  lock: vi.fn<(key: string, owner: string, seconds: number) => Promise<boolean>>(async () => true), unlock: vi.fn(async () => undefined),
+  cypherExecution: vi.fn<(id: string, cypher: string) => Promise<void>>(async () => undefined),
+  lock: vi.fn<(key: string, owner: string, seconds: number) => Promise<boolean>>(async () => true),
+  unlock: vi.fn<(key: string, owner: string) => Promise<void>>(async () => undefined),
 }));
 vi.mock("@/lib/ratelimit", () => ({ erwirbSperre: speicher.lock, gibSperreFrei: speicher.unlock, sperrSchluessel: (id: string) => `wa:write:${id}` }));
 
@@ -38,6 +40,7 @@ vi.mock("@/lib/sql-executor", () => ({
 vi.mock("@/lib/graphstore", () => ({
   runReadOnlyCypher: async (_id: string, cypher: string) => {
     speicher.cypherCalls.push(cypher);
+    await speicher.cypherExecution(_id, cypher);
     return {
       columns: ["p"],
       rows: [{ p: { type: "node", labels: ["Person"], properties: { name: "Anna" } } }],
@@ -48,7 +51,7 @@ vi.mock("@/lib/graphstore", () => ({
 }));
 
 import { newDatabase, replaceTable } from "@/lib/sqlstore";
-import { RateLimitError, ToolUnavailableError } from "@/lib/errors";
+import { ResourceBusyError, ToolUnavailableError } from "@/lib/errors";
 import {
   ERGEBNIS_MAX_ZEICHEN,
   baueCypherWerkzeug,
@@ -100,7 +103,30 @@ beforeAll(async () => {
   speicher.bytes = db.export();
   db.close();
 });
-beforeEach(() => { speicher.lock.mockReset().mockResolvedValue(true); speicher.unlock.mockClear(); });
+beforeEach(() => {
+  speicher.lock.mockReset().mockResolvedValue(true);
+  speicher.unlock.mockReset().mockResolvedValue(undefined);
+  speicher.cypherExecution.mockReset().mockResolvedValue(undefined);
+});
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function useExclusiveCollectionLocks() {
+  const owners = new Map<string, string>();
+  speicher.lock.mockImplementation(async (key, owner) => {
+    if (owners.has(key)) return false;
+    owners.set(key, owner);
+    return true;
+  });
+  speicher.unlock.mockImplementation(async (key: string, owner: string) => {
+    if (owners.get(key) === owner) owners.delete(key);
+  });
+  return owners;
+}
 
 describe("Allowlist", () => {
   it("lehnt fremde Sammlungs-IDs als Ergebnis ab, nicht als Ausnahme", async () => {
@@ -190,10 +216,132 @@ describe("Ausfuehrung", () => {
     expect(speicher.unlock).toHaveBeenCalledExactlyOnceWith("wa:write:c-graph", speicher.lock.mock.calls[0][1]);
   });
 
-  it("does not read a graph during an upload or rebuild and propagates backpressure", async () => {
+  it("serializes parallel tool calls to the same graph without rejecting its own request", async () => {
+    const owners = useExclusiveCollectionLocks();
+    const entered = deferred();
+    const gate = deferred();
+    let active = 0;
+    let maximumActive = 0;
+    speicher.cypherExecution.mockImplementation(async (_id, query) => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      try {
+        if (query === "MATCH (first) RETURN first") {
+          entered.resolve();
+          await gate.promise;
+        }
+      } finally { active -= 1; }
+    });
+    const cypher = ausfuehren(baueCypherWerkzeug([graph]));
+    const first = cypher({ cypher: "MATCH (first) RETURN first" });
+    await entered.promise;
+    const second = cypher({ cypher: "MATCH (second) RETURN second" });
+    const results = Promise.allSettled([first, second]);
+    // The first read remains in progress while the second invocation starts.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    gate.resolve();
+
+    expect(await results).toEqual([
+      { status: "fulfilled", value: expect.objectContaining({ ok: true }) },
+      { status: "fulfilled", value: expect.objectContaining({ ok: true }) },
+    ]);
+    expect(speicher.cypherExecution.mock.calls.map(([, query]) => query)).toEqual([
+      "MATCH (first) RETURN first", "MATCH (second) RETURN second",
+    ]);
+    expect(maximumActive).toBe(1);
+    expect(owners.size).toBe(0);
+  });
+
+  it("keeps independent graph collections concurrent", async () => {
+    const owners = useExclusiveCollectionLocks();
+    const otherGraph = beispielSammlung({ id: "c-other-graph", name: "Filme", kind: "graph" });
+    const gate = deferred();
+    let active = 0;
+    let maximumActive = 0;
+    speicher.cypherExecution.mockImplementation(async () => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      try { await gate.promise; } finally { active -= 1; }
+    });
+    const cypher = ausfuehren(baueCypherWerkzeug([graph, otherGraph]));
+    const results = Promise.allSettled([
+      cypher({ collectionId: graph.id, cypher: "MATCH (n) RETURN n" }),
+      cypher({ collectionId: otherGraph.id, cypher: "MATCH (n) RETURN n" }),
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    gate.resolve();
+
+    expect(await results).toEqual([
+      { status: "fulfilled", value: expect.objectContaining({ ok: true }) },
+      { status: "fulfilled", value: expect.objectContaining({ ok: true }) },
+    ]);
+    expect(maximumActive).toBe(2);
+    expect(owners.size).toBe(0);
+  });
+
+  it("releases the graph queue after a failed query so the next tool call can run", async () => {
+    const owners = useExclusiveCollectionLocks();
+    const entered = deferred();
+    const gate = deferred();
+    speicher.cypherExecution.mockImplementation(async (_id, query) => {
+      if (query === "MATCH (broken) RETURN broken") {
+        entered.resolve();
+        await gate.promise;
+        throw new Error("Invalid graph query");
+      }
+    });
+    const cypher = ausfuehren(baueCypherWerkzeug([graph]));
+    const first = cypher({ cypher: "MATCH (broken) RETURN broken" });
+    await entered.promise;
+    const second = cypher({ cypher: "MATCH (valid) RETURN valid" });
+    const results = Promise.allSettled([first, second]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    gate.resolve();
+
+    expect(await results).toEqual([
+      { status: "fulfilled", value: expect.objectContaining({ ok: false, error: "Invalid graph query" }) },
+      { status: "fulfilled", value: expect.objectContaining({ ok: true }) },
+    ]);
+    expect(speicher.cypherExecution).toHaveBeenCalledTimes(2);
+    expect(owners.size).toBe(0);
+  });
+
+  it("aborts a queued graph call without waiting for the active query to finish", async () => {
+    const owners = useExclusiveCollectionLocks();
+    const entered = deferred();
+    const gate = deferred();
+    const controller = new AbortController();
+    speicher.cypherExecution.mockImplementation(async () => {
+      entered.resolve();
+      await gate.promise;
+    });
+    const cypher = ausfuehren(baueCypherWerkzeug([graph], { signal: controller.signal }));
+    const first = cypher({ cypher: "MATCH (first) RETURN first" });
+    await entered.promise;
+    const second = cypher({ cypher: "MATCH (second) RETURN second" });
+    const results = Promise.allSettled([first, second]);
+    let secondFinished = false;
+    void second.then(() => { secondFinished = true; }, () => { secondFinished = true; });
+    controller.abort(new Error("Stopped by user"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const abortedWhileFirstStillRunning = secondFinished;
+    gate.resolve();
+
+    expect(await results).toEqual([
+      { status: "rejected", reason: expect.objectContaining({ message: "Stopped by user" }) },
+      { status: "rejected", reason: expect.objectContaining({ message: "Stopped by user" }) },
+    ]);
+    expect(abortedWhileFirstStillRunning).toBe(true);
+    expect(speicher.cypherExecution).toHaveBeenCalledTimes(1);
+    expect(owners.size).toBe(0);
+  });
+
+  it("does not read a graph during an upload or rebuild and reports collection contention", async () => {
     speicher.lock.mockResolvedValue(false);
     const before = speicher.cypherCalls.length;
-    await expect(ausfuehren(baueCypherWerkzeug([graph]))({ cypher: "MATCH (n) RETURN n" })).rejects.toBeInstanceOf(RateLimitError);
+    const result = ausfuehren(baueCypherWerkzeug([graph]))({ cypher: "MATCH (n) RETURN n" });
+    await expect(result).rejects.toBeInstanceOf(ResourceBusyError);
+    await expect(result).rejects.toMatchObject({ message: expect.stringContaining("Sammlung"), retryAfterSeconds: 5 });
     expect(speicher.cypherCalls).toHaveLength(before);
     expect(speicher.unlock).not.toHaveBeenCalled();
   });
