@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { isStepCount, streamText, type ModelMessage, type ToolSet } from "ai";
+import { isStepCount, streamText, type ModelMessage, type SystemModelMessage, type ToolSet } from "ai";
 import { beschreibeFehler, errorResponse, readJson } from "@/lib/api";
 import {
   Fundstellensammler, MAX_DIREKTSUCHE, SYSTEM_ANWEISUNG, baueKatalog, baueKontextblock, baueSuchwerkzeug,
@@ -36,6 +36,12 @@ const STREAM_HEADERS = {
 };
 const SPERRE_SEKUNDEN = 300;
 const GESAMTFRIST_MS = 240_000;
+/**
+ * Schliesst die Recherche ab. Als letzte Nutzer-Nachricht, nicht als Zusatz
+ * an der Systemanweisung: Die bleibt ueber alle Schritte identisch, damit der
+ * Prompt-Cache des Anbieters sie trifft.
+ */
+const ABSCHLUSS_ANWEISUNG = "Beantworte jetzt die Nutzerfrage anhand der vorhandenen Ergebnisse. Keine weiteren Werkzeuge. Benenne fehlende oder gekuerzte Belege ehrlich und schliesse die Antwort vollstaendig ab.";
 
 type Usage = { inputTokens: number; outputTokens: number; inputTokenDetails: { cacheReadTokens: number } };
 /** Ein Modellaufruf im Log: Wartezeit auf das Budget, erstes Token, Dauer. */
@@ -115,6 +121,8 @@ async function fuehreLaufAus({ controller, kontext, input, request, cancellation
   let geschrieben = false;
   let replayed = false;
   let lastSaved = Date.now();
+  /** Hoechstens ein Zwischenstand in Arbeit; der Stream wartet nie darauf. */
+  let laufendesSpeichern: Promise<void> | null = null;
   let firstTokenMs: number | null = null;
   let finishReason: string | undefined;
   /** Ablehnung vor dem Start, fuer den Client als `reason` am Fehler. */
@@ -135,11 +143,27 @@ async function fuehreLaufAus({ controller, kontext, input, request, cancellation
     timings[name] ??= Date.now() - startedAt;
     send({ type: "status", phase: name, message });
   };
+  /**
+   * Zwischenstaende alle zwei Sekunden im Hintergrund; nur der Endstand wird
+   * abgewartet. Vorher hielt jeder Zwischenstand die Stream-Schleife an, und
+   * der Text stockte alle zwei Sekunden fuer die Dauer eines Datenbank-Roundtrips.
+   * Ein spaeter Zwischenstand kann den Endstand nicht ueberschreiben: das
+   * Speichern greift nur, solange der Lauf noch als laufend markiert ist.
+   */
   const persist = async (final = false) => {
     if (!run || !geschrieben) return;
-    if (!final && Date.now() - lastSaved < 2000) return;
-    await saveGeneration(run, { content, sources: sammler.alle, steps, status });
+    const lauf = run;
+    if (final) {
+      await laufendesSpeichern?.catch(() => undefined);
+      await saveGeneration(lauf, { content, sources: sammler.alle, steps, status });
+      lastSaved = Date.now();
+      return;
+    }
+    if (laufendesSpeichern || Date.now() - lastSaved < 2000) return;
     lastSaved = Date.now();
+    laufendesSpeichern = saveGeneration(lauf, { content, sources: sammler.alle, steps, status })
+      .catch((error: unknown) => console.error("Zwischenstand konnte nicht gespeichert werden", { requestId: lauf.id, error }))
+      .finally(() => { laufendesSpeichern = null; });
   };
   const text = (delta: string) => {
     if (firstTokenMs === null && delta.trim()) firstTokenMs = Date.now() - startedAt;
@@ -283,23 +307,34 @@ async function fuehreLaufAus({ controller, kontext, input, request, cancellation
         const languageModel = await modell(modelId);
         const stepLimit = hasQueries ? 6 : 3;
         let answerStarted = false;
-        const finalInstructions = `${instructions}\nBeantworte jetzt die Nutzerfrage anhand der vorhandenen Ergebnisse. Keine weiteren Werkzeuge. Benenne fehlende oder gekuerzte Belege ehrlich und schliesse die Antwort vollstaendig ab.`;
+        // Anthropic-Prompt-Cache nur bei Claude-Modellen; die Systemanweisung
+        // ist der stabile Praefix, der bei jedem Schritt und jeder weiteren
+        // Frage desselben Nutzers wiederkehrt.
+        const systemanweisung: SystemModelMessage = {
+          role: "system", content: instructions,
+          ...(modelId.startsWith("anthropic/") ? { providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } } } : {}),
+        };
+        const abschluss: ModelMessage = { role: "user", content: ABSCHLUSS_ANWEISUNG };
 
         const createResult = (messages: ModelMessage[], final = false) => {
           const answerSteps = new Set<number>();
           const aufrufStart = new Map<number, number>();
           const result = streamText({
-            model: languageModel, instructions, messages, tools,
+            model: languageModel, instructions: systemanweisung, messages, tools,
             maxRetries: 0, maxOutputTokens: budget.maxStepOutput, abortSignal: signal,
             stopWhen: isStepCount(final ? 1 : stepLimit),
             prepareStep: async ({ stepNumber, messages, instructions }) => {
               signal.throwIfAborted();
-              let inputBound = tokenBound(messages) + tokenBound(instructions ?? "") + (tools ? 4096 : 512);
+              const anweisungBound = tokenBound(instructions);
+              let inputBound = tokenBound(messages) + anweisungBound + (tools ? 4096 : 512);
               const answer = final || !tools || stepNumber >= stepLimit - 1 || !budget.canResearch(inputBound);
               let answerMessages: ModelMessage[] | undefined;
               if (answer) {
-                answerMessages = fitAnswerMessages(messages, budget.maxStepInput - tokenBound(finalInstructions) - 512);
-                inputBound = tokenBound(answerMessages) + tokenBound(finalInstructions) + 512;
+                // Nach einer Recherche schliesst eine Nutzer-Nachricht den Schritt ab;
+                // ohne Werkzeuge steht die Frage schon als letzte Nachricht.
+                const fitted = fitAnswerMessages(messages, budget.maxStepInput - anweisungBound - tokenBound(ABSCHLUSS_ANWEISUNG) - 512);
+                answerMessages = tools ? [...fitted, abschluss] : fitted;
+                inputBound = tokenBound(answerMessages) + anweisungBound + 512;
               }
               const maxOutputTokens = budget.reserve(inputBound, answer ? "answer" : "research");
               if (answer) { answerStarted = true; answerSteps.add(stepNumber); }
@@ -313,7 +348,7 @@ async function fuehreLaufAus({ controller, kontext, input, request, cancellation
               modellaufrufe.push({ schritt: modelCallsStarted, art: answer ? "answer" : "research", wartenMs, erstesTokenMs: null, dauerMs: null });
               phase("generating", !answer && stepNumber === 0 ? "Passende Datenquelle wird ausgewaehlt …" : "Antwort wird formuliert …");
               return { maxOutputTokens, ...(answer
-                ? { toolChoice: "none" as const, activeTools: [], messages: answerMessages, instructions: finalInstructions }
+                ? { toolChoice: "none" as const, activeTools: [], messages: answerMessages }
                 : stepNumber === 0 ? { toolChoice: "required" as const } : {}) };
             },
             onStepEnd: ({ usage: stepUsage }) => {
@@ -345,7 +380,7 @@ async function fuehreLaufAus({ controller, kontext, input, request, cancellation
               // Eine Recherche kann Vortext enthalten oder an ihrem eigenen
               // Ausgabelimit scheitern; veroeffentlicht wird nur, was ein
               // Schritt tatsaechlich als Antwort abschliesst.
-              if (answerSteps.has(stepNumber)) { text(part.text); await persist(); }
+              if (answerSteps.has(stepNumber)) { text(part.text); void persist(); }
               else stepText += part.text;
             } else if (part.type === "tool-call") {
               erstesToken();
@@ -374,7 +409,7 @@ async function fuehreLaufAus({ controller, kontext, input, request, cancellation
                 part.type === "tool-error" ? part.error : undefined);
               if (step) { steps.push(step); send({ type: "step", step }); }
               send({ type: "sources", sources: sammler.alle });
-              await persist();
+              void persist();
             }
           }
         };

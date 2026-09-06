@@ -450,7 +450,9 @@ describe("Chat-API: Recherchebudget und abgeschlossene Antworten", () => {
     expect(prepared[0].map(step => step.maxOutputTokens)).toEqual([1200, 1200, 1200, 2400]);
     expect(prepared[0][0].toolChoice).toBe("required");
     expect(prepared[0][3]).toMatchObject({ toolChoice: "none", activeTools: [] });
-    expect(prepared[0][3].instructions).toContain("Keine weiteren Werkzeuge");
+    // Die Systemanweisung bleibt ueber alle Schritte gleich; der Abschluss ist eine Nutzer-Nachricht.
+    expect(prepared[0][3].instructions).toBeUndefined();
+    expect(prepared[0][3].messages?.at(-1)).toMatchObject({ role: "user", content: expect.stringContaining("Keine weiteren Werkzeuge") });
     expect(output.filter(event => event.type === "text")).toEqual([{ type: "text", delta: "Die Tabelle enthaelt 123 Hunde." }]);
     expect(output.some(event => event.type === "error")).toBe(false);
     expect(output.at(-1)).toMatchObject({ type: "done", status: "completed", usage: { inputTokens: 400, outputTokens: 6000 } });
@@ -499,7 +501,10 @@ describe("Chat-API: Recherchebudget und abgeschlossene Antworten", () => {
 
     expect(mocks.streamText).toHaveBeenCalledTimes(2);
     expect(prepared[1][0]).toMatchObject({ maxOutputTokens: 2400, toolChoice: "none", activeTools: [] });
-    expect(prepared[1][0].messages).toEqual([{ role: "user", content: body.question }, ...responseMessages]);
+    expect(prepared[1][0].messages).toEqual([
+      { role: "user", content: body.question }, ...responseMessages,
+      { role: "user", content: expect.stringContaining("Keine weiteren Werkzeuge") },
+    ]);
     expect(output.filter(event => event.type === "text")).toEqual([{ type: "text", delta: "Ergebnis: 123 Hunde." }]);
     expect(JSON.stringify(output)).not.toContain("Ich pruefe jetzt");
     expect(output.at(-1)).toMatchObject({ type: "done", status: "completed" });
@@ -556,6 +561,27 @@ describe("Chat-API: Recherchebudget und abgeschlossene Antworten", () => {
     if (finishReason === "length") {
       expect(output).toContainEqual(expect.objectContaining({ type: "error", message: expect.stringContaining("Ausgabelimit") }));
     } else expect(output.some(event => event.type === "error")).toBe(false);
+  });
+
+  it("markiert die Systemanweisung bei Claude-Modellen fuer den Prompt-Cache und haelt sie stabil", async () => {
+    mocks.modelConfig.mockResolvedValue({ id: "anthropic/claude-sonnet-5" });
+    mocks.collections.mockResolvedValue([{ ...collection, kind: "sql" }]);
+    const prepared = modelCalls([
+      sqlStep(),
+      { parts: [{ type: "text-delta", text: "Es sind 123." }], finishReason: "stop", outputTokens: 50 },
+    ]);
+    await events(await POST(request()));
+    const anweisung = mocks.streamText.mock.calls[0][0].instructions;
+    expect(anweisung).toMatchObject({ role: "system", providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } } });
+    expect(anweisung.content).toContain("System");
+    expect(prepared[0].every(step => step.instructions === undefined)).toBe(true);
+  });
+
+  it("setzt bei anderen Anbietern keine Cache-Markierung", async () => {
+    await events(await POST(request()));
+    const anweisung = mocks.streamText.mock.calls[0][0].instructions;
+    expect(anweisung).toMatchObject({ role: "system" });
+    expect(anweisung.providerOptions).toBeUndefined();
   });
 
   it("reserviert fuer eine ausfuehrliche Antwort 4800 Ausgabetokens", async () => {
