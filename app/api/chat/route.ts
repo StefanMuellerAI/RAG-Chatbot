@@ -258,7 +258,8 @@ async function fuehreLaufAus({ controller, kontext, input, request, cancellation
     if (!geschrieben) {
       // Zwischen Lesen und Schreiben hat ein anderer Versuch den Lauf uebernommen.
       const erneut = await existingRun(kontext.userId, input);
-      if (erneut?.run.status === "completed" && erneut.answer) {
+      if (erneut?.run.status === "completed") {
+        if (!erneut.answer) throw new ValidationError("Die gespeicherte Antwort ist nicht verfuegbar.");
         wiedergeben(erneut);
         return;
       }
