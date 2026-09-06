@@ -1,4 +1,4 @@
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, count, eq, sql } from "drizzle-orm";
 import type { Kontext } from "./auth/user";
 import {
   isCollectionKind,
@@ -21,7 +21,7 @@ import {
 } from "./presets";
 import {
   pruefeGroessenklasse,
-  pruefeNeueSammlung,
+  pruefeSammlungsanzahl,
   pruefeSammlungsText,
 } from "./quota";
 import { loescheSammlung as loescheSammlungVektoren } from "./vector";
@@ -177,12 +177,22 @@ export async function erstelleSammlung(
     preset = STANDARD_PRESET;
   }
 
-  const klasse = await ladeGroessenklasse(String(eingabe.sizeClassId ?? ""));
-
-  // Beide Kontingentpruefungen VOR dem Anlegen: die Anzahl der Sammlungen
-  // gegen den Plan und die gewuenschte Groessenklasse gegen die hoechste, die
-  // der Plan freischaltet.
-  await pruefeNeueSammlung(kontext);
+  // Groessenklasse und Anzahl der Sammlungen in einem Roundtrip. Beide
+  // Kontingentpruefungen VOR dem Anlegen: die Anzahl gegen den Plan und die
+  // gewuenschte Groessenklasse gegen die hoechste, die der Plan freischaltet.
+  const db = getDb();
+  const sizeClassId = String(eingabe.sizeClassId ?? "");
+  const [klassen, [{ vorhanden }]] = await db.batch([
+    db.select().from(sizeClasses).where(eq(sizeClasses.id, sizeClassId)).limit(1),
+    db.select({ vorhanden: count() }).from(collections).where(eq(collections.userId, kontext.userId)),
+  ]);
+  const klasse = klassen[0];
+  if (!klasse) {
+    throw new ValidationError(
+      sizeClassId ? `Die Groessenklasse "${sizeClassId}" existiert nicht.` : "Bitte eine Groessenklasse waehlen.",
+    );
+  }
+  pruefeSammlungsanzahl(kontext, vorhanden);
   pruefeGroessenklasse(kontext, klasse);
 
   const [angelegt] = await getDb()
@@ -298,21 +308,6 @@ export async function setzeSammlungsSchema(
     .where(and(eq(collections.id, collectionId), eq(collections.userId, userId)));
 }
 
-async function ladeGroessenklasse(id: string): Promise<SizeClass> {
-  const klasse = await getDb().query.sizeClasses.findFirst({
-    where: eq(sizeClasses.id, id),
-  });
-
-  if (!klasse) {
-    throw new ValidationError(
-      id
-        ? `Die Groessenklasse "${id}" existiert nicht.`
-        : "Bitte eine Groessenklasse waehlen.",
-    );
-  }
-
-  return klasse;
-}
 
 /** Alle Groessenklassen, die der Plan des Nutzers freischaltet. */
 export async function erlaubteGroessenklassen(kontext: Kontext): Promise<SizeClass[]> {

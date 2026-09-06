@@ -25,6 +25,11 @@ export async function pruefeNeueSammlung(kontext: Kontext): Promise<void> {
     .from(collections)
     .where(eq(collections.userId, kontext.userId));
 
+  pruefeSammlungsanzahl(kontext, vorhanden);
+}
+
+/** Dieselbe Pruefung ohne Netz, wenn der Aufrufer die Anzahl schon geladen hat. */
+export function pruefeSammlungsanzahl(kontext: Kontext, vorhanden: number): void {
   if (vorhanden >= kontext.plan.maxCollections) {
     throw new QuotaError(
       `Ihr Plan "${kontext.plan.label}" erlaubt ${kontext.plan.maxCollections} ` +
