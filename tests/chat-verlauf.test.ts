@@ -18,6 +18,33 @@ beforeEach(async () => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
+describe("serverseitig gelieferter Startzustand", () => {
+  const nachricht = { ...message, role: "assistant" as const, status: "completed" as const };
+  it("uebernimmt den Verlauf ohne Netz und laesst einen frischeren Speicher unangetastet", async () => {
+    store.hydriere("alice", {
+      chats: [chat], nextCursor: "weiter",
+      aktiverChat: { chat: { ...chat, id: "chat-b", titel: "Aktiv" }, messages: [nachricht], nextCursor: null },
+    });
+    const stand = store.getSnapshot();
+    expect(stand).toMatchObject({ geladen: true, aktiveId: "chat-b", nextCursor: "weiter" });
+    expect(stand.chats.map((c) => c.id)).toEqual(["chat-b", "chat-a"]);
+    expect(stand.chatLadestand["chat-b"].status).toBe("ready");
+    await store.initialisiere("alice");
+    expect(await store.ladeNachrichten("chat-b")).toBe(true);
+    expect(fetcher).not.toHaveBeenCalled();
+    // Eine aus dem Router-Cache zurueckkehrende Seite ueberschreibt den Speicher nicht.
+    store.hydriere("alice", { chats: [], nextCursor: null, aktiverChat: null });
+    expect(store.getSnapshot().chats).toHaveLength(2);
+    // Ein anderes Konto ersetzt ihn vollstaendig.
+    store.hydriere("bob", { chats: [], nextCursor: null, aktiverChat: null });
+    expect(store.getSnapshot()).toMatchObject({ chats: [], aktiveId: null, geladen: true });
+  });
+  it("liefert denselben Zustand als reinen Wert fuer die Hydration", () => {
+    expect(store.standAus({ chats: [chat], nextCursor: null, aktiverChat: null }))
+      .toMatchObject({ geladen: true, chats: [chat], aktiveId: null, nachrichten: {} });
+  });
+});
+
 describe("paginated chat browser cache", () => {
   it("keeps loading distinct from an empty chat, then exposes a retryable error", async () => {
     const response = deferred<Response>();

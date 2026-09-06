@@ -172,20 +172,37 @@ zugeklappt, damit sie den Verlauf nicht zuschieben.
 
 Der Frageweg hängt davon ab, welche Sammlungen ein Nutzer hat:
 
-1. **Genau eine Dokumentensammlung** — Direktsuche wie bisher: Die Fundstellen werden
-   der Frage vorangestellt, ohne Werkzeugaufruf. Findet die Suche nichts Passendes, wird
-   das Modell gar nicht erst befragt — die App sagt dann, dass sie dazu nichts hat. Das
-   ist Absicht: eine erfundene Antwort wäre schlimmer als keine.
+1. **Nur Dokumentensammlungen, bis zu sechs** — Direktsuche ohne Werkzeugaufruf: Alle
+   Sammlungen werden gleichzeitig durchsucht, die Treffer über alle Sammlungen nach
+   Ähnlichkeit geordnet und der Frage als Auszüge vorangestellt, bei mehreren Sammlungen
+   mit Sammlungsangabe je Auszug. Findet die Suche nichts Passendes, wird das Modell gar
+   nicht erst befragt — die App sagt dann, dass sie dazu nichts hat. Das ist Absicht: eine
+   erfundene Antwort wäre schlimmer als keine.
 2. **Genau eine Tabellen- oder Graph-Sammlung** — Werkzeugmodus mit fest gebundener
    Sammlung und nur dem passenden Werkzeug (`sql_ausfuehren` bzw. `cypher_ausfuehren`).
-3. **Mehrere Sammlungen** — Werkzeugmodus mit den Werkzeugen der vorhandenen Typen. Das
+3. **Tabelle oder Graph neben anderen Sammlungen, oder mehr als sechs
+   Dokumentensammlungen** — Werkzeugmodus mit den Werkzeugen der vorhandenen Typen. Das
    Modell wählt anhand von Name, Beschreibung und Schema selbst aus, wo es sucht, und darf
    mehrere Sammlungen auf einmal nehmen.
+
+Die Direktsuche spart einen vollständigen Modelldurchlauf: Früher entschied bei mehreren
+Dokumentensammlungen erst ein Modellaufruf, wo gesucht wird. Die Suche startet außerdem
+parallel zu Kontingent, Zulassung und dem Anlegen des Laufs; lehnt das Kontingent ab, wird
+ihr Ergebnis verworfen.
 
 Im Werkzeugmodus *muss* der erste Schritt ein Werkzeugaufruf sein — sonst könnte das
 Modell antworten, ohne eine Zeile gesehen zu haben. Danach darf es nachfassen: bis zu
 drei Schritte, wenn nur gesucht wird, bis zu sechs, sobald SQL oder Cypher im Spiel ist,
 damit eine am Schema gescheiterte Abfrage nach der Fehlermeldung korrigiert werden kann.
+
+**Was vor dem ersten Modellaufruf passiert.** Die Antwort geht an den Browser zurück,
+sobald Anmeldung und Eingabe geprüft sind; er sieht ab der ersten Millisekunde einen
+Status. Danach liegen genau drei Wartezeiten vor dem Modell: der Vorlauf (Chat, früherer
+Lauf, Verlauf und Sammlungen in *einem* Datenbank-Batch, parallel zur Chat-Sperre), dann
+Lauf schreiben, Kontingent, Zulassung und Modellkatalog parallel, zuletzt das Modellbudget.
+Die Kontingente (Kurzfenster, Tag, globale Bremse) prüfen zwei Lua-Skripte in einer
+Redis-Pipeline. Vorher waren es sechzehn Aufrufe nacheinander; bei Diensten in einer
+anderen Region als die Functions kostete jeder davon die volle Latenz.
 
 Unter der Antwort steht bei SQL und Cypher ein Block **Abfragen**: je Schritt die
 Abfrage, die Sammlung, die Zeilenzahl und eine Vorschau der ersten Zeilen — bei Fehlern
@@ -193,7 +210,7 @@ die Meldung. Die Abfrage ist dort der Beleg: Wer der Zahl nicht traut, liest die
 Die Schritte werden mit der Nachricht gespeichert (`messages.steps`) und erscheinen im
 Verlauf wieder.
 
-Zwei Eigenheiten des Werkzeugmodus, die man kennen sollte:
+Drei Eigenheiten des Werkzeugmodus, die man kennen sollte:
 
 - **Modellhebung.** Pläne mit Gemini 2.5 Flash Lite werden im Werkzeugmodus auf Gemini
   2.5 Flash gehoben; alle anderen Modelle — auch alle direkt angebundenen — bleiben, wie
@@ -208,6 +225,10 @@ Zwei Eigenheiten des Werkzeugmodus, die man kennen sollte:
   folgt ein weiterer Modellaufruf mit dem bisherigen Verlauf und der Bitte, die
   Ergebnisse zusammenzufassen; Werkzeuge sind dabei gesperrt. Beide Aufrufe landen in
   einer Verbuchung.
+- **Prompt-Cache bei Claude.** Bei Anthropic-Modellen geht die Systemanweisung mit
+  Cache-Markierung an den Anbieter und bleibt über Recherche- und Antwortschritt
+  identisch; der Abschluss der Recherche ist eine letzte Nutzer-Nachricht, kein Zusatz an
+  der Anweisung. Cache-Treffer stehen in `chat_run` unter `usage.inputTokenDetails`.
 
 Antworten werden als Markdown dargestellt. Rohes HTML wird dabei bewusst **nicht**
 ausgeführt, sondern als Text angezeigt — der Antworttext ist über die hochgeladenen
@@ -457,9 +478,14 @@ npm run pruefe            # Chunks, Kontingente und Environment-Erkennung
 npm run pruefe:chunks     # die drei Zerlegungsstrategien
 npm run pruefe:kontingente # Grenzen der Pläne und Größenklassen
 npm run pruefe:env        # Aliase und OIDC der Environment-Variablen
-npm test                  # Vitest: CSV, Cypher-Skripte, SQL-Sperre, Werkzeuge, Katalog, Chunker, Modelle, Keys
+npm test                  # Vitest: CSV, Cypher-Skripte, SQL-Sperre, Werkzeuge, Katalog, Chunker, Modelle, Keys, Chat
 npm run typecheck
 npm run lint
+
+# Lua-Skripte (Kontingente, Zulassung, Sperren) gegen einen wegwerfbaren Redis;
+# ohne die Variable werden diese Tests übersprungen:
+redis-server --port 0 --unixsocket /tmp/redis-test.sock --save "" --daemonize yes
+REDIS_TEST_SOCKET=/tmp/redis-test.sock npm test
 ```
 
 Die `pruefe:*`-Skripte sind bewusst ohne Testframework: Es geht um zwei Sätze reiner
@@ -479,7 +505,10 @@ dabei gegen eine In-Memory-Datenbank, Blob und FalkorDB sind gemockt. Mit dem
 Modellkatalog kamen die Verschlüsselung der Anbieter-Keys, die Kostenrechnung mit
 Katalogpreisen, die Routing-Entscheidung, die Umrechnung der Gateway-Preise und die
 tolerante Kennungs-Zuordnung dazu; die Key-Verwaltung läuft gegen eine Tabelle im
-Speicher.
+Speicher. Der Frageweg ist dreifach abgedeckt: die Route mit gemocktem SDK in der
+Reihenfolge der Ereignisse, die Route mit echtem AI SDK und Mock-Modell, und die
+Chat-Generierung (Vorlauf-Batch, Schreibrennen, Wiederholungen) sowie die Verlaufsseiten
+gegen ein eingebettetes PostgreSQL (PGlite) mit den echten Migrationen.
 
 ---
 
@@ -493,7 +522,8 @@ app/
   admin/                          Größenklassen, Pläne, KI-Modelle, Einladungen, Nutzer, Verbrauch
   admin/actions.ts                Server Actions aller Admin-Mutationen (ein Roundtrip, Seite kommt frisch zurück)
   sign-in/ · sign-up/             Clerk
-  api/chat/                       Retrieval, Werkzeugmodus, Antwort-Streaming (NDJSON)
+  api/chat/                       Frageweg: Vorlauf in einem Batch, Direktsuche oder Werkzeugmodus, NDJSON-Strom
+  loading.tsx · */loading.tsx     Ladeansichten je Bereich, sofort beim Reiterwechsel
   api/chats/                      Verlauf
   api/collections/                Sammlungen lesen und löschen, Upload-Anmeldung
   api/documents/                  Verarbeitung, Löschen je Typ, Download
@@ -526,8 +556,12 @@ lib/
   presets.ts · chunk.ts           die drei Verarbeitungsarten
   extract.ts                      PDF · DOCX · XLSX → Text und Seitenzahl
   mp3-teile.ts · transcribe.ts    MP3-Rahmenplan, Transkription (Gateway), Zeitversatz
-  quota.ts · ratelimit.ts         Grenzen, Drosselung, Schreibsperre (SET NX EX)
-  chats.ts · chatVerlauf.ts       Verlauf, Server und Client-Fassade
+  quota.ts · ratelimit.ts         Grenzen; Kontingente in einer Redis-Pipeline, Zwischenspeicher je Instanz, Schreibsperre
+  capacity.ts                     Zulassung und Modellbudgets in Redis (Lua)
+  chats.ts · chatVerlauf.ts       Verlauf, Server und Client-Fassade (Startzustand vom Server)
+  chat-generation.ts              Läufe je Anfragekennung: Vorlauf-Batch, Planung ohne Netz, gesicherter Schreibvorgang
+  chat-pages.ts                   Chatliste und Nachrichten seitenweise; Chat-Seite in einem Batch
+  messung.ts                      page_render- und action-Ereignisse im Log
   admin.ts · models.ts            Stammdaten, Modellkatalog-Pflege, Kostenrechnung, Modellhebung
   modellkatalog.ts                Katalog aus Postgres mit Zwischenspeicher, Rückfall auf Standard
   provider-keys.ts · crypto.ts    Anbieter-Keys verschlüsselt speichern, maskieren, laden
@@ -675,7 +709,21 @@ Abweisungen (429 und 409) landen strukturiert im Log:
 ```
 
 Ihre Häufigkeit ist die wichtigste laufende Kennzahl: Steigt sie, sind entweder die
-Kontingente zu knapp bemessen oder ein Konto verhält sich auffällig.
+Kontingente zu knapp bemessen oder ein Konto verhält sich auffällig. Im Chat kommen
+Ablehnungen nach dem Start des Stroms nicht als HTTP-Status, sondern als `error`-Ereignis
+mit `reason` (`bereits_aktiv`, `zu_viele_anfragen`, `kontingent`, `nicht_gefunden`); sie
+stehen im `chat_run`-Ereignis unter `reason`.
+
+Drei Zeitereignisse machen die Geschwindigkeit messbar, jeweils eine JSON-Zeile:
+
+- `chat_run` je Frage: `preflightMs` bis zum Modellstart, `firstTokenMs`, `durationMs`,
+  je Modellaufruf `wartenMs`, `erstesTokenMs` und `dauerMs` (`modelCalls`), Dauer je
+  Werkzeug (`tools`), Phasenzeitpunkte, Modell, Tokenverbrauch samt Cache-Treffern.
+- `page_render` je Seitenaufbau: Phasen `env`, `kontext`, `daten` und Gesamtdauer.
+- `action` je Server Action: Name, Erfolg, Dauer.
+
+Wer die Anwendung als träge empfindet, liest zuerst diese Zeilen: Sie zeigen, ob die
+Zeit im Vorlauf, beim Modell oder in einem Werkzeug vergeht.
 
 ### Aufräumlauf
 
@@ -733,7 +781,8 @@ Die alten Blobs bleiben unberührt und können nach einer Sichtprobe entfernt we
   Redis, und es gibt bewusst keinen Weg daran vorbei: Eine Sperre, die nicht sperrt, wäre
   schlimmer als ein Abbruch.
 - **Der Werkzeugmodus kostet mehr als die Direktsuche.** Mindestens zwei
-  Modelldurchläufe statt einem, dazu die Modellhebung für Flash-Lite-Pläne; siehe
+  Modelldurchläufe statt einem, dazu die Modellhebung für Flash-Lite-Pläne. Er greift nur
+  noch mit Tabellen oder Graphen oder bei mehr als sechs Dokumentensammlungen; siehe
   [Bedienung](#bedienung).
 - **Contextual Retrieval ist nicht eingebaut.** Eine LLM-generierte Kontextzeile pro
   Abschnitt verbessert die Trefferqualität deutlich, kostet bei diesem Mengenzuschnitt

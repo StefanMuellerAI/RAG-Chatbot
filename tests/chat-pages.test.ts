@@ -1,8 +1,9 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { chatPage, decodeCursor, encodeCursor, messagePage, ownChat, pageSize } from "@/lib/chat-pages";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { chatPage, decodeCursor, encodeCursor, ladeChatSeite, messagePage, ownChat, pageSize } from "@/lib/chat-pages";
 import { createPostgresFixture, TEST_CHAT_A, TEST_CHAT_B } from "./chat-db-fixture";
 import { beginGeneration } from "@/lib/chat-generation";
-import { chatRuns } from "@/lib/db/schema";
+import { chatRuns, collections } from "@/lib/db/schema";
+import { STANDARD_PRESET } from "@/lib/presets";
 import { eq } from "drizzle-orm";
 
 const mocks = vi.hoisted(() => ({ getDb: vi.fn() }));
@@ -11,9 +12,28 @@ describe("Verlaufsseiten mit eingebettetem PostgreSQL", () => {
   let pg: Awaited<ReturnType<typeof createPostgresFixture>>;
   beforeAll(async () => { pg = await createPostgresFixture(); }, 30_000);
   beforeEach(async () => { await pg.reset(); mocks.getDb.mockReturnValue(pg.db); });
+  afterEach(() => vi.restoreAllMocks());
   afterAll(async () => { await pg?.close(); });
   const id = (n: number) => `99999999-9999-4999-8999-${String(n).padStart(12, "0")}`;
   const timestamp = (n: number) => `2026-09-05 10:00:00.12345${n === 5 ? 7 : n === 4 ? 5 : 6}+00`;
+
+  it("laedt Sammlungen, Verarbeitungsstand, Chatliste und den gewaehlten Chat in einem Batch", async () => {
+    await pg.db.insert(collections).values({ userId: "tenant-a", name: "Handbuch", preset: STANDARD_PRESET, sizeClassId: "test" });
+    await pg.client.query("INSERT INTO messages (chat_id, role, content) VALUES ($1, 'assistant', 'Eigener Inhalt')", [TEST_CHAT_A]);
+    const batch = vi.spyOn(pg.db, "batch");
+    const ohne = await ladeChatSeite("tenant-a", null);
+    expect(batch).toHaveBeenCalledOnce();
+    expect(ohne.sammlungen.map(sammlung => sammlung.name)).toEqual(["Handbuch"]);
+    expect(ohne.chats.chats.map(chat => chat.id)).toEqual([TEST_CHAT_A]);
+    expect(ohne.aktiverChat).toBeNull();
+    const mit = await ladeChatSeite("tenant-a", TEST_CHAT_A);
+    expect(batch).toHaveBeenCalledTimes(2);
+    expect(mit.aktiverChat?.chat.id).toBe(TEST_CHAT_A);
+    expect(mit.aktiverChat?.messages.map(message => message.content)).toEqual(["Eigener Inhalt"]);
+    // Fremde und ungueltige Chats liefern keinen Verlauf; die Seite bleibt bedienbar.
+    expect((await ladeChatSeite("tenant-b", TEST_CHAT_A)).aktiverChat).toBeNull();
+    expect((await ladeChatSeite("tenant-a", "kein-uuid")).aktiverChat).toBeNull();
+  });
 
   it("prueft Mandanten auf echten Tabellen vor dem Lesen von Nachrichten", async () => {
     await pg.client.query("INSERT INTO messages (chat_id, role, content) VALUES ($1, 'assistant', 'Privater Inhalt')", [TEST_CHAT_A]);

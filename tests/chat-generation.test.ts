@@ -1,8 +1,12 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { and, eq } from "drizzle-orm";
-import { beginGeneration, existingRun, generationContext, requestHash, saveFeedback, saveGeneration } from "@/lib/chat-generation";
+import {
+  beginGeneration, existingRun, generationContext, ladeVorlauf, planeGeneration, requestHash,
+  saveFeedback, saveGeneration, schreibeGeneration,
+} from "@/lib/chat-generation";
 import type { ChatRequest } from "@/lib/chat-contract";
-import { chatRuns, chats, messages } from "@/lib/db/schema";
+import { chatRuns, chats, collections, messages } from "@/lib/db/schema";
+import { STANDARD_PRESET } from "@/lib/presets";
 import { createPostgresFixture, TEST_CHAT_A, TEST_CHAT_B } from "./chat-db-fixture";
 
 const mocks = vi.hoisted(() => ({ getDb: vi.fn() }));
@@ -146,6 +150,64 @@ describe("Chat-Generierung mit eingebettetem PostgreSQL", () => {
     await beginGeneration("tenant-a", request);
     expect(await pg.db.query.chats.findFirst({ where: eq(chats.id, TEST_CHAT_A) }))
       .toMatchObject({ title: "Manuell gewaehlt", titleManual: true });
+  });
+
+  it("liest Chat, Lauf, Verlauf und Sammlungen in einem einzigen Batch", async () => {
+    await pg.db.insert(collections).values({ userId: "tenant-a", name: "Handbuch", preset: STANDARD_PRESET, sizeClassId: "test" });
+    await pg.db.insert(messages).values([
+      { chatId: TEST_CHAT_A, role: "user", content: "Fruehere Frage", createdAt: new Date(Date.now() - 2000) },
+      { chatId: TEST_CHAT_A, role: "assistant", content: "Fruehere Antwort", createdAt: new Date(Date.now() - 1000) },
+    ]);
+    const batch = vi.spyOn(pg.db, "batch");
+    const vorlauf = await ladeVorlauf("tenant-a", request);
+    expect(batch).toHaveBeenCalledOnce();
+    expect(vorlauf.previous).toBeNull();
+    expect(vorlauf.history).toEqual([
+      { role: "user", content: "Fruehere Frage" },
+      { role: "assistant", content: "Fruehere Antwort" },
+      { role: "user", content: request.question },
+    ]);
+    expect(vorlauf.sammlungen.map(sammlung => sammlung.name)).toEqual(["Handbuch"]);
+    expect(vorlauf.sammlungen[0].sizeClass.id).toBe("test");
+    await expect(ladeVorlauf("tenant-b", request)).rejects.toThrow("nicht gefunden");
+  });
+
+  it("liefert nach dem Schreiben den frueheren Lauf samt Antwort im Vorlauf", async () => {
+    const run = await beginGeneration("tenant-a", request);
+    await saveGeneration(run, state("Fertige Antwort", "completed"));
+    const vorlauf = await ladeVorlauf("tenant-a", request);
+    expect(vorlauf.previous?.run).toMatchObject({ id: run.id, status: "completed" });
+    expect(vorlauf.previous?.answer?.content).toBe("Fertige Antwort");
+    // Der Verlauf endet an der urspruenglichen Frage; die eigene Antwort gehoert nicht hinein.
+    expect(vorlauf.history).toEqual([{ role: "user", content: request.question }]);
+    await expect(ladeVorlauf("tenant-a", { ...request, question: "Geaendert" })).rejects.toThrow("anderen Frage");
+  });
+
+  it("schreibt keinen neuen Lauf ueber einen inzwischen angelegten Versuch", async () => {
+    const vorlauf = await ladeVorlauf("tenant-a", request);
+    const erster = planeGeneration("tenant-a", request, vorlauf.previous);
+    // Ein zweiter Aufrufer mit demselben Vorlauf war schneller.
+    const zweiter = planeGeneration("tenant-a", request, vorlauf.previous);
+    expect(await schreibeGeneration("tenant-a", request, zweiter.run, zweiter.neu)).toBe(true);
+    await saveGeneration(zweiter.run, state("Antwort des Zweiten", "completed"));
+    expect(await schreibeGeneration("tenant-a", request, erster.run, erster.neu)).toBe(false);
+    const stand = await existingRun("tenant-a", request);
+    expect(stand?.run).toMatchObject({ id: request.requestId, status: "completed", attempt: 1, assistantMessageId: zweiter.run.assistantMessageId });
+    expect(stand?.answer?.content).toBe("Antwort des Zweiten");
+    expect(await pg.db.select().from(messages)).toHaveLength(2);
+  });
+
+  it("uebernimmt bei einer Wiederholung nur einen noch offenen Stand", async () => {
+    const first = await beginGeneration("tenant-a", request);
+    await saveGeneration(first, state("Abgebrochen", "aborted"));
+    const vorlauf = await ladeVorlauf("tenant-a", request);
+    const wiederholung = planeGeneration("tenant-a", request, vorlauf.previous);
+    expect(wiederholung).toMatchObject({ neu: false, run: { attempt: 2, assistantMessageId: first.assistantMessageId } });
+    // Jemand anders schliesst den alten Versuch inzwischen ab.
+    await pg.db.update(chatRuns).set({ status: "completed" }).where(eq(chatRuns.id, first.id));
+    await pg.db.update(messages).set({ content: "Doch fertig", status: "completed" }).where(eq(messages.id, first.assistantMessageId));
+    expect(await schreibeGeneration("tenant-a", request, wiederholung.run, false)).toBe(false);
+    expect((await existingRun("tenant-a", request))?.answer?.content).toBe("Doch fertig");
   });
 
   it("speichert Feedback nur an einer fertigen Assistentenantwort im eigenen Chat", async () => {

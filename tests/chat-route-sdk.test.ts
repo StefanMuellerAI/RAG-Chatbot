@@ -5,7 +5,8 @@ import type { LanguageModelV4FinishReason, LanguageModelV4StreamPart, LanguageMo
 import { z } from "zod";
 
 const mocks = vi.hoisted(() => ({
-  requireKontext: vi.fn(), existingRun: vi.fn(), beginGeneration: vi.fn(),
+  requireKontext: vi.fn(), existingRun: vi.fn(), vorlauf: vi.fn(), previous: vi.fn(),
+  plane: vi.fn(), schreibeGeneration: vi.fn(),
   generationContext: vi.fn(), saveGeneration: vi.fn(), collections: vi.fn(),
   acquireCapacity: vi.fn(), reserveModelCall: vi.fn(), releaseCapacity: vi.fn(),
   lock: vi.fn(), unlock: vi.fn(), quota: vi.fn(), refund: vi.fn(), usage: vi.fn(),
@@ -18,10 +19,9 @@ vi.mock("@/lib/auth/user", () => ({
   NotAdminError: class NotAdminError extends Error {},
 }));
 vi.mock("@/lib/chat-generation", () => ({
-  existingRun: mocks.existingRun, beginGeneration: mocks.beginGeneration,
-  generationContext: mocks.generationContext, saveGeneration: mocks.saveGeneration,
+  existingRun: mocks.existingRun, ladeVorlauf: mocks.vorlauf, planeGeneration: mocks.plane,
+  schreibeGeneration: mocks.schreibeGeneration, saveGeneration: mocks.saveGeneration,
 }));
-vi.mock("@/lib/collections", () => ({ ladeSammlungen: mocks.collections }));
 vi.mock("@/lib/modellkatalog", () => ({ findeModell: mocks.modelConfig }));
 vi.mock("@/lib/models", () => ({ modellFuerWerkzeuge: (model: string) => model }));
 vi.mock("@/lib/capacity", () => ({
@@ -42,7 +42,7 @@ vi.mock("@/lib/ai", () => ({
   baueKatalog: () => "Hundehalter: Tabelle mit Kennzahlen.",
   baueKontextblock: () => "Kontext", baueSuchwerkzeug: () => ({}),
   baueSystemanweisung: () => "Frage die Tabellen ab und beantworte die Nutzerfrage.",
-  modell: mocks.model, sucheMitSchwelle: vi.fn(),
+  modell: mocks.model, sucheMitSchwelle: vi.fn(), sucheInSammlungen: vi.fn(), MAX_DIREKTSUCHE: 6,
 }));
 
 // The real SDK owns prepareStep, tool execution, onStepEnd and finish-step order.
@@ -99,7 +99,14 @@ beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => {});
   mocks.requireKontext.mockResolvedValue({ userId: "user-a", plan: { modelId: "test/model", maxQuestionsPerDay: 100 } });
   mocks.existingRun.mockResolvedValue(null);
-  mocks.beginGeneration.mockResolvedValue(run);
+  // Der Vorlauf kommt aus einem Batch; die Einzelteile bleiben je Test einstellbar.
+  mocks.previous.mockReturnValue(null);
+  mocks.vorlauf.mockImplementation(async () => ({
+    previous: mocks.previous(), history: await mocks.generationContext(), sammlungen: await mocks.collections(),
+  }));
+  mocks.plane.mockImplementation((_userId: string, _request: unknown, previous: { run: typeof run } | null) =>
+    ({ run: previous?.run ?? run, neu: !previous }));
+  mocks.schreibeGeneration.mockResolvedValue(true);
   mocks.generationContext.mockResolvedValue([{ role: "user", content: question }]);
   mocks.collections.mockResolvedValue([{ id: COLLECTION_ID, name: "Hundehalter", kind: "sql" }]);
   mocks.saveGeneration.mockResolvedValue(undefined);

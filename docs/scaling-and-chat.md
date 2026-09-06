@@ -155,12 +155,24 @@ aber die Versuchsnummer. Datenbankbedingungen verhindern, dass alte Versuche neu
 Antworten überschreiben. Pro Chat läuft eine Generierung; der Kontext einer Wiederholung
 endet an der ursprünglichen Frage. Bearbeiten stellt eine neue Frage am aktuellen Ende.
 
-Der Stream sendet `start`, tatsächliche `status`-Ereignisse, `sources`, `step`, `text`,
-`error` und abschließend `done` mit `completed`, `failed` oder `aborted`.
-`done` allein ist kein Erfolg. Server-Checkpoints sichern während der Antwort etwa alle
-zwei Sekunden bei eintreffendem Text/Toolergebnis und am Ende. Bei abruptem Prozessverlust
+Der Stream beginnt mit einem `status`-Ereignis, bevor Datenbank oder Redis angefragt
+werden; `start` folgt, sobald der Lauf geplant ist, danach `sources`, `step`, `text`,
+`error` und abschließend `done` mit `completed`, `failed` oder `aborted`. Ablehnungen vor
+dem Start (fremder Chat, laufende Antwort im selben Chat, Kontingent, Zulassung) sind
+`error`-Ereignisse mit `reason` und gegebenenfalls `retryAfter`; nur „nicht angemeldet“
+und ungültige Eingaben bleiben HTTP 401/400. `done` allein ist kein Erfolg.
+Server-Checkpoints sichern während der Antwort etwa alle zwei Sekunden im Hintergrund,
+ohne den Textfluss anzuhalten, und am Ende mit Wartezeit. Bei abruptem Prozessverlust
 kann der Text seit dem letzten erfolgreichen Checkpoint fehlen. Nach 300 Sekunden wird
 ein verwaister Lauf beim Lesen als unterbrochen angezeigt und kann wiederholt werden.
+
+Vor dem ersten Modellaufruf liegen drei Wartezeiten: der Vorlauf (Chatzugehörigkeit,
+früherer Lauf samt Antwort, Verlauf und Sammlungen in einem Datenbank-Batch, parallel zur
+Chat-Sperre), dann Lauf schreiben, Kontingent, Zulassung und Modellkatalog parallel,
+zuletzt das Modellbudget je Aufruf. Der Schreibvorgang ist gegen einen inzwischen
+abgeschlossenen Versuch gesichert und liefert dann nichts statt eine fertige Antwort zu
+überschreiben. Bei reinen Dokumentensammlungen (bis zu sechs) läuft die Suche parallel zur
+zweiten Wartezeit; ein Modellaufruf nur zur Wahl der Sammlung entfällt.
 
 Die UI zeigt Laden/Fehler statt eines falschen leeren Verlaufs und sperrt Senden bis zum
 geladenen Kontext. Stop erhält eine gekennzeichnete Teilantwort; Entwürfe bleiben beim
@@ -181,8 +193,10 @@ der beim Seitenladen abgefragte Verarbeitungsstand ergänzen die vorhandene Gest
 ## Messung und Abnahme
 
 `chat_run`-Logs enthalten Anfragekennung/Versuch, Status, Modell, ersten Antworttext,
-Gesamtdauer, erste Phasenzeitpunkte, Zulassungsdauer, Anzahl Modellaufrufe/Toolschritte
-und vom Anbieter gemeldete Nutzung. `usageComplete=false` kennzeichnet fehlende
+Gesamtdauer, `preflightMs` bis zum Modellstart, erste Phasenzeitpunkte, Zulassungsdauer,
+je Modellaufruf Wartezeit, erstes Token und Dauer (`modelCalls`), Dauer je Werkzeug
+(`tools`), Anzahl Modellaufrufe/Toolschritte, `replayed` und `reason` bei Ablehnung sowie
+die vom Anbieter gemeldete Nutzung. `usageComplete=false` kennzeichnet fehlende
 Abrechnungsdaten, beispielsweise bei Abbruch. `usage_events` speichert bekannte Kosten;
 unvollständige Nutzung mit dem Anbieterbericht abgleichen. Prompts und Antwortinhalte
 werden dabei nicht ins Log geschrieben. SQL-Container: CPU, RAM, Queuezeit, 429/5xx,

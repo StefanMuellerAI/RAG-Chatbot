@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { del, get, put } from "@vercel/blob";
-import initSqlJs, { type Database, type SqlJsStatic, type SqlValue } from "sql.js";
+import type { Database, SqlJsStatic, SqlValue } from "sql.js";
 import { assertReadOnlySql as pruefeSql } from "../services/sql/sql-policy.mjs";
 import { checkIngestionCapacity, ingestionSignal } from "./capacity";
 import type { CollectionSchema, SqlColumn, SqlTableSchema } from "./collection-kinds";
@@ -42,9 +42,15 @@ function assertConfigured(): void {
 
 let sqlPromise: Promise<SqlJsStatic> | undefined;
 
-/** sql.js einmal pro Prozess laden; die WASM-Datei kommt direkt aus node_modules. */
+/**
+ * sql.js einmal pro Prozess laden; die WASM-Datei kommt direkt aus node_modules.
+ * Das Paket wird erst hier geladen, nicht beim Import des Moduls: So bleibt
+ * der Kaltstart der Functions, die dieses Modul nur fuer einen Randfall
+ * brauchen, frei von der Emscripten-Bibliothek.
+ */
 export function getSql(): Promise<SqlJsStatic> {
   sqlPromise ??= (async () => {
+    const { default: initSqlJs } = await import("sql.js");
     const bytes = await readFile(wasmPfad());
     // Emscripten erwartet einen echten ArrayBuffer, nicht den Node-Buffer-View.
     const wasmBinary = bytes.buffer.slice(

@@ -31,19 +31,31 @@ type Optionen = {
    * die auf der Seite zu sehen sind.
    */
   neuRendern?: boolean;
+  /** Kurzer Name fuer das Zeitlog (`event: "action"`). Ohne Namen kein Log. */
+  name?: string;
 };
 
 export async function alsAktion<T>(
   arbeit: () => Promise<T>,
   optionen: Optionen = {},
 ): Promise<AktionsErgebnis<T>> {
+  const start = Date.now();
+  const logge = (ok: boolean) => {
+    if (!optionen.name) return;
+    console.log(
+      JSON.stringify({ event: "action", name: optionen.name, ok, gesamtMs: Date.now() - start }),
+    );
+  };
+
   try {
     const daten = await arbeit();
     if (optionen.neuRendern !== false) refresh();
+    logge(true);
     return { ok: true, daten };
   } catch (error) {
     const bild = beschreibeFehler(error);
     protokolliere(bild, error, "einer Server Action", optionen.userId);
+    logge(false);
     return { ok: false, fehler: bild.body.error, code: bild.body.code };
   }
 }

@@ -47,6 +47,9 @@ import type { KeyStatusUebersicht } from "@/lib/provider-keys";
 /** Fuehrt eine Action aus und liefert true bei Erfolg — Karten schliessen damit ihre Formulare. */
 export type Ausfuehren = <T>(aktion: () => Promise<AktionsErgebnis<T>>) => Promise<boolean>;
 
+/** Die Karte, die gerade speichert; nur sie ist waehrenddessen gesperrt. */
+type Karte = "groessenklassen" | "plaene" | "modelle" | "einladungen" | "nutzer";
+
 const EIN_MB = 1024 * 1024;
 
 type Eigenschaften = {
@@ -77,16 +80,19 @@ export default function AdminKonsole({
   einladungen,
   suche,
 }: Eigenschaften) {
-  const [laueft, starte] = useTransition();
+  const [, starte] = useTransition();
+  const [laufend, setLaufend] = useState<Karte | null>(null);
   const [fehler, setFehler] = useState<string | null>(null);
   const [hinweis, setHinweis] = useState<string | null>(null);
 
   // Innerhalb der Transition, damit React das mitgelieferte RSC-Payload als
-  // Teil derselben Aktualisierung einspielt und `laueft` genau den einen
-  // Roundtrip abdeckt.
-  const fuehreAus: Ausfuehren = (aktion) => {
+  // Teil derselben Aktualisierung einspielt. Gesperrt ist waehrenddessen nur
+  // die Karte, die gerade speichert — vorher stand die ganze Konsole still,
+  // bis die Antwort da war.
+  const fuehreAusFuer = (karte: Karte): Ausfuehren => (aktion) => {
     setFehler(null);
     setHinweis(null);
+    setLaufend(karte);
     return new Promise((loese) => {
       starte(async () => {
         try {
@@ -97,10 +103,13 @@ export default function AdminKonsole({
         } catch (error) {
           setFehler(error instanceof Error ? error.message : "Unbekannter Fehler.");
           loese(false);
+        } finally {
+          setLaufend(null);
         }
       });
     });
   };
+  const gesperrt = (karte: Karte) => laufend === karte;
 
   return (
     <>
@@ -111,45 +120,45 @@ export default function AdminKonsole({
 
       <GroessenklassenKarte
         klassen={groessenklassen}
-        gesperrt={laueft}
-        onSpeichern={(werte) => fuehreAus(() => speichereGroessenklasseAktion(werte))}
+        gesperrt={gesperrt("groessenklassen")}
+        onSpeichern={(werte) => fuehreAusFuer("groessenklassen")(() => speichereGroessenklasseAktion(werte))}
       />
 
       <PlaeneKarte
         plaene={plaene}
         klassen={groessenklassen}
         modelle={modelle}
-        gesperrt={laueft}
-        onSpeichern={(werte) => fuehreAus(() => speicherePlanAktion(werte))}
-        onLoeschen={(id) => fuehreAus(() => loeschePlanAktion(id))}
+        gesperrt={gesperrt("plaene")}
+        onSpeichern={(werte) => fuehreAusFuer("plaene")(() => speicherePlanAktion(werte))}
+        onLoeschen={(id) => fuehreAusFuer("plaene")(() => loeschePlanAktion(id))}
       />
 
       <ModelleKarte
         katalog={katalog}
         keyStatus={keyStatus}
         secretKonfiguriert={secretKonfiguriert}
-        gesperrt={laueft}
+        gesperrt={gesperrt("modelle")}
         onKeySpeichern={(provider, key) =>
-          fuehreAus(() => speichereProviderKeyAktion({ provider, key }))
+          fuehreAusFuer("modelle")(() => speichereProviderKeyAktion({ provider, key }))
         }
-        onKeyLoeschen={(provider) => fuehreAus(() => loescheProviderKeyAktion(provider))}
-        onModellSpeichern={(werte) => fuehreAus(() => speichereModellAktion(werte))}
-        onModellLoeschen={(id) => fuehreAus(() => loescheModellAktion(id))}
+        onKeyLoeschen={(provider) => fuehreAusFuer("modelle")(() => loescheProviderKeyAktion(provider))}
+        onModellSpeichern={(werte) => fuehreAusFuer("modelle")(() => speichereModellAktion(werte))}
+        onModellLoeschen={(id) => fuehreAusFuer("modelle")(() => loescheModellAktion(id))}
       />
 
       <EinladungenKarte
         einladungen={einladungen}
         plaene={plaene}
-        gesperrt={laueft}
+        gesperrt={gesperrt("einladungen")}
         onEinladen={(email, planId) => erstelleEinladungAktion({ email, planId })}
-        onWiderrufen={(id) => fuehreAus(() => widerrufeEinladungAktion(id))}
+        onWiderrufen={(id) => fuehreAusFuer("einladungen")(() => widerrufeEinladungAktion(id))}
       />
 
       <NutzerKarte
         seite={nutzer}
         plaene={plaene}
         suche={suche}
-        onAendern={(werte) => fuehreAus(() => aendereNutzerAktion(werte))}
+        onAendern={(werte) => fuehreAusFuer("nutzer")(() => aendereNutzerAktion(werte))}
       />
 
       <VielnutzerKarte verbrauch={verbrauch} />

@@ -1,4 +1,4 @@
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, count, eq, sql } from "drizzle-orm";
 import type { Kontext } from "./auth/user";
 import {
   isCollectionKind,
@@ -21,7 +21,7 @@ import {
 } from "./presets";
 import {
   pruefeGroessenklasse,
-  pruefeNeueSammlung,
+  pruefeSammlungsanzahl,
   pruefeSammlungsText,
 } from "./quota";
 import { loescheSammlung as loescheSammlungVektoren } from "./vector";
@@ -39,26 +39,47 @@ export type SammlungMitKlasse = Collection & { sizeClass: SizeClass };
 export type SammlungsStatus = { ready: number; pending: number; failed: number };
 
 /** One tenant-filtered aggregation; documents_user_idx supports the predicate. */
-export async function ladeSammlungsStatus(userId: string): Promise<Record<string, SammlungsStatus>> {
-  const rows = await getDb().select({
+export function sammlungsStatusAbfrage(userId: string) {
+  return getDb().select({
     collectionId: documents.collectionId,
     ready: sql<number>`count(*) filter (where ${documents.status} = 'fertig')`.mapWith(Number),
     pending: sql<number>`count(*) filter (where ${documents.status} in ('wartet', 'laeuft'))`.mapWith(Number),
     failed: sql<number>`count(*) filter (where ${documents.status} = 'fehler')`.mapWith(Number),
   }).from(documents).where(eq(documents.userId, userId)).groupBy(documents.collectionId);
+}
 
+export function zuSammlungsStatus(
+  rows: { collectionId: string; ready: number; pending: number; failed: number }[],
+): Record<string, SammlungsStatus> {
   return Object.fromEntries(rows.map(({ collectionId, ...status }) => [collectionId, status]));
 }
 
-export async function ladeSammlungen(userId: string): Promise<SammlungMitKlasse[]> {
-  const zeilen = await getDb()
+export async function ladeSammlungsStatus(userId: string): Promise<Record<string, SammlungsStatus>> {
+  return zuSammlungsStatus(await sammlungsStatusAbfrage(userId));
+}
+
+/**
+ * Die Sammlungen eines Nutzers samt Groessenklasse als Abfrage — ohne sie
+ * auszufuehren. So kann der Chat-Vorlauf sie in einem Batch mit den uebrigen
+ * Lesevorgaengen schicken, statt einen eigenen Roundtrip zu bezahlen.
+ */
+export function sammlungenAbfrage(userId: string) {
+  return getDb()
     .select({ sammlung: collections, sizeClass: sizeClasses })
     .from(collections)
     .innerJoin(sizeClasses, eq(collections.sizeClassId, sizeClasses.id))
     .where(eq(collections.userId, userId))
     .orderBy(asc(collections.name));
+}
 
+export function zuSammlungen(
+  zeilen: { sammlung: Collection; sizeClass: SizeClass }[],
+): SammlungMitKlasse[] {
   return zeilen.map((zeile) => ({ ...zeile.sammlung, sizeClass: zeile.sizeClass }));
+}
+
+export async function ladeSammlungen(userId: string): Promise<SammlungMitKlasse[]> {
+  return zuSammlungen(await sammlungenAbfrage(userId));
 }
 
 export async function ladeSammlung(
@@ -156,12 +177,22 @@ export async function erstelleSammlung(
     preset = STANDARD_PRESET;
   }
 
-  const klasse = await ladeGroessenklasse(String(eingabe.sizeClassId ?? ""));
-
-  // Beide Kontingentpruefungen VOR dem Anlegen: die Anzahl der Sammlungen
-  // gegen den Plan und die gewuenschte Groessenklasse gegen die hoechste, die
-  // der Plan freischaltet.
-  await pruefeNeueSammlung(kontext);
+  // Groessenklasse und Anzahl der Sammlungen in einem Roundtrip. Beide
+  // Kontingentpruefungen VOR dem Anlegen: die Anzahl gegen den Plan und die
+  // gewuenschte Groessenklasse gegen die hoechste, die der Plan freischaltet.
+  const db = getDb();
+  const sizeClassId = String(eingabe.sizeClassId ?? "");
+  const [klassen, [{ vorhanden }]] = await db.batch([
+    db.select().from(sizeClasses).where(eq(sizeClasses.id, sizeClassId)).limit(1),
+    db.select({ vorhanden: count() }).from(collections).where(eq(collections.userId, kontext.userId)),
+  ]);
+  const klasse = klassen[0];
+  if (!klasse) {
+    throw new ValidationError(
+      sizeClassId ? `Die Groessenklasse "${sizeClassId}" existiert nicht.` : "Bitte eine Groessenklasse waehlen.",
+    );
+  }
+  pruefeSammlungsanzahl(kontext, vorhanden);
   pruefeGroessenklasse(kontext, klasse);
 
   const [angelegt] = await getDb()
@@ -277,21 +308,6 @@ export async function setzeSammlungsSchema(
     .where(and(eq(collections.id, collectionId), eq(collections.userId, userId)));
 }
 
-async function ladeGroessenklasse(id: string): Promise<SizeClass> {
-  const klasse = await getDb().query.sizeClasses.findFirst({
-    where: eq(sizeClasses.id, id),
-  });
-
-  if (!klasse) {
-    throw new ValidationError(
-      id
-        ? `Die Groessenklasse "${id}" existiert nicht.`
-        : "Bitte eine Groessenklasse waehlen.",
-    );
-  }
-
-  return klasse;
-}
 
 /** Alle Groessenklassen, die der Plan des Nutzers freischaltet. */
 export async function erlaubteGroessenklassen(kontext: Kontext): Promise<SizeClass[]> {

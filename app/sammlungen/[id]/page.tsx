@@ -4,6 +4,7 @@ import { requireKontextFuerSeite } from "@/lib/auth/user";
 import { ladeSammlung } from "@/lib/collections";
 import { ladeDokumenteDerSammlung } from "@/lib/documents";
 import { NotFoundError } from "@/lib/errors";
+import { starteMessung } from "@/lib/messung";
 import { effektiveVerarbeitung } from "@/lib/presets";
 
 export const dynamic = "force-dynamic";
@@ -14,9 +15,13 @@ export default async function SammlungSeite({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+  const messung = starteMessung("page_render", { route: "/sammlungen/[id]" });
   const kontext = await requireKontextFuerSeite(`/sammlungen/${id}`);
+  messung.phase("kontext");
 
   const daten = await lade(kontext.userId, id);
+  messung.phase("daten");
+  messung.ende({ dokumente: daten?.dokumente.length ?? 0 });
   // Eine fremde oder erfundene ID fuehrt zur gleichen Seite: Wer raet, soll
   // nicht daran erkennen koennen, dass die Sammlung existiert.
   if (!daten) notFound();
