@@ -129,9 +129,21 @@ Verlauf. Fundstellen werden dedupliziert und auf insgesamt 10.000 Zeichen begren
 Werkzeugergebnisse auf 6.000 Zeichen je Aufruf. Das gemeinsame Budget schließt
 Instruktionen, Verlauf, Werkzeuge und Fundstellen ein. UTF-8-Bytes dienen als konservative
 Textabschätzung, nicht als exakte Tokenmessung. Pro Modellaufruf maximal 32.000
-geschätzte Eingabetokens; kompakt 1.200 Ausgabetokens je Schritt und 2.400 insgesamt,
-ausführlich 2.400 je Schritt und 4.800 insgesamt. Reservierter Gesamtumfang 100.000
-bzw. 160.000 Tokens über alle Schritte. Abgelehnte Budgetüberschreitungen werden erklärt.
+geschätzte Eingabetokens. Die Recherche hat ein eigenes Budget von 3.600 Ausgabetokens
+mit maximal 1.200 je Schritt, unabhängig von der gewählten Antwortlänge. Zusätzlich
+bleiben für die abschließende Antwort 2.400 Ausgabetokens (kompakt) bzw. 4.800
+(ausführlich) reserviert. Jeder Rechercheschritt muss auch noch Platz für einen
+vollständigen finalen Eingabekontext lassen. Der reservierte Gesamtumfang bleibt
+auf 100.000 bzw. 160.000 Tokens über alle Schritte begrenzt; alle Modellaufrufe
+durchlaufen weiterhin die gemeinsame Kapazitätskontrolle.
+
+Vor Erschöpfung der Recherche oder spätestens am Schrittlimit wird ohne weitere
+Werkzeuge geantwortet. Überlange finale Kontexte verlieren zuerst Reasoning und
+ganze Tabellenzeilen, danach bei Bedarf ältere vollständige Gesprächs-/Werkzeuggruppen.
+Kürzungen sind im Kontext gekennzeichnet, Werte und JSON bleiben intakt. Die aktuelle
+Frage und die neueste Ergebnisgruppe bleiben erhalten. Fehlende Nutzungsangaben
+verbrauchen konservativ die reservierte Ausgabemenge. Ein Modellabschluss mit
+`finishReason: length` gilt als unvollständig und wird nicht als erfolgreich gespeichert.
 
 ## Speicherung und Bedienung
 

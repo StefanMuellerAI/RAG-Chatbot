@@ -8,8 +8,8 @@ import { RELEASE_LOCK_SCRIPT, RENEW_LOCK_SCRIPT } from "@/lib/ratelimit";
 afterEach(() => vi.unstubAllEnvs());
 describe("Capacity configuration and answer budgets", () => {
   it("grants detailed answers a larger output allowance", () => {
-    expect(new AnswerBudget("compact").reserve(100)).toBe(1200);
-    expect(new AnswerBudget("detailed").reserve(100)).toBe(2400);
+    expect(new AnswerBudget("compact").reserve(100)).toBe(2400);
+    expect(new AnswerBudget("detailed").reserve(100)).toBe(4800);
   });
   it("fails closed for invalid concurrency settings", () => {
     vi.stubEnv("CHAT_MAX_CONCURRENT", "NaN");
@@ -27,20 +27,39 @@ describe("Capacity configuration and answer budgets", () => {
     controller.abort();
     await expect(waiting).rejects.toThrow();
   });
-  it("accounts for every model step including fallback", () => {
+  it("reserves the final input and output before admitting more research", () => {
     const budget = new AnswerBudget("compact");
-    budget.reserve(30_000);
-    budget.reserve(30_000);
-    budget.reserve(30_000);
-    expect(() => budget.reserve(30_000)).toThrow(/Antwortbudget/);
+    for (let i = 0; i < 3; i++) {
+      budget.reserve(20_000, "research");
+      budget.record(100);
+    }
+    expect(budget.canResearch(20_000)).toBe(false);
+    expect(() => budget.reserve(20_000, "research")).toThrow(/Antwortbudget/);
+    expect(budget.reserve(budget.maxStepInput)).toBe(2400);
+    expect(budget.reserved).toBeLessThanOrEqual(budget.maxTotal);
+    expect(() => budget.reserve(100)).toThrow();
     expect(() => new AnswerBudget("compact").reserve(100_000)).toThrow();
   });
-  it("caps cumulative output across steps", () => {
+  it.each(["compact", "detailed"] as const)("keeps the %s answer available after research exhausts its output budget", (detail) => {
+    const budget = new AnswerBudget(detail);
+    for (let i = 0; i < 3; i++) {
+      expect(budget.reserve(100, "research")).toBe(1200);
+      budget.record(1200);
+    }
+    expect(budget.canResearch(100)).toBe(false);
+    expect(budget.reserve(100)).toBe(budget.maxAnswerOutput);
+    budget.record(budget.maxAnswerOutput);
+    expect(budget.output).toBe(budget.maxResearchOutput + budget.maxAnswerOutput);
+  });
+  it("charges unreported provider usage against the research reservation", () => {
     const budget = new AnswerBudget("compact");
-    budget.output = 2350;
-    expect(budget.reserve(100)).toBe(50);
-    budget.output = 2400;
-    expect(() => budget.reserve(100)).toThrow();
+    for (let i = 0; i < 3; i++) {
+      budget.reserve(100, "research");
+      budget.record(undefined);
+    }
+    expect(budget.output).toBe(3600);
+    expect(budget.canResearch(100)).toBe(false);
+    expect(budget.reserve(100)).toBe(2400);
   });
   it("counts non-ASCII bytes conservatively and validates bounded input", () => {
     expect(tokenBound("ä🙂")).toBe(6);

@@ -5,6 +5,7 @@ import { Fundstellensammler, SYSTEM_ANWEISUNG, baueKatalog, baueKontextblock, ba
 import { requireKontext } from "@/lib/auth/user";
 import { acquireCapacity, reserveModelCall, withCapacity } from "@/lib/capacity";
 import { AnswerBudget, chatRequestSchema, tokenBound, type GenerationStatus } from "@/lib/chat-contract";
+import { fitAnswerMessages } from "@/lib/chat-answer-context";
 import { beginGeneration, existingRun, generationContext, saveGeneration } from "@/lib/chat-generation";
 import { ladeSammlungen } from "@/lib/collections";
 import { RateLimitError, ResourceBusyError, ToolUnavailableError, ValidationError } from "@/lib/errors";
@@ -83,6 +84,7 @@ export async function POST(request: Request) {
         let releaseCapacity: (() => Promise<void>) | undefined;
         let lastSaved = Date.now();
         let firstTokenMs: number | null = null;
+        let finishReason: string | undefined;
         const timings: Record<string, number> = {};
         const usage: Usage = { inputTokens: 0, outputTokens: 0, inputTokenDetails: { cacheReadTokens: 0 } };
         const send = (event: unknown) => {
@@ -127,7 +129,7 @@ export async function POST(request: Request) {
             modelId = direct ? planModel.id : modellFuerWerkzeuge(planModel.id);
             const budget = new AnswerBudget(input.detail);
             let instructions = direct ? SYSTEM_ANWEISUNG : `${baueSystemanweisung(sammlungen)}\n\n${baueKatalog(sammlungen)}`;
-            instructions += input.detail === "detailed" ? "\nErklaere die Antwort ausfuehrlich, soweit die Quellen das erlauben." : "\nAntworte kompakt. Beginne mit dem Ergebnis und nenne dann nur die wesentlichen Belege.";
+            instructions += input.detail === "detailed" ? "\nErklaere die Antwort ausfuehrlich, soweit die Quellen das erlauben." : "\nAntworte kompakt in hoechstens 180 Woertern. Beginne mit dem Ergebnis und nenne dann nur die wesentlichen Belege.";
             let modelMessages: ModelMessage[] = history;
             let tools: ToolSet | undefined;
             let found = true;
@@ -149,34 +151,67 @@ export async function POST(request: Request) {
             }
             if (found) {
               const languageModel = await modell(modelId);
-              const createResult = (messages: ModelMessage[], final = false) => streamText({
-                model: languageModel, instructions, messages, tools,
-                maxRetries: 0, maxOutputTokens: budget.maxStepOutput, abortSignal: signal,
-                stopWhen: isStepCount(final ? 1 : hasQueries ? 6 : 3),
-                prepareStep: async ({ stepNumber, messages, instructions }) => {
-                  signal.throwIfAborted();
-                  const inputBound = tokenBound(messages) + tokenBound(instructions ?? "") + (tools ? 4096 : 512);
-                  const maxOutputTokens = budget.reserve(inputBound);
-                  const modelAdmissionStarted = Date.now();
-                  await reserveModelCall(modelId, inputBound + maxOutputTokens, { signal, onWait: () => phase("queued", "Warte auf freie Modellkapazitaet …") });
-                  modelAdmissionMs += Date.now() - modelAdmissionStarted;
-                  modelInvoked = true;
-                  modelCallsStarted += 1;
-                  phase("generating", tools && !final && stepNumber === 0 ? "Passende Datenquelle wird ausgewaehlt …" : "Antwort wird formuliert …");
-                  return { maxOutputTokens, ...(final ? { toolChoice: "none" as const } : tools && stepNumber === 0 ? { toolChoice: "required" as const } : {}) };
-                },
-                onStepEnd: ({ usage: stepUsage }) => {
-                  if (typeof stepUsage.inputTokens === "number" && typeof stepUsage.outputTokens === "number") modelCallsMetered += 1;
-                  usage.inputTokens += stepUsage.inputTokens ?? 0;
-                  usage.outputTokens += stepUsage.outputTokens ?? 0;
-                  usage.inputTokenDetails.cacheReadTokens += stepUsage.inputTokenDetails?.cacheReadTokens ?? 0;
-                  budget.output += stepUsage.outputTokens ?? 0;
-                },
-              });
-              const consume = async (result: ReturnType<typeof createResult>) => {
+              const stepLimit = hasQueries ? 6 : 3;
+              let answerStarted = false;
+              const finalInstructions = `${instructions}\nBeantworte jetzt die Nutzerfrage anhand der vorhandenen Ergebnisse. Keine weiteren Werkzeuge. Benenne fehlende oder gekuerzte Belege ehrlich und schliesse die Antwort vollstaendig ab.`;
+              const createResult = (messages: ModelMessage[], final = false) => {
+                const answerSteps = new Set<number>();
+                const result = streamText({
+                  model: languageModel, instructions, messages, tools,
+                  maxRetries: 0, maxOutputTokens: budget.maxStepOutput, abortSignal: signal,
+                  stopWhen: isStepCount(final ? 1 : stepLimit),
+                  prepareStep: async ({ stepNumber, messages, instructions }) => {
+                    signal.throwIfAborted();
+                    let inputBound = tokenBound(messages) + tokenBound(instructions ?? "") + (tools ? 4096 : 512);
+                    const answer = final || !tools || stepNumber >= stepLimit - 1 || !budget.canResearch(inputBound);
+                    let answerMessages: ModelMessage[] | undefined;
+                    if (answer) {
+                      answerMessages = fitAnswerMessages(messages, budget.maxStepInput - tokenBound(finalInstructions) - 512);
+                      inputBound = tokenBound(answerMessages) + tokenBound(finalInstructions) + 512;
+                    }
+                    const maxOutputTokens = budget.reserve(inputBound, answer ? "answer" : "research");
+                    if (answer) { answerStarted = true; answerSteps.add(stepNumber); }
+                    const modelAdmissionStarted = Date.now();
+                    await reserveModelCall(modelId, inputBound + maxOutputTokens, { signal, onWait: () => phase("queued", "Warte auf freie Modellkapazitaet …") });
+                    modelAdmissionMs += Date.now() - modelAdmissionStarted;
+                    modelInvoked = true;
+                    modelCallsStarted += 1;
+                    phase("generating", !answer && stepNumber === 0 ? "Passende Datenquelle wird ausgewaehlt …" : "Antwort wird formuliert …");
+                    return { maxOutputTokens, ...(answer
+                      ? { toolChoice: "none" as const, activeTools: [], messages: answerMessages, instructions: finalInstructions }
+                      : stepNumber === 0 ? { toolChoice: "required" as const } : {}) };
+                  },
+                  onStepEnd: ({ usage: stepUsage }) => {
+                    if (typeof stepUsage.inputTokens === "number" && typeof stepUsage.outputTokens === "number") modelCallsMetered += 1;
+                    usage.inputTokens += stepUsage.inputTokens ?? 0;
+                    usage.outputTokens += stepUsage.outputTokens ?? 0;
+                    usage.inputTokenDetails.cacheReadTokens += stepUsage.inputTokenDetails?.cacheReadTokens ?? 0;
+                    budget.record(stepUsage.outputTokens);
+                  },
+                });
+                return { result, answerSteps };
+              };
+              const consume = async ({ result, answerSteps }: ReturnType<typeof createResult>) => {
+                finishReason = undefined;
+                let stepNumber = 0;
+                let stepText = "";
+                let calledTools = false;
                 for await (const part of result.stream) {
                   signal.throwIfAborted();
-                  if (part.type === "text-delta") { text(part.text); await persist(); }
+                  if (part.type === "text-delta") {
+                    // Research can contain a preamble or hit its own output cap.
+                    // Publish it only if that step actually finishes an answer.
+                    if (answerSteps.has(stepNumber)) { text(part.text); await persist(); }
+                    else stepText += part.text;
+                  }
+                  else if (part.type === "tool-call") calledTools = true;
+                  else if (part.type === "finish-step") {
+                    finishReason = part.finishReason;
+                    if (!answerSteps.has(stepNumber) && finishReason === "stop" && !calledTools) text(stepText);
+                    stepNumber += 1;
+                    stepText = "";
+                    calledTools = false;
+                  }
                   else if (part.type === "error") throw part.error;
                   else if (part.type === "tool-result" || part.type === "tool-error") {
                     // The SDK turns a rejected execute() into tool-error. Overload
@@ -194,10 +229,11 @@ export async function POST(request: Request) {
               };
               const result = createResult(modelMessages);
               await consume(result);
-              if (!content.trim() && tools && steps.length) {
-                await consume(createResult([...modelMessages, ...await result.responseMessages,
-                  { role: "user", content: "Beantworte die Frage jetzt anhand der Werkzeugergebnisse. Keine weiteren Werkzeuge." }], true));
+              if (tools && !answerStarted && (finishReason !== "stop" || !content.trim())) {
+                await consume(createResult([...modelMessages, ...await result.result.responseMessages], true));
               }
+              if (finishReason === "length") throw new ValidationError("Die Antwort ist unvollstaendig, weil das Ausgabelimit erreicht wurde.");
+              if (finishReason !== "stop") throw new Error("Das Modell hat die Antwort nicht abgeschlossen.");
               if (!content.trim()) throw new Error("Das Modell hat keine Antwort geliefert.");
             }
           }
@@ -221,7 +257,7 @@ export async function POST(request: Request) {
           const usageComplete = modelCallsStarted === modelCallsMetered;
           console.log(JSON.stringify({ event: "chat_run", requestId: run.id, attempt: run.attempt, status, model: modelId, modelInvoked,
             firstTokenMs, durationMs: Date.now() - startedAt, chatAdmissionMs, modelAdmissionMs, phases: timings,
-            steps: steps.length, modelCallsStarted, usage, usageComplete }));
+            steps: steps.length, modelCallsStarted, finishReason, usage, usageComplete }));
           send({ type: "done", status, modelInvoked, usage, usageComplete });
           connected = false;
           try { controller.close(); } catch { /* disconnected */ }
