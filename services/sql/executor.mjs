@@ -98,14 +98,21 @@ export class SqlExecutor {
     const signal = AbortSignal.any([AbortSignal.timeout(this.blobTimeoutMs), ...(outerSignal ? [outerSignal] : [])]);
     const cached = this.cache.get(path);
     // A pathname is mutable. Revalidate against origin EVERY time; only a 304
-    // for the exact cached ETag allows reuse. No stale-cache fallback on error.
+    // for the requested cached ETag allows reuse. No stale-cache fallback on error.
     const result = await this.blobGet(path, {
       access: "private", useCache: false, abortSignal: signal,
+      // This service is provisioned with the store's read-write token. Pin it so
+      // the SDK cannot prefer a different/unauthorized ambient OIDC identity.
+      token: process.env.BLOB_READ_WRITE_TOKEN,
       ...(cached?.etag ? { ifNoneMatch: cached.etag } : {}),
     });
     if (!result) { this.evict(path); return new Uint8Array(); }
     if (result.statusCode === 304) {
-      if (!cached || result.blob.etag !== cached.etag) throw new SqlServiceError("Ungueltige Datenbankversion vom Dateispeicher.");
+      // Blob can omit ETag on 304. The conditional response still validates the
+      // ETag we sent; an unsolicited 304 or a conflicting ETag is invalid.
+      if (!cached?.etag || (result.blob.etag && result.blob.etag !== cached.etag)) {
+        throw new SqlServiceError("Ungueltige Datenbankversion vom Dateispeicher.");
+      }
       // Refresh LRU order only if this version is still the stored entry.
       if (this.cache.get(path) === cached) { this.cache.delete(path); this.cache.set(path, cached); }
       return cached.bytes;

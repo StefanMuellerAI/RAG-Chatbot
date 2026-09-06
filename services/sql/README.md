@@ -25,6 +25,10 @@ fuer die jeweilige Umgebung hinterlegen:
 - `PORT=8080`: Vercel muss den HTTP-Port des Containers kennen. `EXPOSE` allein
   konfiguriert den Vercel-Zielport nicht; ohne `PORT` verwendet Vercel Port 80.
 
+Der SQL-Dienst uebergibt `BLOB_READ_WRITE_TOKEN` explizit an das Blob-SDK.
+Damit bleibt der konfigurierte Speicherzugang auch dann aktiv, wenn Vercel
+zusaetzlich eine OIDC-Identitaet und `BLOB_STORE_ID` bereitstellt.
+
 Das Deployment erfolgt aus dem Repository-Hauptverzeichnis. Fuer lokale
 Vercel-Befehle CLI 59.11.7 verwenden, zum Beispiel `npx vercel@59.11.7`.
 CLI 53.4.0 kennt die benoetigten privaten
@@ -83,7 +87,9 @@ antwortet mit 429 und `Retry-After: 2`. Keine automatischen Wiederholungen.
 
 Jeder Cache-Zugriff revalidiert die konkrete ETag am Blob-Ursprung mit
 `useCache: false` und `If-None-Match`. Nur ein passendes 304 verwendet die Bytes
-erneut. Ueberschreiben und Loeschen werden damit beim naechsten Zugriff erkannt;
+erneut. Blob kann dabei den ETag-Antwortheader weglassen; die 304-Antwort
+bestaetigt dann die angefragte Version. Ein abweichender ETag wird abgelehnt.
+Ueberschreiben und Loeschen werden damit beim naechsten Zugriff erkannt;
 bei Fehlern werden keine alten Daten geliefert. Der LRU-Cache ist nach Bytes
 begrenzt und durch den geprueften Mandantenpfad getrennt.
 

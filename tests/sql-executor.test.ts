@@ -161,6 +161,44 @@ describe("isolated SQL workers", () => {
 });
 
 describe("versioned bounded Blob cache", () => {
+  it("uses the configured store token even when an ambient OIDC identity exists", async () => {
+    vi.stubEnv("BLOB_READ_WRITE_TOKEN", "configured-store-token");
+    vi.stubEnv("VERCEL_OIDC_TOKEN", "unrelated-oidc-identity");
+    vi.stubEnv("BLOB_STORE_ID", "another-store");
+    const source = vi.fn<typeof get>().mockImplementation(async (_path, options) => {
+      if (options.token !== "configured-store-token") throw new Error("403 Forbidden");
+      return blob();
+    });
+    await expect(executor({ blobGet: source }).run(collection, "SELECT COUNT(*) FROM records"))
+      .resolves.toMatchObject({ rows: [[250]] });
+  });
+
+  it("reuses the requested version when Blob omits ETag on a 304", async () => {
+    const source = vi.fn<typeof get>()
+      .mockResolvedValueOnce(blob())
+      .mockResolvedValueOnce(unchanged(""))
+      .mockResolvedValueOnce(unchanged(""));
+    const service = executor({ blobGet: source });
+    const query = "SELECT COUNT(*) FROM records";
+    for (let i = 0; i < 3; i++) {
+      await expect(service.run(collection, query)).resolves.toMatchObject({ rows: [[250]] });
+    }
+    expect(source.mock.calls[1][1].ifNoneMatch).toBe('"v1"');
+    expect(source.mock.calls[2][1].ifNoneMatch).toBe('"v1"');
+    expect(service.stats().cachedBytes).toBe(bytes.byteLength);
+  });
+
+  it("rejects a 304 without a cached validator or with a conflicting ETag", async () => {
+    const source = vi.fn<typeof get>()
+      .mockResolvedValueOnce(unchanged(""))
+      .mockResolvedValueOnce(blob())
+      .mockResolvedValueOnce(unchanged('"different-version"'));
+    const service = executor({ blobGet: source });
+    await expect(service.run(collection, "SELECT 1")).rejects.toThrow("Datenbankversion");
+    await service.run(collection, "SELECT 1");
+    await expect(service.run(collection, "SELECT 1")).rejects.toThrow("Datenbankversion");
+  });
+
   it("revalidates ETags at origin, sees replacements and does not serve deleted data", async () => {
     const source = vi.fn<typeof get>()
       .mockResolvedValueOnce(blob())
