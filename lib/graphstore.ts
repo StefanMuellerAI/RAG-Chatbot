@@ -1,4 +1,4 @@
-import { FalkorDB } from "falkordb";
+import type { FalkorDB } from "falkordb";
 import { checkIngestionCapacity } from "./capacity";
 import type { CollectionSchema } from "./collection-kinds";
 import { MissingConfigError, optionalEnv } from "./env";
@@ -23,12 +23,17 @@ const CELL_MAX_CHARS = 200;
 
 let clientPromise: Promise<FalkorDB> | undefined;
 
-/** Ein Client pro Prozess; bei Verbindungsfehlern wird beim naechsten Aufruf neu verbunden. */
+/**
+ * Ein Client pro Prozess; bei Verbindungsfehlern wird beim naechsten Aufruf
+ * neu verbunden. Das Paket wird erst hier geladen: Die Chat-Function
+ * importiert dieses Modul fuer das Cypher-Werkzeug, die meisten Fragen
+ * brauchen es aber nie — beim Kaltstart soll es nicht mitgeladen werden.
+ */
 async function getClient(): Promise<FalkorDB> {
   const url = optionalEnv("FALKORDB_URL");
   if (!url) throw new MissingConfigError(["FALKORDB_URL"]);
 
-  clientPromise ??= FalkorDB.connect({ url }).catch((error: unknown) => {
+  clientPromise ??= import("falkordb").then(({ FalkorDB }) => FalkorDB.connect({ url })).catch((error: unknown) => {
     clientPromise = undefined;
     throw new Error(
       `Verbindung zu FalkorDB fehlgeschlagen: ${error instanceof Error ? error.message : String(error)}`,
